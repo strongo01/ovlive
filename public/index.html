@@ -1,0 +1,1503 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f97316">
+  <title>OVLive — realtime reisplanner</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101317;--panel:#191e24;--line:#303842;--muted:#a8b0ba;--text:#f6f7f9;--accent:#fb923c;--green:#86efac;--red:#fca5a5}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,sans-serif}
+    main{max-width:900px;margin:auto;padding:28px 18px 60px}.brand{display:flex;gap:12px;align-items:center;margin-bottom:24px}.logo{background:var(--accent);color:#1b1208;border-radius:14px;padding:9px 12px;font-weight:900}
+    h1{font-size:clamp(28px,5vw,42px);line-height:1.1;margin:0}p{color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px;margin:16px 0}
+    label{display:block;font-size:13px;color:var(--muted);margin:0 0 6px}input,select,button{font:inherit;border-radius:10px;border:1px solid var(--line);padding:12px;background:#11161b;color:var(--text);width:100%}
+    button{background:var(--accent);color:#241405;border:0;font-weight:750;cursor:pointer;margin-top:12px}
+    button.secondary{background:#303842;color:var(--text);margin:6px 0 8px}button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:var(--muted);font-size:13px}.status{padding:10px 12px;border-radius:10px;background:#222a32;margin:8px 0}.ok{color:var(--green)}.bad{color:var(--red)}
+    .journey{border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}.leg{padding:10px 0;border-bottom:1px solid var(--line)}.leg:last-child{border-bottom:0}.pill{font-size:12px;border-radius:999px;background:#2a3038;padding:3px 8px;display:inline-block;margin-right:6px}.source{font-size:12px;color:var(--muted);overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#dbe4ee;font-size:12px}
+
+    .journey-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:10px 0;color:var(--muted);font-size:14px}
+    .leg-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+    .leg-time{font-variant-numeric:tabular-nums;font-weight:650}
+    .rt-status{border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-top:10px;font-size:13px}
+    .rt-ok{color:var(--green)}.rt-unknown{color:#fcd34d}.rt-cancelled{color:var(--red)}
+    .rt-details{color:var(--muted);margin-top:5px;font-size:12px}
+    .alert-card{border:1px solid #6b4b26;background:#29231c;padding:12px;border-radius:12px;margin:8px 0}
+    .alert-card p{margin:5px 0;font-size:13px}
+    .alert-heading{margin-top:20px}
+    @media(max-width:600px){.grid{grid-template-columns:1fr}.panel{padding:14px}}
+  
+.mode-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.5rem;
+}
+.mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #a7a7a7;
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+}
+.mode-chip input {
+  width: auto;
+  margin: 0;
+  accent-color: #e87524;
+}
+.mode-chip:has(input:checked) {
+  border-color: #e87524;
+  background: rgba(232, 117, 36, 0.12);
+}
+.mode-help {
+  margin-top: 0.5rem;
+}
+
+</style>
+</head>
+<body>
+<main>
+  <div class="brand"><div class="logo">OV</div><div><h1>OVLive</h1><div class="muted">Open data · reisadvies · realtime diagnose</div></div></div>
+  <p>Een testbare Cloudflare-versie van een Nederlandse OV-reisplanner. De planner gebruikt Transitous; realtimefeeds worden apart gecontroleerd. Een ontbrekende update wordt nooit als “op tijd” gepresenteerd.</p>
+
+  <section class="panel">
+    <h2>Reis plannen</h2>
+    <p class="muted">Zoek vertrek- en aankomstplek en kies het juiste resultaat. Je kunt ook latitude,longitude of een Transitous-stop-ID invoeren. Geocodering gebruikt Photon/OpenStreetMap; de route wordt berekend door Transitous.</p>
+    <div class="grid">
+      <div><label for="from">Van (plaats, adres of halte)</label><input id="from" value="Den Haag Centraal" autocomplete="off"><button type="button" id="fromFind" class="secondary">Zoek vertrekplek</button><select id="fromChoice" aria-label="Kies vertrekplek"><option value="">Kies een gevonden plek…</option></select></div>
+      <div><label for="to">Naar (plaats, adres of halte)</label><input id="to" value="Utrecht Centraal" autocomplete="off"><button type="button" id="toFind" class="secondary">Zoek bestemming</button><select id="toChoice" aria-label="Kies bestemming"><option value="">Kies een gevonden plek…</option></select></div>
+      <div><label for="when">Vertrektijd (optioneel)</label><input id="when" type="datetime-local"></div>
+      <div class="mode-field">
+        <label>Vervoersmiddelen</label>
+        <div class="mode-picker" role="group" aria-label="Kies vervoersmiddelen">
+          <label class="mode-chip"><input type="checkbox" name="transitMode" value="train" checked><span>🚆 Trein</span></label>
+          <label class="mode-chip"><input type="checkbox" name="transitMode" value="bus" checked><span>🚌 Bus</span></label>
+          <label class="mode-chip"><input type="checkbox" name="transitMode" value="metro" checked><span>🚇 Metro</span></label>
+          <label class="mode-chip"><input type="checkbox" name="transitMode" value="tram" checked><span>🚊 Tram</span></label>
+          <label class="mode-chip"><input type="checkbox" name="transitMode" value="ferry" checked><span>⛴️ Veerpont</span></label>
+        </div>
+        <p class="muted mode-help">Vink één of meer vervoersmiddelen aan.</p>
+      </div>
+      <div>
+        <label for="walkingLimit">Maximaal lopen naar en vanaf OV</label>
+        <select id="walkingLimit">
+          <option value="900">15 minuten</option>
+          <option value="1800" selected>30 minuten</option>
+          <option value="2700">45 minuten</option>
+        </select>
+        <p class="muted mode-help">Geldt voor het lopen vóór de eerste rit en ná de laatste rit. Transitous kan zelf een lagere limiet afdwingen.</p>
+      </div>
+
+        <div>
+          <label for="initialWaitLimit">Maximale wachttijd vóór de eerste OV-rit</label>
+          <select id="initialWaitLimit">
+            <option value="1">1 minuut</option>
+            <option value="2" selected>2 minuten</option>
+            <option value="3">3 minuten</option>
+            <option value="5">5 minuten</option>
+            <option value="10">10 minuten</option>
+          </select>
+          <p class="muted mode-help">Geldt alleen voor de eerste halte. OVLive kan je geplande vertrektijd vanaf het beginpunt later zetten.</p>
+        </div>
+
+    </div>
+    <button id="planBtn">Zoek reizen</button>
+    <div id="planStatus" class="muted" aria-live="polite"></div>
+    <div id="journeys"></div>
+  </section>
+
+  <section class="panel" id="ndovLocalDiagnosticsPanel" hidden>
+    <h2>NDOV-streams — lokale integratietest</h2>
+    <p class="muted">Alleen beschikbaar op localhost. Bekijk en beheer een alarmgestuurde collector voor KV78Turbo en BISON (KV6/KV15/KV17). De cache is duurzaam maar begrensd en dekt niet gegarandeerd elke Nederlandse rit.</p>
+    <div class="grid">
+      <div><label for="ndovLocalSeconds">Verzamelduur</label><select id="ndovLocalSeconds"><option value="30">30 seconden</option><option value="60">60 seconden</option><option value="120" selected>120 seconden</option></select></div>
+      <div><label>&nbsp;</label><button type="button" id="ndovLocalStartButton">Verzamel NDOV-data</button></div>
+    </div>
+    <button type="button" class="secondary" id="ndovLocalStatusButton">Ververs NDOV-status</button>
+    <div class="grid">
+      <div><button type="button" id="ndovContinuousEnableButton">Automatische collector inschakelen</button></div>
+      <div><button type="button" class="secondary" id="ndovContinuousDisableButton">Automatische collector uitschakelen</button></div>
+    </div>
+    <p class="muted">Collector gebruikt korte verbindingen met rustpauzes. De cache is begrensd en is geen garantie op landelijke dekking.</p>
+    <div id="ndovLocalStatus" class="status" aria-live="polite">Nog geen status opgehaald.</div>
+    <pre id="ndovLocalDetails"></pre>
+  </section>
+
+  <section class="panel">
+    <h2>Realtimebron controleren</h2>
+    <p class="muted">Controleert of OpenOV GTFS-RT-feeds opgehaald en gedecodeerd kunnen worden en toont de timestamp uit de feed. Dit is geen bewijs van volledige landelijke dekking.</p>
+    <button id="healthBtn">Test OpenOV-feeds</button>
+    <div id="healthStatus" aria-live="polite"></div>
+    <div id="healthDetails"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Actuele meldingen / vertragingen</h2>
+    <div class="grid"><div><label for="feedKind">Feed</label><select id="feedKind"><option value="tripUpdates">Ritupdates / vertragingen / annuleringen</option><option value="alerts">Storingsmeldingen</option><option value="trainUpdates">Treinupdates</option><option value="vehiclePositions">Voertuigposities</option></select></div><div><label for="feedLimit">Maximaal aantal items</label><select id="feedLimit"><option>100</option><option selected>300</option><option>500</option><option>1000</option></select></div></div>
+    <button id="feedBtn">Laad realtime-data</button>
+    <div id="feedStatus" aria-live="polite"></div><div id="feedRows"></div>
+  </section>
+
+      <section class="panel" id="ovapiTransitousMatchPanel">
+    <h2>Transitous ↔ OVAPI koppelingstest (experimenteel)</h2>
+    <p class="muted">Deze diagnose vergelijkt de laatste routeplanneruitvoer met OVAPI op basis van de lijn, lokale datum, geplande tijden en een unieke OVAPI-rit op beide haltegebieden. Dit is een kandidaatmatch, geen gedeelde officiële rit-ID. De uitkomst wordt niet teruggeschreven in de reisplanner.</p>
+    <div class="grid">
+      <div><label for="ovapiTransitousFromArea">OVAPI-haltegebied vertrek</label><input id="ovapiTransitousFromArea" value="utrler" maxlength="80"></div>
+      <div><label for="ovapiTransitousToArea">OVAPI-haltegebied aankomst</label><input id="ovapiTransitousToArea" value="utrmyl" maxlength="80"></div>
+      <div><label for="ovapiTransitousFromStopId">Transitous-stop-ID vertrek</label><input id="ovapiTransitousFromStopId" value="nl-OpenOV_3924352" maxlength="200"></div>
+      <div><label for="ovapiTransitousToStopId">Transitous-stop-ID aankomst</label><input id="ovapiTransitousToStopId" value="nl-OpenOV_3924329" maxlength="200"></div>
+      <div><label for="ovapiTransitousLineFilter">Lijnnummer (optioneel)</label><input id="ovapiTransitousLineFilter" value="" maxlength="20" placeholder="Leeg = alle passende buslijnen"></div>
+    </div>
+    <p class="muted">Klik eerst bovenaan op ‘Zoek reizen’. Daarna vergelijkt deze knop de busritten uit het laatste plannerantwoord die precies bij de ingestelde Transitous-halte-ID’s passen. OVAPI-plantijden mogen maximaal 4 minuten verschillen om roosterverschillen te onderzoeken; actuele vertragingen blijven afhankelijk van verse bronupdates.</p>
+    <button type="button" id="ovapiTransitousMatchButton">Vergelijk laatste reisopties met OVAPI</button>
+    <div id="ovapiTransitousMatchStatus" class="muted" aria-live="polite"></div>
+    <div id="ovapiTransitousMatchResults"></div>
+  </section>
+
+<section class="panel" id="ovapiTestPanel">
+    <h2>OVAPI-realtime vergelijken (parallelle test)</h2>
+    <p class="muted">Deze test gebruikt KV78turbo/OVAPI naast de bestaande OpenOV-realtimeverwerking. De testgegevens worden niet toegevoegd aan of gebruikt om de reisresultaten te wijzigen.</p>
+    <div class="grid">
+      <div><label for="ovapiFromArea">Eerste haltegebied (van)</label><input id="ovapiFromArea" value="utrler" maxlength="80" autocomplete="off"></div>
+      <div><label for="ovapiToArea">Tweede haltegebied (naar)</label><input id="ovapiToArea" value="utrmyl" maxlength="80" autocomplete="off"></div>
+      <div><label for="ovapiLineFilter">Lijnnummer (optioneel)</label><input id="ovapiLineFilter" value="5" maxlength="20" autocomplete="off"></div>
+    </div>
+    <button type="button" id="ovapiCompareButton">Vergelijk dezelfde ritten</button>
+    <div id="ovapiTestStatus" class="muted" aria-live="polite"></div>
+    <div id="ovapiTestResults"></div>
+  </section>
+
+  <footer class="source">Bronnen: <a href="https://openov.nl/" target="_blank" rel="noreferrer">openOV</a> · <a href="https://transitous.org/sources/" target="_blank" rel="noreferrer">Transitous-bronnen</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap</a>. Realtime-data is best-effort en kan ontbreken of verouderd zijn.</footer>
+</main>
+<script>
+// OVLIVE_OPENOV_CONFIDENCE_HOTFIX_V1
+const $ = id => document.getElementById(id);
+const fmt = t => t ? new Date(t).toLocaleString('nl-NL',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : 'onbekend';
+const esc = s => String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path){const r=await fetch(path);const data=await r.json().catch(()=>({error:'Ongeldig antwoord'}));if(!r.ok)throw new Error(data.error||`HTTP ${r.status}`);return data;}
+
+async function findPlaces(inputId, selectId, statusId) {
+  const query = $(inputId).value.trim();
+  const select = $(selectId);
+  select.innerHTML = '<option value="">Zoekresultaten laden…</option>';
+  try {
+    const data = await api('/api/geocode?q=' + encodeURIComponent(query));
+    const features = data.features || [];
+    select.innerHTML = '<option value="">Kies de juiste plek…</option>' + features.map((f, i) => {
+      const p = f.properties || {};
+      const coords = f.geometry?.coordinates || [];
+      const label = [p.name, p.street, p.housenumber, p.postcode, p.city || p.locality, p.state].filter(Boolean).join(', ');
+      return `<option value="${esc(coords[1] + ',' + coords[0])}" data-label="${esc(label)}">${esc(label || query)} (${esc(p.osm_value || p.type || 'plek')})</option>`;
+    }).join('');
+    if (features.length === 1) select.selectedIndex = 1;
+    $(statusId).textContent = features.length ? `${features.length} resultaten gevonden. Kies de juiste plek.` : 'Geen plek gevonden; probeer een specifiekere naam.';
+  } catch(e) {
+    select.innerHTML = '<option value="">Geen resultaten</option>';
+    $(statusId).textContent = e.message;
+  }
+}
+$('fromFind').onclick = () => findPlaces('from','fromChoice','planStatus');
+$('toFind').onclick = () => findPlaces('to','toChoice','planStatus');
+$('fromChoice').onchange = () => { const o=$('fromChoice').selectedOptions[0]; if(o?.dataset.label) $('from').value=o.dataset.label; };
+$('toChoice').onchange = () => { const o=$('toChoice').selectedOptions[0]; if(o?.dataset.label) $('to').value=o.dataset.label; };
+function resolvePlace(inputId, choiceId) {
+  const raw = $(inputId).value.trim();
+  const selected = $(choiceId).value;
+  if (selected && $(choiceId).selectedOptions[0]?.dataset.label === raw) return selected;
+  if (/^-?\\d+(?:\\.\\d+)?\\s*,\\s*-?\\d+(?:\\.\\d+)?$/.test(raw)) return raw.replace(/\\s/g,'');
+  // Transitous stop IDs can be pasted directly.
+  if (/^[A-Za-z0-9_.:-]{3,200}$/.test(raw) && !/\\s/.test(raw)) return raw;
+  throw new Error(`Zoek en selecteer eerst de plek bij "${inputId === 'from' ? 'Van' : 'Naar'}".`);
+}
+
+
+function clock(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return date.toLocaleTimeString('nl-NL', {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function modeName(mode) {
+  const names = {
+    WALK: 'Lopen',
+    BUS: 'Bus',
+    TRAM: 'Tram',
+    SUBWAY: 'Metro',
+    RAIL: 'Trein',
+    REGIONAL_RAIL: 'Trein',
+    LONG_DISTANCE: 'Trein',
+    HIGH_SPEED_RAIL: 'Hogesnelheidstrein',
+    FERRY: 'Veerboot'
+  };
+  return names[String(mode || '').toUpperCase()] || mode || 'OV';
+}
+
+function lineTitle(leg) {
+  const mode = modeName(leg.mode);
+  if (leg.mode === 'WALK') return 'Lopen';
+
+  if (leg.routeShortName) {
+    return `${mode} ${leg.routeShortName}`;
+  }
+
+  return leg.displayName ||
+    leg.tripShortName ||
+    leg.routeLongName ||
+    mode;
+}
+
+function delayLabel(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 'vertraging niet opgegeven';
+  }
+
+  if (value === 0) return 'geen vertraging opgegeven; op tijd niet bevestigd';
+
+  if (Math.abs(value) < 60) {
+    return value > 0
+      ? `${value} sec vertraging`
+      : `${Math.abs(value)} sec eerder`;
+  }
+
+  const minutes = Math.round(Math.abs(value) / 6) / 10;
+
+  return value > 0
+    ? `${minutes} min vertraging`
+    : `${minutes} min eerder`;
+}
+
+function stopEventHtml(label, event, scheduledValue) {
+  if (!event || (!event.time && typeof event.delaySeconds !== 'number')) {
+    return '';
+  }
+
+  const scheduledMs = Date.parse(scheduledValue || '');
+  const delay = typeof event.delaySeconds === 'number'
+    ? event.delaySeconds
+    : null;
+
+  // KV78 targetTime is de lokale doeltijd. De afwijking is het
+  // verschil tussen de verwachte tijd en die doeltijd.
+  const targetClock = String(event.targetTime || '')
+    .match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+
+  let expectedFromTargetMs = null;
+
+  if (
+    !event.time &&
+    targetClock &&
+    delay !== null &&
+    Number.isFinite(scheduledMs)
+  ) {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Amsterdam',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(new Date(scheduledMs));
+
+    const local = Object.fromEntries(
+      parts
+        .filter(part => part.type !== 'literal')
+        .map(part => [part.type, Number(part.value)])
+    );
+
+    const scheduledClockSeconds =
+      local.hour * 3600 +
+      local.minute * 60 +
+      local.second;
+
+    const targetClockSeconds =
+      Number(targetClock[1]) * 3600 +
+      Number(targetClock[2]) * 60 +
+      Number(targetClock[3] || 0);
+
+    let clockDeltaSeconds =
+      targetClockSeconds - scheduledClockSeconds;
+
+    // Kies de dichtstbijzijnde dag, ook rond middernacht.
+    if (clockDeltaSeconds > 43200) clockDeltaSeconds -= 86400;
+    if (clockDeltaSeconds < -43200) clockDeltaSeconds += 86400;
+
+    const targetMs = scheduledMs + clockDeltaSeconds * 1000;
+    expectedFromTargetMs = targetMs + delay * 1000;
+  }
+
+  // Oudere gegevens zonder targetTime behouden de bestaande fallback.
+  const expectedFromScheduleMs =
+    !event.time &&
+    expectedFromTargetMs === null &&
+    delay !== null &&
+    Number.isFinite(scheduledMs)
+      ? scheduledMs + delay * 1000
+      : null;
+
+  const expectedMs =
+    expectedFromTargetMs ?? expectedFromScheduleMs;
+
+  const time = event.time
+    ? clock(event.time)
+    : expectedMs !== null
+      ? clock(expectedMs)
+      : clock(scheduledValue);
+
+  const timeType = event.time
+    ? 'verwacht uit realtimebron'
+    : expectedFromTargetMs !== null
+      ? 'verwacht, berekend uit KV78-doeltijd + halteafwijking'
+      : expectedFromScheduleMs !== null
+        ? 'verwacht, berekend uit dienstregeling + vertraging'
+        : 'gepland';
+
+  const delayText = delay !== null
+    ? delayLabel(delay)
+    : 'geen vertraging voor deze halte opgegeven';
+
+  // Een berekende tijd is op zichzelf geen bevestiging dat de rit rijdt.
+  const colorClass =
+    !event.time || delay === null || delay > 60
+      ? 'rt-unknown'
+      : 'rt-ok';
+
+  return `<div>${esc(label)}: <span class="leg-time">${esc(time)}</span>
+    <span class="muted">(${esc(timeType)})</span>
+    <span class="${colorClass}">· ${esc(delayText)}</span></div>`;
+}function openovStatusSummary(rt) {
+  if (!rt || rt.status === "unknown") {
+    if (rt?.reason === "no_matching_realtime_trip") {
+      return "geen betrouwbare ritmatch gevonden";
+    }
+    if (rt?.reason === "realtime_feed_unavailable") {
+      return "realtimebron niet bereikbaar";
+    }
+    if (rt?.reason === "realtime_feed_stale") {
+      return "feed mogelijk verouderd";
+    }
+    return "realtime onbekend";
+  }
+
+  if (rt.status === "cancelled") {
+    return "annulering gemeld door OpenOV";
+  }
+
+  const events = [];
+
+  for (const [label, event] of [
+    ["vertrek", rt.departure],
+    ["aankomst", rt.arrival]
+  ]) {
+    if (!event) continue;
+
+    if (
+      event.delaySeconds != null &&
+      Number.isFinite(Number(event.delaySeconds))
+    ) {
+      const seconds = Math.trunc(Number(event.delaySeconds));
+      const value = seconds > 0
+        ? `+${seconds} sec`
+        : seconds < 0
+          ? `${seconds} sec`
+          : "0 sec";
+      events.push(`${label}: ${value}`);
+    } else if (event.time) {
+      events.push(`${label}: tijd beschikbaar, vertraging onbekend`);
+    }
+  }
+
+  const missingTripTimestamp =
+    /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ""));
+  const hasExplicitStopPrediction =
+    Boolean(rt.departure?.time || rt.arrival?.time);
+
+  const reliability = missingTripTimestamp || !hasExplicitStopPrediction
+    ? "uitvoering niet bevestigd"
+    : "halteprognoses beschikbaar";
+
+  return `${events.length ? events.join(" · ") : "geen bruikbare halteprognose"} · ${reliability}`;
+}
+
+function realtimeHtml(leg) {
+  if (leg.mode === 'WALK') {
+    const minutes = typeof leg.duration === 'number'
+      ? Math.round(leg.duration / 60)
+      : null;
+    const distance = typeof leg.distance === 'number'
+      ? `${Math.round(leg.distance)} m`
+      : null;
+    const details = [minutes != null ? `${minutes} min` : null, distance]
+      .filter(Boolean).join(' · ');
+    const prefix = leg.estimatedWalkingTime ? 'Geschatte looptijd · ' : '';
+
+    return `<div class="rt-details">${details ? `${prefix}${esc(details)}` : 'Loopverbinding'}</div>`;
+  }
+
+  const rt = leg.ndovRealtime?.status === 'cancelled'
+    ? { status: 'cancelled', freshnessNote: leg.ndovRealtime.note }
+    : leg.openovRealtime;
+
+  if (leg.cancelled === true || rt?.status === 'cancelled') {
+    return `<div class="rt-status rt-cancelled">
+      <strong>Rit uitgevallen volgens de beschikbare reisinformatie</strong>
+      ${rt?.freshnessNote ? `<div class="rt-details">${esc(rt.freshnessNote)}</div>` : ''}
+      <div class="rt-details">Controleer de actuele melding bij de vervoerder.</div>
+    </div>`;
+  }
+
+  if (leg.ndovRealtimeMatch?.status === 'ambiguous') {
+    const candidateCount = Number(leg.ndovRealtimeMatch.candidateCount);
+    const candidateText = Number.isFinite(candidateCount) && candidateCount > 0
+      ? `${candidateCount} mogelijke NDOV-ritten gevonden.`
+      : 'Meerdere mogelijke NDOV-ritten gevonden.';
+    return `<div class="rt-status">
+      <strong>NDOV · geen eenduidige ritmatch</strong>
+      <div class="rt-details">${esc(candidateText)} Realtimegegevens zijn bewust niet gekoppeld om een verkeerde rit te voorkomen.</div>
+    </div>`;
+  }
+
+  if (leg.ndovRealtime?.status === 'kv78_delay') {
+    const ndov = leg.ndovRealtime;
+    const kv78 = ndov.kv78 ?? ndov;
+    const kv6 = ndov.kv6 ?? (ndov.source === 'NDOV BISON KV6' ? ndov : null);
+    const departureLabel = kv78.departure?.stopCode
+      ? `Vertrek (KV78-halte ${kv78.departure.stopCode}${kv78.departure?.stopSideCode ? ` · zijde ${kv78.departure.stopSideCode}` : ''})`
+      : 'Vertrek volgens KV78Turbo';
+    const arrivalLabel = kv78.arrival?.stopCode
+      ? `Aankomst (KV78-halte ${kv78.arrival.stopCode}${kv78.arrival?.stopSideCode ? ` · zijde ${kv78.arrival.stopSideCode}` : ''})`
+      : 'Aankomst volgens KV78Turbo';
+    const stopEventHtmlWithZeroOnTime = (label, event, fallbackTime) => {
+      const html = stopEventHtml(label, event, fallbackTime);
+      const delaySeconds = event?.delaySeconds == null ? null : Number(event.delaySeconds);
+      if (delaySeconds !== 0 || !Number.isFinite(delaySeconds)) return html;
+
+      // Normalize common zero-delay labels if the underlying helper emits one.
+      // If it already says "Op tijd", preserve its existing markup unchanged.
+      const normalized = html
+        .replace(/\b0\s*min(?:uut|uten)?\s*0\s*(?:sec(?:onden)?|s)\s*(?:vertraging|te laat|achterstand)\b/gi, 'Op tijd')
+        .replace(/\b0\s*(?:sec(?:onden)?|s)\s*(?:vertraging|te laat|achterstand)\b/gi, 'Op tijd')
+        .replace(/\b(?:vertraging|te laat|achterstand)\s*(?:van\s*)?0\s*(?:sec(?:onden)?|s)\b/gi, 'Op tijd');
+      // An explicit zero is real data. Replace the old conservative fallback
+      // wording; do not confuse it with a missing delay (null), which never
+      // enters this wrapper.
+      const explicitZeroNormalized = normalized.replace(
+        /geen vertraging opgegeven;\s*op tijd niet bevestigd/gi,
+        'Op tijd volgens de actuele haltegegevens'
+      );
+      if (/\bop tijd\b(?!\s+niet bevestigd)/i.test(explicitZeroNormalized)) {
+        return explicitZeroNormalized;
+      }
+      return `${explicitZeroNormalized}<div class="rt-details">Op tijd volgens de actuele haltegegevens</div>`;
+    };
+    const departure = stopEventHtmlWithZeroOnTime(
+      departureLabel, kv78.departure, leg.from?.scheduledDeparture || leg.scheduledStartTime || leg.from?.departure || leg.startTime
+    );
+    const arrival = stopEventHtmlWithZeroOnTime(
+      arrivalLabel, kv78.arrival, leg.to?.scheduledArrival || leg.scheduledEndTime || leg.to?.arrival || leg.endTime
+    );
+    const kv6Seconds = kv6?.punctualitySeconds == null ? null : Math.trunc(Number(kv6.punctualitySeconds));
+    const kv6Abs = Math.abs(kv6Seconds ?? 0);
+    const kv6DelayLabel = kv6Seconds == null || !Number.isFinite(kv6Seconds)
+      ? null
+      : kv6Seconds > 0
+        ? `${Math.floor(kv6Abs / 60)} min ${kv6Abs % 60} sec vertraging volgens voertuigupdate`
+        : kv6Seconds < 0
+          ? `${Math.floor(kv6Abs / 60)} min ${kv6Abs % 60} sec te vroeg volgens voertuigupdate`
+          : 'Voertuigupdate meldt op tijd';
+    return `<div class="rt-status">
+      <strong class="rt-ok">NDOV · actuele haltegegevens (KV78Turbo)</strong>
+      ${kv6DelayLabel ? `<div class="rt-details">${esc(kv6DelayLabel)}${kv6?.vehicleNumber ? ` · voertuig ${esc(kv6.vehicleNumber)}` : ''}</div>` : ''}
+      ${kv78.freshnessNote ? `<div class="rt-details">${esc(kv78.freshnessNote)}</div>` : ''}
+      ${departure}
+      ${arrival}
+      ${!kv78.arrival ? '<div class="rt-details rt-unknown">Geen bevestigde KV78-aankomstprognose. De geplande aankomsttijd in het reisschema is niet realtime bevestigd.</div>' : ''}
+      <div class="rt-details">OpenOV-status: ${esc(openovStatusSummary(rt))}.</div>
+      <div class="rt-details">Matchmethode: ${esc(kv78.matchMethod || 'onbekend')} · Feedleeftijd: ${esc(kv78.feedAgeSeconds ?? '?')} sec.</div>
+    </div>`;
+  }
+
+  if (leg.ndovRealtime?.status === 'kv6_live') {
+    const ndov = leg.ndovRealtime?.kv6 ?? leg.ndovRealtime;
+    const delay = Math.trunc(Number(ndov.punctualitySeconds));
+    const seconds = Math.abs(delay);
+    const delayLabel = delay > 0
+      ? `${Math.floor(seconds / 60)} min ${seconds % 60} sec vertraging`
+      : delay < 0
+        ? `${Math.floor(seconds / 60)} min ${seconds % 60} sec te vroeg`
+        : 'Op tijd volgens de actuele voertuigupdate';
+    const vehicle = ndov.vehicleNumber ? `Voertuig: ${esc(ndov.vehicleNumber)}` : '';
+    const block = ndov.blockCode ? `Blok: ${esc(ndov.blockCode)}` : '';
+    const stop = ndov.currentStopCode ? `Laatste haltecode: ${esc(ndov.currentStopCode)}` : '';
+    const received = ndov.receivedAt && Number.isFinite(Date.parse(ndov.receivedAt))
+      ? new Date(ndov.receivedAt).toLocaleTimeString('nl-NL')
+      : `${esc(ndov.feedAgeSeconds ?? '?')} sec geleden`;
+    return `<div class="rt-status">
+      <strong>NDOV · live voertuigupdate (KV6)</strong>
+      <div class="rt-details">${esc(delayLabel)}</div>
+      ${vehicle ? `<div class="rt-details">${vehicle}</div>` : ''}
+      ${block ? `<div class="rt-details">${block}</div>` : ''}
+      ${stop ? `<div class="rt-details">${stop}</div>` : ''}
+      <div class="rt-details">Bijgewerkt: ${esc(received)} · exacte ritmatch via GTFS-NL</div>
+      <div class="rt-details">OpenOV-status: ${esc(openovStatusSummary(rt))}.</div>
+    </div>`;
+  }
+
+  if (!rt || rt.status === 'unknown') {
+    const reason = rt?.reason === 'realtime_feed_unavailable'
+      ? 'De realtimebron is niet bereikbaar.'
+      : rt?.reason === 'realtime_feed_stale'
+        ? 'De realtimebron bevat mogelijk verouderde gegevens.'
+        : rt?.reason === 'realtime_trip_update_stale'
+          ? 'Er is een passende rit gevonden, maar de ritupdate is verouderd of mist een betrouwbare timestamp.'
+          : 'Er is geen betrouwbare realtime-update voor deze rit gevonden.';
+
+    return `<div class="rt-status rt-unknown">
+      <strong>${rt?.reason === 'no_matching_realtime_trip' ? 'OpenOV · geen betrouwbare ritmatch' : 'OpenOV · realtime onbekend'}</strong>
+      <div class="rt-details">${esc(reason)} Dit betekent niet automatisch dat de rit op tijd rijdt of uitvalt.</div>
+    </div>`;
+  }
+
+  const departure = stopEventHtml(
+    'Vertrek',
+    rt.departure,
+    leg.from?.departure || leg.startTime
+  );
+
+  const arrival = stopEventHtml(
+    'Aankomst',
+    rt.arrival,
+    leg.to?.arrival || leg.endTime
+  );
+
+  const hasStopInformation = Boolean(departure || arrival);
+
+  const freshnessNoteHtml = rt.freshnessNote
+    ? `<div class="rt-details">${esc(rt.freshnessNote)}</div>`
+    : '';
+
+  // Feed-header versheid is geen bewijs dat deze specifieke ritupdate vers is.
+  const missingTripTimestamp = /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ''));
+  const hasExplicitStopPrediction = Boolean(rt.departure?.time || rt.arrival?.time);
+  if (missingTripTimestamp || !hasExplicitStopPrediction) {
+    return `<div class="rt-status rt-unknown">
+      <strong>OpenOV · ritmatch gevonden, uitvoering niet bevestigd</strong>
+      ${freshnessNoteHtml}
+      ${departure}
+      ${arrival}
+      <div class="rt-details">De weergegeven tijd kan zijn berekend uit de dienstregeling en een gemelde afwijking. Dat bewijst niet dat deze rit daadwerkelijk rijdt.</div>
+      <div class="rt-details">Een recente feed-header bewijst alleen dat de feed is opgehaald; zonder een betrouwbare tijdstempel of expliciete halteprognose blijft de ritstatus onbekend.</div>
+      <div class="rt-details">Matchmethode: ${esc(rt.matchMethod || 'onbekend')} · Controleer bij tegenstrijdige informatie de vervoerder.</div>
+    </div>`;
+  }
+
+  if (!hasStopInformation) {
+    return `<div class="rt-status rt-unknown">
+      <strong>Rit herkend, maar geen bruikbare halteprognose</strong>
+      ${freshnessNoteHtml}
+      <div class="rt-details">Er is geen verwachte tijd of vertraging voor de begin- en eindhalte beschikbaar.</div>
+      <div class="rt-details">Een ritmatch alleen betekent niet dat de rit op tijd rijdt.</div>
+    </div>`;
+  }
+
+  return `<div class="rt-status">
+    <strong class="rt-ok">OpenOV · halteprognoses beschikbaar</strong>
+    ${freshnessNoteHtml}
+    ${departure}
+    ${arrival}
+    <div class="rt-details">Matchmethode: ${esc(rt.matchMethod || 'onbekend')} · De informatie kan veranderen.</div>
+  </div>`;
+}
+
+function dutchAlert(value) {
+  return String(value || '')
+    .split(/\s+--\|/)[0]
+    .replace(/\s*\|\s*/g, ' ')
+    .trim();
+}
+
+function alertValidityText(alert) {
+  const active = Array.isArray(alert?.activePeriods)
+    ? alert.activePeriods : [];
+  const communication = Array.isArray(alert?.communicationPeriods)
+    ? alert.communicationPeriods : [];
+  const impact = Array.isArray(alert?.impactPeriods)
+    ? alert.impactPeriods : [];
+
+  const formatPeriods = periods => periods.map(period => {
+    const format = value => {
+      if (value == null || !Number.isFinite(Number(value))) return null;
+      return new Date(Number(value) * 1000).toLocaleString('nl-NL', {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      });
+    };
+
+    const start = format(period?.start);
+    const end = format(period?.end);
+
+    if (start && end) return `${start} – ${end}`;
+    if (start) return `vanaf ${start}`;
+    if (end) return `tot ${end}`;
+    return null;
+  }).filter(Boolean).join(' · ');
+
+  const details = [];
+
+  if (communication.length) {
+    details.push(`Meldingsperiode: ${formatPeriods(communication)}`);
+  } else if (active.length && !impact.length) {
+    details.push(`Weergaveperiode (active_period): ${formatPeriods(active)}`);
+  }
+
+  if (impact.length) {
+    details.push(`Impactperiode volgens bron: ${formatPeriods(impact)}`);
+  } else {
+    details.push('Impactperiode niet afzonderlijk opgegeven door de bron');
+  }
+
+  return details.join(' · ');
+}
+
+function renderAlerts(alerts) {
+  if (!Array.isArray(alerts) || alerts.length === 0) return '';
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const alert of alerts) {
+    const title = dutchAlert(alert.header) || 'Melding zonder titel';
+    const description = dutchAlert(alert.description);
+    const key = `${title.toLowerCase()}|${description.toLowerCase()}`;
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ ...alert, title, description });
+  }
+
+  return `<section class="alert-heading">
+    <h3>Bronmeldingen bij betrokken lijnen, haltes of ritten (${unique.length})</h3>
+    <p class="muted">Deze bronmeldingen horen bij een betrokken lijn, halte of rit. Dat bevestigt niet dat de verstoring tijdens jouw reis geldt. Controleer daarom de tekst en de geldigheidsperiode hieronder.</p>
+    ${unique.slice(0, 8).map(alert => `
+      <div class="alert-card">
+        <strong>${esc(alert.title)}</strong>
+        ${alert.description ? `<p>${esc(alert.description)}</p>` : ''}
+        <div class="muted">Periode-informatie: ${esc(alertValidityText(alert))}</div>
+        <div class="muted">Oorzaak: ${esc(alert.cause || 'onbekend')} · Effect: ${esc(alert.effect || 'onbekend')}</div>
+        ${alert.url && /^https?:\/\//i.test(alert.url)
+          ? `<p><a href="${esc(alert.url)}" target="_blank" rel="noreferrer">Meer informatie bij de bron</a></p>`
+          : ''}
+      </div>
+    `).join('')}
+    ${unique.length > 8 ? `<p class="muted">Nog ${unique.length - 8} meldingen niet weergegeven.</p>` : ''}
+  </section>`;
+}
+
+function timelineRealtimePrediction(leg, kind, scheduledTime) {
+  if (
+    !leg ||
+    leg.mode === 'WALK' ||
+    leg.cancelled === true ||
+    leg.ndovRealtime?.status === 'cancelled' ||
+    leg.openovRealtime?.status === 'cancelled'
+  ) {
+    return null;
+  }
+
+  // KV78Turbo: koppel de expliciete halteafwijking aan de geplande tijd.
+  // targetTime is op zichzelf geen bewijs van een voorspelde aankomst
+  // of vertrek.
+  if (leg.ndovRealtime?.status === 'kv78_delay') {
+    const kv78 = leg.ndovRealtime.kv78 ?? leg.ndovRealtime;
+    const event = kv78[kind];
+
+    if (event?.time && Number.isFinite(Date.parse(event.time))) {
+      return { time: event.time, source: 'NDOV KV78Turbo' };
+    }
+
+    const delay = event?.delaySeconds == null
+      ? NaN
+      : Number(event.delaySeconds);
+    const scheduledMs = Date.parse(scheduledTime || '');
+    const targetClock = String(event?.targetTime || '')
+      .match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    const feedAge = Number(kv78.feedAgeSeconds);
+
+    if (
+      event &&
+      targetClock &&
+      Number.isFinite(delay) &&
+      Number.isFinite(scheduledMs) &&
+      Number.isFinite(feedAge) &&
+      feedAge >= 0 &&
+      feedAge <= 180
+    ) {
+      // targetTime is de lokale KV78-doeltijd. Bepaal het verschil
+      // met de geplande tijd in Europe/Amsterdam om de datum en
+      // tijdzone correct te behouden, ook rond middernacht.
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/Amsterdam',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23'
+      }).formatToParts(new Date(scheduledMs));
+
+      const local = Object.fromEntries(
+        parts.filter(part => part.type !== 'literal')
+          .map(part => [part.type, Number(part.value)])
+      );
+
+      const scheduledClockSeconds =
+        local.hour * 3600 + local.minute * 60 + local.second;
+
+      const targetClockSeconds =
+        Number(targetClock[1]) * 3600 +
+        Number(targetClock[2]) * 60 +
+        Number(targetClock[3] || 0);
+
+      let clockDeltaSeconds =
+        targetClockSeconds - scheduledClockSeconds;
+
+      if (clockDeltaSeconds > 43200) clockDeltaSeconds -= 86400;
+      if (clockDeltaSeconds < -43200) clockDeltaSeconds += 86400;
+
+      const targetMs = scheduledMs + clockDeltaSeconds * 1000;
+
+      return {
+        time: new Date(targetMs + delay * 1000).toISOString(),
+        source: 'NDOV KV78Turbo (doeltijd + halteafwijking)'
+      };
+    }
+  }
+
+  // Een expliciete OpenOV-haltevoorspelling kan bruikbaar zijn,
+  // ook wanneer de afzonderlijke rit geen timestamp heeft.
+  // Die beperking blijft duidelijk zichtbaar in het bronlabel.
+  const rt = leg.openovRealtime;
+
+  if (!rt || rt.status === 'unknown' || rt.status === 'cancelled') {
+    return null;
+  }
+
+  if (/ritupdate is verouderd/i.test(String(rt.freshnessNote || ''))) {
+    return null;
+  }
+
+  const age = Number(rt.updateAgeSeconds);
+  if (Number.isFinite(age) && age > 180) {
+    return null;
+  }
+
+  const event = rt[kind];
+  if (!event?.time || !Number.isFinite(Date.parse(event.time))) {
+    return null;
+  }
+
+  const missingTripTimestamp =
+    /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ''));
+
+  return {
+    time: event.time,
+    source: missingTripTimestamp
+      ? 'OpenOV (rit-timestamp ontbreekt)'
+      : 'OpenOV'
+  };
+}
+
+function timelineTimeHtml(prediction, scheduledTime, displayedTime) {
+  if (!prediction) {
+    return `<span class="leg-time">${esc(clock(displayedTime))}</span>`;
+  }
+
+  const scheduledMs = Date.parse(scheduledTime || '');
+  const predictedMs = Date.parse(prediction.time);
+  const differs = Boolean(scheduledTime) &&
+    Number.isFinite(scheduledMs) &&
+    Number.isFinite(predictedMs) &&
+    Math.abs(scheduledMs - predictedMs) >= 1000;
+
+  const planned = differs
+    ? ` · gepland ${esc(clock(scheduledTime))}`
+    : '';
+
+  return `<span class="leg-time">${esc(clock(prediction.time))}</span>
+    <span class="muted">· realtime ${esc(prediction.source)}${planned}</span>`;
+}
+
+function renderLeg(leg, index = 0) {
+  const title = lineTitle(leg);
+  const fromName = leg.from?.name || leg.origin?.name || 'Onbekende halte';
+  const toName = leg.to?.name || leg.destination?.name || 'Onbekende halte';
+
+  const fromSchedule = leg.from?.scheduledDeparture ||
+    leg.scheduledStartTime ||
+    leg.from?.departure ||
+    leg.startTime ||
+    leg.departureTime;
+
+  const toSchedule = leg.to?.scheduledArrival ||
+    leg.scheduledEndTime ||
+    leg.to?.arrival ||
+    leg.endTime ||
+    leg.arrivalTime;
+
+  const fromPrediction = timelineRealtimePrediction(leg, 'departure', fromSchedule);
+  const toPrediction = timelineRealtimePrediction(leg, 'arrival', toSchedule);
+
+  const fromTime = leg.mode !== 'WALK' && fromPrediction
+    ? fromPrediction.time
+    : fromSchedule;
+
+  let toTime = leg.mode !== 'WALK' && toPrediction
+    ? toPrediction.time
+    : toSchedule;
+
+  const fromTrack = leg.from?.track || leg.from?.scheduledTrack;
+  const toTrack = leg.to?.track || leg.to?.scheduledTrack;
+
+  let displayLeg = leg;
+  let initialWalkWaitHtml = '';
+
+  // Alleen de eerste wandeling apart schatten.
+  // 1,5 m/s komt voor 899 meter neer op ongeveer 10 minuten.
+  if (
+    index === 0 &&
+    leg.mode === 'WALK' &&
+    typeof leg.distance === 'number' &&
+    fromTime &&
+    toTime
+  ) {
+    const startMs = Date.parse(fromTime);
+    const originalEndMs = Date.parse(toTime);
+    const elapsedSeconds = (originalEndMs - startMs) / 1000;
+    const estimatedWalkSeconds = Math.round(leg.distance / 1.5);
+    const waitingSeconds = elapsedSeconds - estimatedWalkSeconds;
+
+    // Splits alleen als er minstens een minuut overblijft.
+    if (
+      Number.isFinite(startMs) &&
+      Number.isFinite(originalEndMs) &&
+      elapsedSeconds > 0 &&
+      estimatedWalkSeconds > 0 &&
+      waitingSeconds >= 60
+    ) {
+      const originalEndTime = toTime;
+      toTime = new Date(
+        startMs + estimatedWalkSeconds * 1000
+      ).toISOString();
+
+      displayLeg = {
+        ...leg,
+        duration: estimatedWalkSeconds,
+        estimatedWalkingTime: true
+      };
+
+      const waitingMinutes = Math.round(waitingSeconds / 60);
+
+      initialWalkWaitHtml = `
+        <div class="leg">
+          <div class="leg-head">
+            <span class="pill">Wachten</span>
+            <strong>Wachten op het eerste OV</strong>
+          </div>
+          <div style="margin-top:8px">
+            <div>
+              <span class="leg-time">${esc(clock(toTime))}</span>
+              · ${esc(toName)} (geschat aangekomen)
+            </div>
+            <div style="margin:8px 0;color:var(--muted)">↓</div>
+            <div>
+              <span class="leg-time">${esc(clock(originalEndTime))}</span>
+              · ${esc(toName)} (vertrek OV)
+            </div>
+          </div>
+          <div class="rt-details">
+            Ongeveer ${waitingMinutes} min · geschatte wachttijd
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  const direction = leg.headsign
+    ? `<div class="muted">Richting ${esc(leg.headsign)}</div>`
+    : '';
+
+  const agency = leg.agencyName
+    ? `<div class="muted">${esc(leg.agencyName)}</div>`
+    : '';
+
+  const fromPlatform = fromTrack
+    ? `<div class="muted">Perron/spoor: ${esc(fromTrack)}</div>`
+    : '';
+
+  const toPlatform = toTrack
+    ? `<div class="muted">Aankomstperron/spoor: ${esc(toTrack)}</div>`
+    : '';
+
+  return `<div class="leg">
+    <div class="leg-head">
+      <span class="pill">${esc(modeName(leg.mode))}</span>
+      <strong>${esc(title)}</strong>
+    </div>
+    ${direction}
+    ${agency}
+    <div style="margin-top:8px">
+      <div>${timelineTimeHtml(fromPrediction, fromSchedule, fromTime)} · ${esc(fromName)}</div>
+      ${fromPlatform}
+      <div style="margin:8px 0;color:var(--muted)">↓</div>
+      <div>${timelineTimeHtml(toPrediction, toSchedule, toTime)} · ${esc(toName)}</div>
+      ${toPlatform}
+    </div>
+    ${realtimeHtml(displayLeg)}
+    ${initialWalkWaitHtml}
+  </div>`;
+}
+
+$('planBtn').onclick = async () => {
+  $('planBtn').disabled = true;
+  $('planStatus').textContent = 'Reizen ophalen en realtime controleren…';
+  $('journeys').innerHTML = '';
+
+  try {
+    const q = new URLSearchParams({
+      fromPlace: resolvePlace('from', 'fromChoice'),
+      toPlace: resolvePlace('to', 'toChoice')
+    });
+
+    const when = $('when').value;
+    if (when) q.set('time', new Date(when).toISOString());
+    const selectedModes = Array.from(
+      document.querySelectorAll('input[name="transitMode"]:checked'),
+      input => input.value
+    );
+
+    if (selectedModes.length === 0) {
+      $('planStatus').textContent =
+        'Selecteer minimaal één vervoersmiddel.';
+      return;
+    }
+
+    const modeEnumByChoice = {
+      train: [
+        'RAIL',
+        'HIGHSPEED_RAIL',
+        'LONG_DISTANCE',
+        'NIGHT_RAIL',
+        'REGIONAL_FAST_RAIL',
+        'REGIONAL_RAIL',
+        'SUBURBAN'
+      ],
+      bus: ['BUS', 'COACH'],
+      metro: ['METRO', 'SUBWAY'],
+      tram: ['TRAM'],
+      ferry: ['FERRY']
+    };
+
+    const transitModes = [
+      ...new Set(selectedModes.flatMap(mode => modeEnumByChoice[mode] || []))
+    ];
+
+    q.set('transitModes', transitModes.join(','));
+
+    const walkingLimit = $('walkingLimit').value;
+    q.set('maxPreTransitTime', walkingLimit);
+    q.set('maxPostTransitTime', walkingLimit);
+q.set('pedestrianSpeed', '1.5');
+
+    q.set('numItineraries', '5');
+
+    const data = await api('/api/plan?' + q);
+    window.__ovliveLastTransitousPlan = data;
+    window.__ovliveLastTransitousPlanAt = new Date().toISOString();
+    const journeys = Array.isArray(data.itineraries)
+      ? data.itineraries
+      : Array.isArray(data.journeys)
+        ? data.journeys
+        : [];
+
+    const meta = data.openovRealtimeMeta;
+    if (meta?.status === 'enrichment_failed') {
+      $('planStatus').textContent =
+        `Reisplanner klaar · realtimeverwerking mislukt. ` +
+        `${meta.message || 'De ritstatussen konden niet worden gecontroleerd.'} ` +
+        'Er wordt geen realtime-status als bevestigd getoond.';
+    } else if (meta) {
+      $('planStatus').textContent =
+        `Reisplanner klaar · OpenOV: ${meta.matchedLegCount ?? 0} ritten gekoppeld, ` +
+        `${meta.unknownLegCount ?? 0} zonder bevestigde halteprognose. ` +
+        `Storingsmeldingen: ${(data.openovAlerts || []).length}.` +
+        (data.ndovRealtimeMeta
+          ? ` NDOV KV6: ${data.ndovRealtimeMeta.kv6MatchedLegCount ?? 0} live ritmatches (${data.ndovRealtimeMeta.kv6DelayLegCount ?? 0} met vertraging); KV78: ${data.ndovRealtimeMeta.kv78DataLegCount ?? 0} reisdelen met haltegegevens (${data.ndovRealtimeMeta.kv78DelayLegCount ?? 0} met vertraging); KV17: ${data.ndovRealtimeMeta.cancelledLegCount ?? 0} exacte annuleringen.`
+          : ' NDOV-status niet ontvangen.');
+    } else {
+      $('planStatus').textContent =
+        `Plannerantwoord ontvangen · ${journeys.length} opties. ` +
+        'Geen realtime-overzicht ontvangen.';
+    }
+
+    const feedInfo = meta?.feeds
+      ? `<div class="muted">Realtimefeeds: ${
+          Object.entries(meta.feeds).map(([name, feed]) =>
+            `${esc(name)}: ${esc(feed.freshness || 'onbekend')}` +
+            (feed.ageSeconds != null ? ` (${esc(feed.ageSeconds)} sec oud)` : '') +
+            (feed.status != null ? ` · HTTP ${esc(feed.status)}` : '') +
+            (feed.servedFromCache ? ` · cache ${esc(feed.cacheAgeSeconds ?? '?')} sec` : '') +
+            (feed.error ? ` · ${esc(feed.error)}` : '')
+          ).join(' · ')
+        }</div>`
+      : ''; 
+
+    if (journeys.length === 0) {
+      $('journeys').innerHTML =
+        '<p>Geen reisopties ontvangen. Controleer de locaties of probeer een andere tijd.</p>' +
+        renderAlerts(data.openovAlerts || []) +
+        `<details><summary>Technische details</summary><pre>${esc(JSON.stringify(data, null, 2).slice(0, 8000))}</pre></details>`;
+      return;
+    }
+
+    const cards = journeys.slice(0, 5).map((journey, index) => {
+      const sourceLegs = Array.isArray(journey.legs)
+        ? journey.legs
+        : Array.isArray(journey.transitLegs)
+          ? journey.transitLegs
+          : [];
+
+      // Werk met kopieën: de oorspronkelijke API-resultaten blijven intact.
+      const legs = sourceLegs.map(leg => ({
+        ...leg,
+        from: leg.from && typeof leg.from === 'object' ? { ...leg.from } : leg.from,
+        to: leg.to && typeof leg.to === 'object' ? { ...leg.to } : leg.to
+      }));
+
+      let adjustedJourneyStart = null;
+      const firstWalk = legs[0];
+      const firstTransit = legs.find(leg => leg.mode !== 'WALK');
+      const maxInitialWaitSeconds = Number($('initialWaitLimit').value) * 60;
+
+      // Pas uitsluitend de eerste wandeling aan.
+      // De overige overstappen en wachttijden worden niet gewijzigd.
+      if (
+        firstWalk?.mode === 'WALK' &&
+        typeof firstWalk.distance === 'number' &&
+        firstTransit &&
+        Number.isFinite(maxInitialWaitSeconds)
+      ) {
+        const startValue = firstWalk.from?.departure ||
+          firstWalk.startTime ||
+          firstWalk.departureTime ||
+          journey.startTime;
+
+        const transitStartValue = firstTransit.from?.departure ||
+          firstTransit.startTime ||
+          firstTransit.departureTime;
+
+        const startMs = Date.parse(startValue || '');
+        const transitStartMs = Date.parse(transitStartValue || '');
+        const estimatedWalkSeconds = Math.round(firstWalk.distance / 1.5);
+
+        if (
+          Number.isFinite(startMs) &&
+          Number.isFinite(transitStartMs) &&
+          transitStartMs > startMs &&
+          estimatedWalkSeconds > 0
+        ) {
+          // Gebruik de vertrektijd van het eerste voertuig als eindpunt
+          // van het oorspronkelijke eerste loop-/wachttijdblok.
+          firstWalk.endTime = transitStartValue;
+          firstWalk.to = {
+            ...(firstWalk.to && typeof firstWalk.to === 'object'
+              ? firstWalk.to
+              : {}),
+            arrival: transitStartValue
+          };
+
+          const currentWaitSeconds =
+            (transitStartMs - startMs) / 1000 - estimatedWalkSeconds;
+
+          if (currentWaitSeconds > maxInitialWaitSeconds) {
+            const shiftSeconds = currentWaitSeconds - maxInitialWaitSeconds;
+
+            adjustedJourneyStart = new Date(
+              startMs + shiftSeconds * 1000
+            ).toISOString();
+
+            firstWalk.startTime = adjustedJourneyStart;
+
+            if (firstWalk.from) {
+              firstWalk.from.departure = adjustedJourneyStart;
+            } else {
+              firstWalk.from = {
+                name: 'START',
+                departure: adjustedJourneyStart
+              };
+            }
+          }
+        }
+      }
+
+      const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
+      const first = legs[0];
+      const last = legs[legs.length - 1];
+
+      const departure = adjustedJourneyStart ||
+        journey.startTime ||
+        first?.from?.departure ||
+        first?.startTime;
+
+      const arrival = journey.endTime ||
+        last?.to?.arrival ||
+        last?.endTime;
+
+      const transfers = Math.max(0, transitLegs.length - 1);
+
+      return `<article class="journey">
+        <strong>Reis ${index + 1}</strong>
+        <div class="journey-summary">
+          <span>Gepland: ${esc(clock(departure))} → ${esc(clock(arrival))}</span>
+          <span>${transitLegs.length} OV-ritten · ${transfers} overstappen</span>
+        </div>
+        ${legs.map(renderLeg).join('') ||
+          '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}
+      </article>`;
+    }).join('');
+
+    $('journeys').innerHTML =
+      feedInfo + cards + renderAlerts(data.openovAlerts || []);
+
+  } catch (error) {
+    $('planStatus').innerHTML =
+      '<span class="bad">' + esc(error.message) + '</span>';
+  } finally {
+    $('planBtn').disabled = false;
+  }
+};
+
+$('healthBtn').onclick=async()=>{
+ $('healthBtn').disabled=true;$('healthStatus').textContent='Feeds controleren…';$('healthDetails').innerHTML='';
+ try{const d=await api('/api/health');$('healthStatus').textContent='Controle afgerond: downloadstatus en feed-timestamps zijn opgehaald.';
+ $('healthDetails').innerHTML=Object.entries(d.feeds||{}).map(([name,f])=>`<div class="status"><strong>${esc(name)}</strong> · ${f.ok?'<span class="ok">HTTP/feed OK</span>':'<span class="bad">Niet OK</span>'}<div class="muted">Feedtijd: ${esc(f.feedTimestamp||'onbekend')} · ouderdom: ${esc(f.ageSeconds??'?')} sec · items: ${esc(f.entityCount??'?')}</div><div class="muted">${esc(f.error||f.freshness||'')}</div></div>`).join('');}
+ catch(e){$('healthStatus').innerHTML='<span class="bad">'+esc(e.message)+'</span>';}finally{$('healthBtn').disabled=false;}
+};
+$('feedBtn').onclick=async()=>{
+ $('feedBtn').disabled=true;$('feedStatus').textContent='Realtime-data laden…';$('feedRows').innerHTML='';
+ try{const kind=$('feedKind').value;const d=await api(`/api/realtime?kind=${encodeURIComponent(kind)}&limit=${encodeURIComponent($('feedLimit').value)}`);
+ $('feedStatus').textContent=`${d.returnedCount} items · feedtijd ${d.feedTimestamp||'onbekend'} · ouderdom ${d.ageSeconds??'?'} sec · status ${d.freshness||'onbekend'}`;
+ $('feedRows').innerHTML=(d.entities||[]).slice(0,100).map(e=>{
+   if(kind==='alerts')return `<div class="status"><strong>${esc(e.header||'Melding zonder titel')}</strong><div>${esc(e.description||'')}</div><div class="muted">Effect: ${esc(e.effect||'?')} · betrokken: ${esc((e.informedEntities||[]).map(x=>x.routeId||x.stopId||x.tripId||x.agencyId).filter(Boolean).join(', ')||'niet gespecificeerd')}</div></div>`;
+   if(kind==='tripUpdates'||kind==='trainUpdates')return `<div class="status"><strong>Rit ${esc(e.tripId||'onbekend')}</strong><div>Lijn/route: ${esc(e.routeId||'?')} · status: ${esc(e.scheduleRelationship||'geen annulering gemeld')}</div><div class="muted">Vertraging: ${e.delaySeconds==null?'niet op ritniveau opgegeven':esc(Math.round(e.delaySeconds/60*10)/10)+' min'} · voertuig: ${esc(e.vehicleId||'?')}</div><div class="muted">${esc((e.stopUpdates||[]).slice(0,3).map(s=>`${s.stopId||'?'}: ${s.departureDelaySeconds??s.arrivalDelaySeconds??'?'}s`).join(' · '))}</div></div>`;
+   return `<div class="status"><strong>Voertuig ${esc(e.vehicleId||'?')}</strong><div>Rit: ${esc(e.tripId||'?')} · route: ${esc(e.routeId||'?')}</div><div class="muted">Positie: ${esc(e.latitude??'?')}, ${esc(e.longitude??'?')} · tijd: ${esc(fmt(e.timestamp?e.timestamp*1000:null))}</div></div>`;
+ }).join('')||'<p>Geen items in deze feed.</p>';
+ }catch(e){$('feedStatus').innerHTML='<span class="bad">'+esc(e.message)+'</span>';}finally{$('feedBtn').disabled=false;}
+};
+</script>
+<script id="OVAPI_COMPARE_HANDLER_V1">
+(() => {
+  const byId = (id) => document.getElementById(id);
+  const htmlEscape = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+  const formatClock = (value) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value);
+    return date.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+  const requestJson = async (url) => {
+    const response = await fetch(url, { headers: { accept: 'application/json' } });
+    const data = await response.json().catch(() => ({ error: 'Ongeldig JSON-antwoord van de test-API.' }));
+    if (!response.ok || data?.ok === false) {
+      throw new Error(data?.error || `HTTP ${response.status}`);
+    }
+    return data;
+  };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const button = byId('ovapiCompareButton');
+    const status = byId('ovapiTestStatus');
+    const results = byId('ovapiTestResults');
+    if (!button || !status || !results) {
+      console.error('OVAPI-test: knop, statusveld of resultatenveld niet gevonden.');
+      return;
+    }
+    if (button.dataset.ovapiHandlerBound === 'true') return;
+    button.dataset.ovapiHandlerBound = 'true';
+
+    button.addEventListener('click', async () => {
+      const from = (byId('ovapiFromArea')?.value || '').trim();
+      const to = (byId('ovapiToArea')?.value || '').trim();
+      const line = (byId('ovapiLineFilter')?.value || '').trim();
+      results.innerHTML = '';
+      if (!from || !to) {
+        status.textContent = 'Vul beide haltegebiedcodes in.';
+        return;
+      }
+      button.disabled = true;
+      status.textContent = 'Passages bij beide haltes ophalen en dezelfde ritten koppelen…';
+      try {
+        const params = new URLSearchParams({ from, to });
+        if (line) params.set('line', line);
+        const data = await requestJson('/api/ovapi-test/compare?' + params.toString());
+        status.textContent = `Klaar · ${data.matchCount ?? 0} ritten eenduidig gekoppeld · ${data.from?.count ?? 0} passages bij ${data.from?.code ?? from} · ${data.to?.count ?? 0} passages bij ${data.to?.code ?? to}.`;
+
+        if (!Array.isArray(data.matches) || data.matches.length === 0) {
+          results.innerHTML = '<p class="rt-unknown">Geen eenduidig gekoppelde ritten gevonden. Dit bewijst niet dat er geen realtimegegevens zijn; identifiers kunnen ontbreken of dubbel zijn.</p>';
+        } else {
+          results.innerHTML = data.matches.map((item) => {
+            const renderStop = (label, stop) => {
+              const difference = typeof stop.differenceSeconds === 'number'
+                ? `${stop.differenceSeconds > 0 ? '+' : ''}${stop.differenceSeconds} sec (${(stop.differenceSeconds / 60).toFixed(1)} min)`
+                : 'onbekend — geen betrouwbare afwijking';
+              const freshness = stop.updateFreshness === 'recent'
+                ? `ACTUEEL · ${stop.updateAgeSeconds ?? '?'} sec oud`
+                : `VEROUDERD/ONBEKEND · ${stop.updateAgeSeconds == null ? 'leeftijd onbekend' : `${stop.updateAgeSeconds} sec oud`}`;
+              const state = stop.currentCancellation
+                ? 'ACTUEEL UITGEVALLEN'
+                : stop.cancelled
+                  ? 'oude annuleringsstatus — niet bevestigd'
+                  : (stop.status || 'onbekend');
+              const delayClass = stop.differenceSeconds == null
+                ? 'rt-unknown'
+                : Math.abs(stop.differenceSeconds) >= 60 ? 'rt-unknown' : 'rt-ok';
+              const expected = stop.expectedTime ? formatClock(stop.expectedTime) : 'onbekend (update niet actueel/bevestigd)';
+              return `<div class="status"><strong>${htmlEscape(label)}</strong><div>Halte: ${htmlEscape(stop.stop || 'onbekend')}</div><div>Gepland: ${htmlEscape(formatClock(stop.targetTime))} · Verwacht: ${htmlEscape(expected)}</div><div>Afwijking: <span class="${delayClass}">${htmlEscape(difference)}</span></div><div>Status: ${htmlEscape(state)}</div><div class="muted">Update: ${htmlEscape(stop.lastUpdate || 'onbekend')} · ${htmlEscape(freshness)}</div></div>`;
+            };
+            const delta = item.delayChangeSeconds == null
+              ? 'Verandering in vertraging: onbekend'
+              : `Verschil tussen voorspelde afwijkingen: ${item.delayChangeSeconds > 0 ? '+' : ''}${item.delayChangeSeconds} seconden`;
+            return `<article class="journey"><strong>Lijn ${htmlEscape(item.line || '—')} · ${htmlEscape(item.destination || 'bestemming onbekend')} · rit ${htmlEscape(item.journeyNumber || '—')}</strong><div class="muted">Koppeling: ${htmlEscape(item.identity || 'onbekend')}</div>${renderStop('Van ' + (data.from?.code || from), item.from || {})}${renderStop('Naar ' + (data.to?.code || to), item.to || {})}<div class="rt-status ${item.comparisonReliable ? 'rt-ok' : 'rt-unknown'}"><strong>${htmlEscape(delta)}</strong><div class="rt-details">${htmlEscape(item.note || '')}</div></div></article>`;
+          }).join('');
+        }
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Niet gekoppelde passages bekijken';
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(data.unmatched ?? {}, null, 2);
+        details.append(summary, pre);
+        results.append(details);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'OVAPI-test mislukt.';
+        status.textContent = 'Fout bij OVAPI-vergelijking: ' + message;
+        results.innerHTML = '<p class="rt-unknown">De vergelijking is niet afgerond. Controleer ook of /api/ovapi-test/health bereikbaar is.</p>';
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+})();
+
+// OVLive Transitous-to-OVAPI cross-source diagnostic v1
+// Isolated cross-source test; the result is displayed only in this test panel.
+$('ovapiTransitousMatchButton').onclick = async () => {
+  const button = $('ovapiTransitousMatchButton');
+  const status = $('ovapiTransitousMatchStatus');
+  const output = $('ovapiTransitousMatchResults');
+  output.innerHTML = '';
+
+  const plan = window.__ovliveLastTransitousPlan;
+  if (!plan) {
+    status.textContent = 'Plan eerst een reis bovenaan. Daarna kun je de laatste reisresultaten met OVAPI vergelijken.';
+    return;
+  }
+
+  const fromArea = $('ovapiTransitousFromArea').value.trim();
+  const toArea = $('ovapiTransitousToArea').value.trim();
+  const fromId = normalizeTransitousStopId($('ovapiTransitousFromStopId').value);
+  const toId = normalizeTransitousStopId($('ovapiTransitousToStopId').value);
+  const lineFilter = $('ovapiTransitousLineFilter').value.trim();
+  if (!fromArea || !toArea || !fromId || !toId) {
+    status.textContent = 'Vul beide haltegebiedcodes en beide Transitous-halte-ID’s in.';
+    return;
+  }
+
+  const journeys = Array.isArray(plan.itineraries) ? plan.itineraries
+    : Array.isArray(plan.journeys) ? plan.journeys : [];
+  const legs = [];
+  journeys.forEach((journey, index) => {
+    const sourceLegs = Array.isArray(journey.legs) ? journey.legs
+      : Array.isArray(journey.transitLegs) ? journey.transitLegs : [];
+    sourceLegs.forEach(leg => {
+      if (String(leg.mode || '').toUpperCase() !== 'BUS') return;
+      const actualFromId = normalizeTransitousStopId(leg.from?.stopId || leg.from?.id || leg.from?.stopCode);
+      const actualToId = normalizeTransitousStopId(leg.to?.stopId || leg.to?.id || leg.to?.stopCode);
+      if (actualFromId !== fromId || actualToId !== toId) return;
+      let line = String(leg.routeShortName || leg.route?.shortName || leg.tripShortName || '').trim();
+      if (!line) {
+        const title = String(leg.displayName || leg.routeLongName || '');
+        const found = title.match(/(?:bus\s*)?(\d{1,8}[a-z]?)(?:\b|$)/i);
+        if (found) line = found[1];
+      }
+      if (!line || (lineFilter && line.toLowerCase() !== lineFilter.toLowerCase())) return;
+      const departure = leg.scheduledStartTime || leg.startTime || leg.from?.departure || leg.departureTime;
+      const arrival = leg.scheduledEndTime || leg.endTime || leg.to?.arrival || leg.arrivalTime;
+      if (!departure || !arrival) return;
+      legs.push({
+        itinerary: index + 1,
+        line,
+        mode: leg.mode,
+        fromName: leg.from?.name || leg.origin?.name || '',
+        toName: leg.to?.name || leg.destination?.name || '',
+        fromStopId: leg.from?.stopId || leg.from?.id || '',
+        toStopId: leg.to?.stopId || leg.to?.id || '',
+        routeId: leg.routeId || leg.route?.id || '',
+        tripId: leg.tripId || '',
+        headsign: leg.headsign || '',
+        departure,
+        arrival
+      });
+    });
+  });
+
+  if (!legs.length) {
+    status.textContent = 'Geen busritten in de laatste plannerresultaten passen bij deze twee Transitous-halte-ID’s. Controleer de gekozen haltes of plan opnieuw.';
+    return;
+  }
+  const selectedLegs = legs.slice(0, 10);
+  if (legs.length > selectedLegs.length) {
+    status.textContent = `Er zijn ${legs.length} passende busritten gevonden; de eerste ${selectedLegs.length} worden getest…`;
+  } else {
+    status.textContent = `${selectedLegs.length} busrit(ten) gevonden. OVAPI bij beide haltes ophalen en dienstregeling vergelijken…`;
+  }
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/ovapi-test/match-plan', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fromArea, toArea, legs: selectedLegs })
+    });
+    const data = await response.json().catch(() => ({ error: 'Ongeldig antwoord van de koppelingstest.' }));
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    status.textContent = `Klaar · ${data.matchCount} unieke dienstregelingskandida(a)t(en) · ${data.ambiguousCount} ambigu · ${data.noCandidateCount} niet gevonden. Dit verandert de reisresultaten niet.`;
+
+    function signedSeconds(value) {
+      if (typeof value !== 'number') return 'onbekend';
+      return (value > 0 ? '+' : '') + value + ' sec';
+    }
+    function delayText(stop) {
+      if (typeof stop.differenceSeconds !== 'number') return 'onbekend (geen betrouwbare actuele afwijking)';
+      const seconds = stop.differenceSeconds;
+      const mins = Math.abs(seconds) / 60;
+      return `${seconds > 0 ? '+' : ''}${seconds} sec (${mins.toFixed(1)} min${seconds > 0 ? ' vertraging' : seconds < 0 ? ' eerder' : ''})`;
+    }
+    function freshnessText(stop) {
+      if (stop.currentCancellation) return 'ACTUEEL UITGEVALLEN';
+      if (stop.updateFreshness === 'recent') return `ACTUEEL · ${stop.updateAgeSeconds ?? '?'} sec oud`;
+      return `VEROUDERD/ONBEKEND · ${stop.updateAgeSeconds == null ? 'leeftijd onbekend' : stop.updateAgeSeconds + ' sec oud'}`;
+    }
+    function renderCandidate(candidate) {
+      if (!candidate) return '';
+      function renderStop(label, stop) {
+        return `<div class="status"><strong>${esc(label)}</strong><div>${esc(stop.stop || 'Halte onbekend')}</div><div>OVAPI gepland vertrek: ${esc(clock(stop.targetTime))} · verwacht: ${esc(stop.expectedTime ? clock(stop.expectedTime) : 'onbekend')}</div><div>Realtime-afwijking: <span class="${stop.differenceSeconds == null ? 'rt-unknown' : 'rt-ok'}">${esc(delayText(stop))}</span></div><div>Status: ${esc(stop.currentCancellation ? 'actuele annulering' : stop.cancelled ? 'annuleringsstatus, niet actueel bevestigd' : stop.status || 'onbekend')}</div><div class="muted">Update: ${esc(stop.lastUpdate || 'onbekend')} · ${esc(freshnessText(stop))}</div></div>`;
+      }
+      return `<div class="status"><strong>OVAPI-kandidaat rit ${esc(candidate.journeyNumber || '?')} · ${esc(candidate.dataOwner || '?')} · ${esc(candidate.planningNumber || '?')}</strong><div>OVAPI-dienstregeling t.o.v. Transitous: vertrek ${esc(signedSeconds(candidate.departureScheduleOffsetSeconds))}, aankomst/vertrek bij tweede halte ${esc(signedSeconds(candidate.arrivalScheduleOffsetSeconds))}.</div>${renderStop('OVAPI eerste halte', candidate.from)}${renderStop('OVAPI tweede halte', candidate.to)}<div class="muted">Score: ${esc(candidate.scoreSeconds)} sec gezamenlijke dienstregelingsafwijking.</div></div>`;
+    }
+    output.innerHTML = data.comparisons.map(item => {
+      const candidate = item.match || (item.status === 'ambiguous' ? item.candidates?.[0] : null);
+      const statusTitle = item.status === 'unique_schedule_candidate' ? 'Unieke dienstregelingskandidaat' : item.status === 'ambiguous' ? 'Ambigue koppeling — niet automatisch gekozen' : item.status === 'no_candidate' ? 'Geen passende OVAPI-kandidaat' : 'Niet vergelijkbaar';
+      const cls = item.status === 'unique_schedule_candidate' && candidate?.reliableDelayAtBothStops ? 'rt-ok' : 'rt-unknown';
+      return `<article class="journey"><strong>Reis ${esc(item.itinerary)} · bus ${esc(item.line)} · ${esc(item.fromName || '')} → ${esc(item.toName || '')}</strong><div class="muted">Transitous routeId: ${esc(item.routeId || 'onbekend')} · tripId: ${esc(item.tripId || 'onbekend')}</div><div class="muted">Gepland in Transitous: ${esc(clock(item.departure))} → ${esc(clock(item.arrival))}</div><div class="rt-status ${cls}"><strong>${esc(statusTitle)}</strong><div class="rt-details">${esc(item.note || '')}</div></div>${candidate ? renderCandidate(candidate) : ''}${item.status === 'ambiguous' && item.candidates?.length > 1 ? `<div class="muted">Er zijn ${item.candidates.length} kandidaten. Er wordt geen automatische ritkeuze gemaakt.</div>` : ''}</article>`;
+    }).join('');
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : 'Transitous-OVAPI-koppelingstest mislukt.';
+  } finally {
+    button.disabled = false;
+  }
+};
+
+function normalizeTransitousStopId(value) {
+  return String(value || '').replace(/^nl-OpenOV_/i, '').trim();
+}
+
+</script>
+
+<script id="NDOV_LOCAL_DIAGNOSTICS_V1">
+(() => {
+  const hostname = String(location.hostname || '').toLowerCase();
+  const localOnly = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(hostname);
+  const panel = document.getElementById('ndovLocalDiagnosticsPanel');
+  if (!panel || !localOnly) return;
+  panel.hidden = false;
+  const status = document.getElementById('ndovLocalStatus');
+  const details = document.getElementById('ndovLocalDetails');
+  const start = document.getElementById('ndovLocalStartButton');
+  const refresh = document.getElementById('ndovLocalStatusButton');
+  async function getJson(path) {
+    const response = await fetch(path, { headers: { accept: 'application/json' } });
+    const data = await response.json().catch(() => ({ error: 'Ongeldig JSON-antwoord.' }));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    return data;
+  }
+  function render(data) {
+    const feeds = data.feeds || [];
+    const feedSummary = feeds.map(f => `${f.stream}: ${f.state} · ${f.messageCount ?? 0} berichten${f.continuousEnabled ? ' · automatisch aan' : ' · automatisch uit'}${f.error ? ` · FOUT: ${f.error}` : ''}`).join(' | ');
+    const storedRows = data.kv78CaptureSummary?.storedStopRows;
+    status.textContent = `${feedSummary || 'Status opgehaald.'}${storedRows != null ? ` · ${storedRows} opgeslagen KV78-halterijen` : ''}`;
+    details.textContent = JSON.stringify({
+      checkedAt: data.checkedAt,
+      continuousCollectors: data.continuousCollectors,
+      kv78CaptureSummary: data.kv78CaptureSummary,
+      tripStatusSummary: data.tripStatusSummary,
+      tripStatuses: data.tripStatuses,
+      feeds: feeds.map(f => ({
+        stream: f.stream, state: f.state, startedAt: f.startedAt, finishedAt: f.finishedAt,
+        sessionSeconds: f.sessionSeconds, messageCount: f.messageCount, rawBytes: f.rawBytes,
+        latestMessageAt: f.latestMessageAt, envelopeCounts: f.envelopeCounts,
+        latestMutations: f.latestMutations, error: f.error, warnings: f.warnings,
+        storedKv78RowCount: f.storedKv78RowCount, storedMutationIdentityCount: f.storedMutationIdentityCount,
+        continuousEnabled: f.continuousEnabled, nextAlarmAt: f.nextAlarmAt, autoCollector: f.autoCollector
+      })),
+      note: data.note || null
+    }, null, 2);
+  }
+  async function refreshStatus() {
+    status.textContent = 'NDOV-status ophalen…';
+    const data = await getJson('/api/ndov/status');
+    render(data);
+  }
+  refresh.addEventListener('click', async () => {
+    refresh.disabled = true;
+    try { await refreshStatus(); }
+    catch (error) { status.textContent = error instanceof Error ? error.message : 'Status ophalen mislukt.'; }
+    finally { refresh.disabled = false; }
+  });
+  const enable = document.getElementById('ndovContinuousEnableButton');
+  const disable = document.getElementById('ndovContinuousDisableButton');
+  async function setContinuous(path, enabled) {
+    start.disabled = refresh.disabled = enable.disabled = disable.disabled = true;
+    status.textContent = enabled ? 'Automatische collector inschakelen…' : 'Automatische collector uitschakelen…';
+    try {
+      const result = await getJson(path);
+      await refreshStatus();
+      if (!result.ok) status.textContent = 'Niet alle collectors bevestigden de wijziging. Bekijk de JSON-details.';
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : 'Collectorinstelling mislukt.';
+    } finally {
+      start.disabled = refresh.disabled = enable.disabled = disable.disabled = false;
+    }
+  }
+  enable.addEventListener('click', () => setContinuous('/api/ndov/continuous/enable', true));
+  disable.addEventListener('click', () => setContinuous('/api/ndov/continuous/disable', false));
+
+  start.addEventListener('click', async () => {
+    start.disabled = true; refresh.disabled = true;
+    const seconds = document.getElementById('ndovLocalSeconds').value;
+    status.textContent = `Lokale KV78- en BISON-verzameling gestart voor ${seconds} seconden. Dit verzoek blijft open tot beide sessies klaar zijn…`;
+    try {
+      const result = await getJson(`/api/ndov/start?seconds=${encodeURIComponent(seconds)}&wait=1`);
+      const snapshot = await getJson('/api/ndov/status');
+      render(snapshot);
+      if (!result.ok) status.textContent = 'De verzameling is beëindigd, maar minstens één feed meldde geen succesvolle afronding. Bekijk de details hieronder.';
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : 'NDOV-verzameling mislukt.';
+    } finally { start.disabled = false; refresh.disabled = false; }
+  });
+  refreshStatus().catch(error => { status.textContent = error instanceof Error ? error.message : 'NDOV-status ophalen mislukt.'; });
+})();
+</script>
+
+</body></html>
