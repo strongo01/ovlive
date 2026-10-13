@@ -1,0 +1,1271 @@
+import GtfsRealtimeBindings from "gtfs-realtime-bindings";
+import { handleOvapiTestApi } from "./ovapi-test";
+import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
+
+interface Env {
+  ASSETS: Fetcher;
+  APP_NAME: string;
+  APP_VERSION: string;
+  APP_CONTACT: string;
+}
+
+const OPENOV = {
+  tripUpdates: "https://gtfs.openov.nl/gtfs-rt/tripUpdates.pb",
+  alerts: "https://gtfs.openov.nl/gtfs-rt/alerts.pb",
+  trainUpdates: "https://gtfs.openov.nl/gtfs-rt/trainUpdates.pb",
+  vehiclePositions: "https://gtfs.openov.nl/gtfs-rt/vehiclePositions.pb"
+};
+
+const TRANSITOUS = "https://api.transitous.org/api/v6";
+const MAX_BODY_BYTES = 20 * 1024 * 1024;
+const MAX_ROUTE_PARAMS = new Set([
+  "fromPlace", "toPlace", "time", "arriveBy", "realtimeMode", "transitModes",
+  "maxTransfers", "maxTravelTime", "timetableView", "numItineraries",
+  "maxItineraries", "searchWindow", "preTransitModes", "postTransitModes",
+  "maxPreTransitTime", "maxPostTransitTime", "pedestrianSpeed",
+  "language", "wheelchair"
+]);
+
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      ...extraHeaders
+    }
+  });
+}
+
+function corsHeaders(origin: string | null) {
+  // Same-origin frontend is the intended production deployment. CORS is deliberately
+  // not wildcard-enabled to avoid turning this Worker into a public open proxy.
+  const headers: Record<string, string> = {
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "content-type",
+    "vary": "Origin"
+  };
+  if (origin && (origin === "https://ovlive.pages.dev" || origin.startsWith("http://localhost:"))) {
+    headers["access-control-allow-origin"] = origin;
+  }
+  return headers;
+}
+
+function toNumber(value: any): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "number") return value;
+  if (typeof value.toNumber === "function") return value.toNumber();
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function translatedText(value: any): string | undefined {
+  const translations = value?.translation;
+  if (!Array.isArray(translations) || translations.length === 0) return undefined;
+  const dutch = translations.find((t: any) => t.language === "nl");
+  return (dutch ?? translations[0])?.text;
+}
+
+function enumName(enumObject: any, value: any): string | undefined {
+  if (value == null) return undefined;
+  return typeof value === "string" ? value : enumObject?.[value];
+}
+
+function normalizeTripUpdates(feed: any) {
+  const rt = (GtfsRealtimeBindings as any).transit_realtime;
+  const rows: any[] = [];
+  for (const entity of feed.entity ?? []) {
+    const tu = entity.tripUpdate;
+    if (!tu) continue;
+    const trip = tu.trip ?? {};
+    const stopUpdates = (tu.stopTimeUpdate ?? []).map((s: any) => ({
+      stopId: s.stopId,
+      stopSequence: s.stopSequence,
+      arrivalTime: toNumber(s.arrival?.time),
+      arrivalDelaySeconds: s.arrival?.delay,
+      departureTime: toNumber(s.departure?.time),
+      departureDelaySeconds: s.departure?.delay,
+      scheduleRelationship: enumName(rt.StopTimeUpdate?.ScheduleRelationship, s.scheduleRelationship)
+    }));
+    rows.push({
+      entityId: entity.id,
+      tripId: trip.tripId,
+      routeId: trip.routeId,
+      startDate: trip.startDate,
+      startTime: trip.startTime,
+      directionId: trip.directionId,
+      scheduleRelationship: enumName(rt.TripDescriptor?.ScheduleRelationship, trip.scheduleRelationship),
+      delaySeconds: tu.delay,
+      vehicleId: tu.vehicle?.id,
+      // Een ontbrekende protobuf-timestamp mag niet als tijdstip 0 gelden.
+      timestamp: (() => {
+        const value = toNumber(tu.timestamp);
+        return value != null && value > 0 ? value : undefined;
+      })(),
+      stopUpdates
+    });
+  }
+  return rows;
+}
+
+function normalizeAlerts(feed: any) {
+  const rt = (GtfsRealtimeBindings as any).transit_realtime;
+  const rows: any[] = [];
+  for (const entity of feed.entity ?? []) {
+    const alert = entity.alert;
+    if (!alert) continue;
+    rows.push({
+      entityId: entity.id,
+      header: translatedText(alert.headerText),
+      description: translatedText(alert.descriptionText),
+      url: translatedText(alert.url),
+      cause: enumName(rt.Alert?.Cause, alert.cause),
+      effect: enumName(rt.Alert?.Effect, alert.effect),
+      activePeriods: (alert.activePeriod ?? []).map((p: any) => ({
+        start: toNumber(p.start),
+        end: toNumber(p.end)
+      })),
+      informedEntities: (alert.informedEntity ?? []).map((e: any) => ({
+        agencyId: e.agencyId,
+        routeId: e.routeId,
+        stopId: e.stopId,
+        tripId: e.trip?.tripId
+      }))
+    });
+  }
+  return rows;
+}
+
+async function getOpenovFeed(url: string, kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions") {
+  const startedAt = Date.now();
+  const response = await fetch(url, {
+    headers: {
+      "user-agent": "OVLive/0.1.0 (open-source Dutch transit realtime client)",
+      "accept-encoding": "gzip"
+    },
+    signal: AbortSignal.timeout(15000),
+    cf: { cacheTtl: 8, cacheEverything: true }
+  });
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      sourceUrl: url,
+      checkedAt: new Date().toISOString(),
+      error: response.status === 429 ? "De bron beperkt het aantal verzoeken (429)." : `Bron gaf HTTP ${response.status}.`
+    };
+  }
+
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (declaredLength > MAX_BODY_BYTES) {
+    return { ok: false, status: 502, sourceUrl: url, checkedAt: new Date().toISOString(), error: "Feed groter dan ingestelde veiligheidslimiet." };
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_BODY_BYTES) {
+    return { ok: false, status: 502, sourceUrl: url, checkedAt: new Date().toISOString(), error: "Feed groter dan ingestelde veiligheidslimiet." };
+  }
+
+  const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
+  const feedTimestamp = toNumber(feed.header?.timestamp);
+  const ageSeconds = feedTimestamp == null ? undefined : Math.max(0, Math.round(Date.now() / 1000 - feedTimestamp));
+  const isStale = ageSeconds == null || ageSeconds > 180;
+  const entities = kind === "tripUpdates" || kind === "trainUpdates"
+    ? normalizeTripUpdates(feed)
+    : kind === "alerts"
+      ? normalizeAlerts(feed)
+      : (feed.entity ?? []).map((e: any) => ({
+          entityId: e.id,
+          vehicleId: e.vehicle?.vehicle?.id,
+          tripId: e.vehicle?.trip?.tripId,
+          routeId: e.vehicle?.trip?.routeId,
+          stopId: e.vehicle?.stopId,
+          latitude: e.vehicle?.position?.latitude,
+          longitude: e.vehicle?.position?.longitude,
+          timestamp: toNumber(e.vehicle?.timestamp)
+        })).filter((e: any) => e.vehicleId || e.tripId || e.latitude != null);
+
+  return {
+    ok: true,
+    source: "OpenOV / OVapi GTFS-Realtime",
+    sourceUrl: url,
+    httpStatus: response.status,
+    checkedAt: new Date().toISOString(),
+    fetchDurationMs: Date.now() - startedAt,
+    feedTimestamp: feedTimestamp == null ? null : new Date(feedTimestamp * 1000).toISOString(),
+    ageSeconds: ageSeconds ?? null,
+    freshness: isStale ? "stale_or_unknown" : "fresh",
+    entityCount: entities.length,
+    entities
+  };
+}
+
+
+function normalizeOpenovId(value: unknown): string {
+  return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
+}
+
+function normalizeClock(value: unknown): string | undefined {
+  if (value == null || value === "") return undefined;
+
+  const match = String(value).match(
+    /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/
+  );
+
+  if (!match) return undefined;
+
+  return `${match[1].padStart(2, "0")}:${match[2]}:${match[3] ?? "00"}`;
+}
+
+function parseOpenovTripId(value: unknown) {
+  const raw = String(value ?? "");
+
+  // Transitous-ID: 20261009_21:59_nl-OpenOV_380014114
+  const full = raw.match(
+    /^(\d{8})_(\d{2}:\d{2}(?::\d{2})?)_nl-OpenOV_(.+)$/i
+  );
+
+  const suffix = raw.match(/_nl-OpenOV_(.+)$/i);
+
+  return {
+    tripId: full?.[3] ?? suffix?.[1] ?? normalizeOpenovId(raw),
+    startDate: full?.[1],
+    startTime: normalizeClock(full?.[2])
+  };
+}
+
+function planStopId(place: any): string {
+  return normalizeOpenovId(place?.stopId ?? place?.id ?? "");
+}
+
+function collectPlanLegs(plan: any): any[] {
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
+    return [];
+  }
+
+  const containers = [
+    ...(Array.isArray(plan.itineraries) ? plan.itineraries : []),
+    ...(Array.isArray(plan.connections) ? plan.connections : []),
+    ...(Array.isArray(plan.journeys) ? plan.journeys : [])
+  ];
+
+  const legs: any[] = [];
+  const seen = new Set<any>();
+
+  for (const container of containers) {
+    if (!Array.isArray(container?.legs)) continue;
+
+    for (const leg of container.legs) {
+      if (leg && typeof leg === "object" && !seen.has(leg)) {
+        seen.add(leg);
+        legs.push(leg);
+      }
+    }
+  }
+
+  if (legs.length === 0 && Array.isArray(plan.legs)) {
+    return plan.legs.filter((leg: any) =>
+      leg && typeof leg === "object"
+    );
+  }
+
+  return legs;
+}
+
+async function safeOpenovFeed(
+  url: string,
+  kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions"
+): Promise<any> {
+  try {
+    return await getOpenovFeed(url, kind);
+  } catch (error) {
+    return {
+      ok: false,
+      freshness: "stale_or_unknown",
+      ageSeconds: null,
+      entities: [],
+      error: error instanceof Error
+        ? error.message
+        : "OpenOV-feed tijdelijk niet bereikbaar."
+    };
+  }
+}
+
+function epochSeconds(value: any): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value > 1e12) return value / 1000;
+    if (value > 1e9) return value;
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    const milliseconds = Date.parse(value);
+    if (Number.isFinite(milliseconds)) return milliseconds / 1000;
+
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      if (numeric > 1e12) return numeric / 1000;
+      if (numeric > 1e9) return numeric;
+    }
+  }
+
+  return undefined;
+}
+
+function scheduledEventAtStop(stop: any):
+  { seconds: number; reconstructed: boolean } | undefined {
+  // Een rit kan deze halte-update missen; dat is geen fatale fout.
+  if (!stop || typeof stop !== "object") return undefined;
+
+  for (const kind of ["departure", "arrival"]) {
+    const time = stop[`${kind}Time`];
+    if (typeof time !== "number" || !Number.isFinite(time)) continue;
+
+    const delay = stop[`${kind}DelaySeconds`];
+
+    if (typeof delay === "number" && Number.isFinite(delay)) {
+      return { seconds: time - delay, reconstructed: true };
+    }
+
+    return { seconds: time, reconstructed: false };
+  }
+
+  return undefined;
+}
+
+function matchOpenovRealtime(leg: any, records: any[]) {
+  const rawRouteId = String(leg?.routeId ?? leg?.route?.id ?? "");
+
+  if (!/^nl-OpenOV_/i.test(rawRouteId)) {
+    return { reason: "not_openov" };
+  }
+
+  const routeId = normalizeOpenovId(rawRouteId);
+  const identity = parseOpenovTripId(leg.tripId);
+  const fromId = planStopId(leg.from);
+  const toId = planStopId(leg.to);
+
+  // Voorkeursmethode: exacte rit-ID, met routecontrole als de
+  // realtimefeed ook een route-ID bevat.
+  const exact = records.filter((record: any) => {
+    const recordTripId = parseOpenovTripId(record.tripId).tripId;
+    const recordRouteId = normalizeOpenovId(record.routeId);
+
+    return recordTripId === identity.tripId &&
+      (!recordRouteId || recordRouteId === routeId);
+  });
+
+  // TIJDELIJKE DIAGNOSE: tel kandidaten per matchingstap.
+  // Deze diagnose verandert de matchbeslissing niet.
+  const diagnosticPlannedValue = leg.scheduledStartTime ?? leg.startTime;
+  const diagnosticPlannedTimestamp = epochSeconds(diagnosticPlannedValue);
+  const diagnosticExpectedDirection = leg.directionId ?? leg.trip?.directionId;
+
+  const diagnosticRouteRecords = records.filter(
+    (record: any) => normalizeOpenovId(record.routeId) === routeId
+  );
+
+  const diagnosticDateRecords = diagnosticRouteRecords.filter(
+    (record: any) => record.startDate === identity.startDate
+  );
+
+  const diagnosticDirectionRecords = diagnosticDateRecords.filter(
+    (record: any) =>
+      diagnosticExpectedDirection == null ||
+      record.directionId == null ||
+      String(record.directionId) === String(diagnosticExpectedDirection)
+  );
+
+  const diagnosticFromStopRecords = diagnosticDirectionRecords.filter(
+    (record: any) => (record.stopUpdates ?? []).some(
+      (stop: any) => normalizeOpenovId(stop.stopId) === fromId
+    )
+  );
+
+  const diagnosticOrderedStopRecords = diagnosticFromStopRecords.filter(
+    (record: any) => {
+      const ids = (record.stopUpdates ?? []).map(
+        (stop: any) => normalizeOpenovId(stop.stopId)
+      );
+      const fromIndex = ids.indexOf(fromId);
+      const toIndex = toId ? ids.indexOf(toId) : -1;
+      return fromIndex >= 0 && (toIndex < 0 || toIndex > fromIndex);
+    }
+  );
+
+  const diagnosticTimeRecords = diagnosticOrderedStopRecords.filter(
+    (record: any) => {
+      if (diagnosticPlannedTimestamp == null) return false;
+
+      const boardingUpdate = (record.stopUpdates ?? []).find(
+        (stop: any) => normalizeOpenovId(stop.stopId) === fromId
+      );
+      const event = scheduledEventAtStop(boardingUpdate);
+      if (!event) return false;
+
+      const tolerance = event.reconstructed ? 180 : 300;
+      return Math.abs(event.seconds - diagnosticPlannedTimestamp) <= tolerance;
+    }
+  );
+
+  // Toon alle kandidaten met dezelfde route, datum en richting,
+  // ook als hun halte-updates de vertrekhalte niet bevatten.
+  const diagnosticSampleSource = diagnosticDirectionRecords;
+
+  const diagnosticSamples = diagnosticSampleSource.slice(0, 5).map(
+    (record: any) => {
+      const ids = (record.stopUpdates ?? []).map(
+        (stop: any) => normalizeOpenovId(stop.stopId)
+      );
+      const boardingUpdate = (record.stopUpdates ?? []).find(
+        (stop: any) => normalizeOpenovId(stop.stopId) === fromId
+      );
+      const event = scheduledEventAtStop(boardingUpdate);
+
+      return {
+        tripId: record.tripId ?? null,
+        routeId: record.routeId ?? null,
+        startDate: record.startDate ?? null,
+        startTime: record.startTime ?? null,
+        directionId: record.directionId ?? null,
+        stopUpdateCount: ids.length,
+        stopIdsStart: ids.slice(0, 5),
+        stopIdsEnd: ids.slice(-5),
+        timestamp: record.timestamp ?? null,
+        updateAgeSeconds: typeof record.timestamp === "number"
+          ? Math.round(Date.now() / 1000 - record.timestamp)
+          : null,
+        fromStopPresent: ids.includes(fromId),
+        toStopPresent: Boolean(toId) && ids.includes(toId),
+        fromStopIndex: ids.indexOf(fromId),
+        toStopIndex: toId ? ids.indexOf(toId) : -1,
+        reconstructedBoardingTime: event
+          ? new Date(event.seconds * 1000).toISOString()
+          : null,
+        differenceSeconds: event && diagnosticPlannedTimestamp != null
+          ? Math.round(event.seconds - diagnosticPlannedTimestamp)
+          : null
+      };
+    }
+  );
+
+  console.log("[OVLIVE_MATCH_DIAG]", JSON.stringify({
+    routeId: rawRouteId,
+    tripId: leg.tripId ?? null,
+    parsedTripId: identity.tripId,
+    parsedDate: identity.startDate ?? null,
+    parsedStartTime: identity.startTime ?? null,
+    fromStopId: fromId,
+    toStopId: toId,
+    plannedStart: diagnosticPlannedValue ?? null,
+    plannedTimestamp: diagnosticPlannedTimestamp ?? null,
+    recordsChecked: records.length,
+    exactTripIdCount: exact.length,
+    sameRouteCount: diagnosticRouteRecords.length,
+    sameRouteAndDateCount: diagnosticDateRecords.length,
+    sameRouteDateAndDirectionCount: diagnosticDirectionRecords.length,
+    boardingStopCount: diagnosticFromStopRecords.length,
+    orderedStopsCount: diagnosticOrderedStopRecords.length,
+    timeWithinToleranceCount: diagnosticTimeRecords.length,
+    samples: diagnosticSamples
+  }));
+
+  if (exact.length === 1) {
+    return { record: exact[0], method: "exact_trip_id" };
+  }
+
+  if (exact.length > 1) {
+    return { reason: "ambiguous_exact_id" };
+  }
+
+  // De tijd in de Transitous-trip-ID is de tijd van het reissegment,
+  // niet noodzakelijk de vertrektijd vanaf de eerste halte van de rit.
+  // Vergelijk daarom met de geplande tijd bij de instaphalte.
+  const plannedValue = leg.scheduledStartTime ?? leg.startTime;
+  const plannedTimestamp = epochSeconds(plannedValue);
+
+  if (!identity.startDate || plannedTimestamp == null || !fromId) {
+    return { reason: "insufficient_trip_identity" };
+  }
+
+  const candidates = records.filter((record: any) => {
+    if (normalizeOpenovId(record.routeId) !== routeId) return false;
+    if (record.startDate !== identity.startDate) return false;
+
+    const expectedDirection = leg.directionId ?? leg.trip?.directionId;
+
+    if (
+      expectedDirection != null &&
+      record.directionId != null &&
+      String(expectedDirection) !== String(record.directionId)
+    ) {
+      return false;
+    }
+
+    const stopIds = (record.stopUpdates ?? []).map(
+      (stop: any) => normalizeOpenovId(stop.stopId)
+    );
+
+    const fromIndex = stopIds.indexOf(fromId);
+    const toIndex = toId ? stopIds.indexOf(toId) : -1;
+
+    if (fromIndex < 0) return false;
+    if (toIndex >= 0 && toIndex <= fromIndex) return false;
+
+    const boardingUpdate = (record.stopUpdates ?? []).find(
+      (stop: any) => normalizeOpenovId(stop.stopId) === fromId
+    );
+
+    if (!boardingUpdate) return false;
+
+    const event = scheduledEventAtStop(boardingUpdate);
+    if (!event) return false;
+
+    // Als de bron een vertraging én een absolute tijd geeft, kunnen we
+    // de geplande tijd afleiden: realtime-tijd minus vertraging.
+    // Zonder vertraging gebruiken we een ruimere, conservatieve marge.
+    const toleranceSeconds = event.reconstructed ? 180 : 300;
+
+    return Math.abs(event.seconds - plannedTimestamp) <= toleranceSeconds;
+  });
+
+  if (candidates.length === 1) {
+    return {
+      record: candidates[0],
+      method: "route_start_time_and_stops"
+    };
+  }
+
+  if (candidates.length > 1) {
+    return { reason: "ambiguous_fallback" };
+  }
+
+  // Tweede veilige methode:
+  // dezelfde route, datum, starttijd en compatibele richting.
+  // Vereis daarnaast halte-informatie voor deze rit, tenzij de rit
+  // expliciet is geannuleerd. Een rit zonder voorspellingen wordt
+  // nooit als op tijd beschouwd.
+  const identityCandidates = identity.startTime
+    ? records.filter((record: any) => {
+        if (normalizeOpenovId(record.routeId) !== routeId) return false;
+        if (record.startDate !== identity.startDate) return false;
+        if (normalizeClock(record.startTime) !== identity.startTime) return false;
+
+        const expectedDirection = leg.directionId ?? leg.trip?.directionId;
+
+        if (
+          expectedDirection != null &&
+          record.directionId != null &&
+          String(expectedDirection) !== String(record.directionId)
+        ) {
+          return false;
+        }
+
+        const relationship = String(
+          record.scheduleRelationship ?? ""
+        ).toUpperCase();
+
+        const cancelled =
+          relationship.includes("CANCEL") ||
+          relationship.includes("DELETED");
+
+        const stopUpdates = record.stopUpdates ?? [];
+
+        // Zonder halte-updates accepteren we alleen een expliciete annulering.
+        if (stopUpdates.length === 0) return cancelled;
+
+        const stopIds = stopUpdates.map(
+          (stop: any) => normalizeOpenovId(stop.stopId)
+        );
+
+        const fromIndex = fromId ? stopIds.indexOf(fromId) : -1;
+        const toIndex = toId ? stopIds.indexOf(toId) : -1;
+
+        if (fromIndex < 0 && toIndex < 0) return false;
+
+        // Als beide haltes aanwezig zijn, moet de volgorde kloppen.
+        if (
+          fromIndex >= 0 &&
+          toIndex >= 0 &&
+          toIndex <= fromIndex
+        ) {
+          return false;
+        }
+
+        return true;
+      })
+    : [];
+
+  if (identityCandidates.length === 1) {
+    return {
+      record: identityCandidates[0],
+      method: "route_date_direction_start_time"
+    };
+  }
+
+  return {
+    reason: identityCandidates.length > 1
+      ? "ambiguous_start_time_fallback"
+      : "no_matching_realtime_trip"
+  };
+}
+
+function findRealtimeStop(record: any, stopId: string) {
+  if (!stopId) return undefined;
+
+  return (record.stopUpdates ?? []).find(
+    (stop: any) => normalizeOpenovId(stop.stopId) === stopId
+  );
+}
+
+function summarizeRealtimeEvent(
+  stop: any,
+  kind: "arrival" | "departure"
+) {
+  if (!stop) return null;
+
+  const timestamp = stop[`${kind}Time`];
+  const delay = stop[`${kind}DelaySeconds`];
+
+  return {
+    time: typeof timestamp === "number"
+      ? new Date(timestamp * 1000).toISOString()
+      : null,
+    delaySeconds: typeof delay === "number" ? delay : null
+  };
+}
+
+function alertIsActive(alert: any, nowSeconds: number): boolean {
+  const periods = alert.activePeriods ?? [];
+  if (periods.length === 0) return true;
+
+  return periods.some((period: any) =>
+    (period.start == null || period.start <= nowSeconds) &&
+    (period.end == null || period.end >= nowSeconds)
+  );
+}
+
+async function enrichTransitousPlan(plan: any): Promise<any> {
+  const legs = collectPlanLegs(plan);
+
+  const openovLegs = legs.filter((leg: any) =>
+    /^nl-OpenOV_/i.test(
+      String(leg?.routeId ?? leg?.route?.id ?? "")
+    )
+  );
+
+  if (openovLegs.length === 0) return plan;
+
+  // Haal de feeds parallel op. Alleen verse feeds worden gebruikt
+  // voor actuele reisinformatie.
+  const [tripFeed, trainFeed, alertFeed] = await Promise.all([
+    safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates"),
+    safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates"),
+    safeOpenovFeed(OPENOV.alerts, "alerts")
+  ]);
+
+  // TIJDELIJKE DIAGNOSE: controleer de daadwerkelijke invoer van de matcher.
+  console.log("[OVLIVE_FEED_DIAG]", JSON.stringify({
+    tripUpdates: {
+      ok: tripFeed.ok ?? null,
+      freshness: tripFeed.freshness ?? null,
+      ageSeconds: tripFeed.ageSeconds ?? null,
+      entityCount: tripFeed.entityCount ?? null,
+      entitiesLength: Array.isArray(tripFeed.entities)
+        ? tripFeed.entities.length : null,
+      recordsWithTripId: Array.isArray(tripFeed.entities)
+        ? tripFeed.entities.filter((item: any) => item?.tripId).length : null,
+      error: tripFeed.error ?? null
+    },
+    trainUpdates: {
+      ok: trainFeed.ok ?? null,
+      freshness: trainFeed.freshness ?? null,
+      ageSeconds: trainFeed.ageSeconds ?? null,
+      entityCount: trainFeed.entityCount ?? null,
+      entitiesLength: Array.isArray(trainFeed.entities)
+        ? trainFeed.entities.length : null,
+      recordsWithTripId: Array.isArray(trainFeed.entities)
+        ? trainFeed.entities.filter((item: any) => item?.tripId).length : null,
+      error: trainFeed.error ?? null
+    }
+  }));
+
+  const usableFeeds = [
+    tripFeed,
+    trainFeed
+  ].filter((feed: any) =>
+    feed.ok === true && feed.freshness === "fresh"
+  );
+
+  // Combineer en dedupliceer updates uit de bus/tram- en treinfeed.
+  const byIdentity = new Map<string, any>();
+
+  const hasTripTimestamp = (record: any) =>
+    typeof record.timestamp === "number" &&
+    Number.isFinite(record.timestamp) &&
+    record.timestamp > 0;
+
+  for (const feed of usableFeeds) {
+    const headerMs = typeof feed.feedTimestamp === "string"
+      ? Date.parse(feed.feedTimestamp)
+      : Number.NaN;
+
+    const feedTimestampSeconds =
+      Number.isFinite(headerMs) && headerMs > 0
+        ? headerMs / 1000
+        : undefined;
+
+    for (const record of feed.entities ?? []) {
+      if (!record.tripId) continue;
+
+      const enrichedRecord = {
+        ...record,
+        feedTimestampSeconds,
+        feedAgeSeconds: feed.ageSeconds ?? null
+      };
+
+      const identity = parseOpenovTripId(record.tripId);
+      const key = [
+        normalizeOpenovId(record.routeId),
+        identity.tripId,
+        record.startDate ?? "",
+        normalizeClock(record.startTime) ?? ""
+      ].join("|");
+
+      const existing = byIdentity.get(key);
+      const newHasTimestamp = hasTripTimestamp(enrichedRecord);
+      const oldHasTimestamp = existing
+        ? hasTripTimestamp(existing)
+        : false;
+
+      const shouldReplace =
+        !existing ||
+        (newHasTimestamp && !oldHasTimestamp) ||
+        (
+          newHasTimestamp === oldHasTimestamp &&
+          (
+            newHasTimestamp
+              ? enrichedRecord.timestamp > existing.timestamp
+              : (enrichedRecord.feedTimestampSeconds ?? 0) >
+                (existing.feedTimestampSeconds ?? 0)
+          )
+        );
+
+      if (shouldReplace) {
+        byIdentity.set(key, enrichedRecord);
+      }
+    }
+  }
+
+  // TIJDELIJKE DIAGNOSE: aantallen binnen dezelfde routeaanvraag.
+  const records = [...byIdentity.values()];
+  console.log("[OVLIVE_RECORDS_DIAG]", JSON.stringify({
+    usableFeedCount: usableFeeds.length,
+    usableFeeds: usableFeeds.map((feed: any) => ({
+      freshness: feed.freshness ?? null,
+      entitiesLength: Array.isArray(feed.entities) ? feed.entities.length : null
+    })),
+    uniqueRecordCount: byIdentity.size,
+    recordsLength: records.length,
+    sample: records.slice(0, 3).map((record: any) => ({
+      routeId: record.routeId ?? null,
+      tripId: record.tripId ?? null,
+      startDate: record.startDate ?? null,
+      startTime: record.startTime ?? null,
+      timestamp: record.timestamp ?? null,
+      stopUpdateCount: Array.isArray(record.stopUpdates)
+        ? record.stopUpdates.length : null
+    }))
+  }));
+  let matchedCount = 0;
+  let unknownCount = 0;
+
+  const relevantRoutes = new Set<string>();
+  const relevantStops = new Set<string>();
+  const relevantTrips = new Set<string>();
+
+  for (const leg of openovLegs) {
+    relevantRoutes.add(normalizeOpenovId(leg.routeId ?? leg.route?.id));
+
+    const fromId = planStopId(leg.from);
+    const toId = planStopId(leg.to);
+
+    if (fromId) relevantStops.add(fromId);
+    if (toId) relevantStops.add(toId);
+
+    const identity = parseOpenovTripId(leg.tripId);
+    if (identity.tripId) relevantTrips.add(identity.tripId);
+
+    const result = matchOpenovRealtime(leg, records);
+
+    if (!result.record) {
+      unknownCount++;
+
+      const anyFeedReachable = tripFeed.ok || trainFeed.ok;
+      const anyFreshFeed = usableFeeds.length > 0;
+
+      leg.openovRealtime = {
+        source: "OpenOV GTFS-Realtime",
+        status: "unknown",
+        reason: !anyFeedReachable
+          ? "realtime_feed_unavailable"
+          : !anyFreshFeed
+            ? "realtime_feed_stale"
+            : result.reason ?? "no_matching_realtime_trip",
+        message: "Geen betrouwbare realtime-update voor deze rit gevonden."
+      };
+
+      continue;
+    }
+
+    const record = result.record;
+
+    // De timestamp per rit is optioneel. Gebruik anders de feed-header
+    // als beperkte fallback; vermeld welke timestamp hiervoor is gebruikt.
+    const recordTimestamp =
+      typeof record.timestamp === "number" &&
+      Number.isFinite(record.timestamp) &&
+      record.timestamp > 0
+        ? record.timestamp
+        : null;
+
+    const feedTimestamp =
+      typeof record.feedTimestampSeconds === "number" &&
+      Number.isFinite(record.feedTimestampSeconds) &&
+      record.feedTimestampSeconds > 0
+        ? record.feedTimestampSeconds
+        : null;
+
+    const effectiveTimestamp = recordTimestamp ?? feedTimestamp;
+    const timestampBasis = recordTimestamp !== null
+      ? "trip_update"
+      : feedTimestamp !== null
+        ? "feed_header"
+        : "unknown";
+
+    const tripUpdateAgeSeconds =
+      effectiveTimestamp === null
+        ? null
+        : Math.round(Date.now() / 1000 - effectiveTimestamp);
+
+    const tripUpdateIsFresh =
+      tripUpdateAgeSeconds !== null &&
+      tripUpdateAgeSeconds >= -60 &&
+      tripUpdateAgeSeconds <= 180;
+
+    if (!tripUpdateIsFresh) {
+      unknownCount++;
+      leg.openovRealtime = {
+        source: "OpenOV GTFS-Realtime",
+        status: "unknown",
+        reason: effectiveTimestamp === null
+          ? "realtime_timestamp_unknown"
+          : "realtime_trip_update_stale",
+        message: effectiveTimestamp === null
+          ? "Er is geen bruikbare timestamp voor deze rit of feed."
+          : "De timestamp van de rit of feed is verouderd.",
+        tripId: record.tripId ?? null,
+        routeId: record.routeId ?? null,
+        timestampBasis,
+        updateTimestamp: effectiveTimestamp === null
+          ? null
+          : new Date(effectiveTimestamp * 1000).toISOString(),
+        updateAgeSeconds: tripUpdateAgeSeconds
+      };
+      continue;
+    }
+
+    const fromUpdate = findRealtimeStop(record, fromId);
+    const toUpdate = findRealtimeStop(record, toId);
+    const relationship = String(
+      record.scheduleRelationship ?? ""
+    ).toUpperCase();
+
+    const cancelled =
+      leg.cancelled === true ||
+      relationship.includes("CANCEL") ||
+      relationship.includes("DELETED");
+
+    matchedCount++;
+
+    leg.openovRealtime = {
+      source: "OpenOV GTFS-Realtime",
+      status: cancelled ? "cancelled" : "matched",
+      timestampBasis,
+      updateTimestamp: effectiveTimestamp === null
+        ? null
+        : new Date(effectiveTimestamp * 1000).toISOString(),
+      updateAgeSeconds: tripUpdateAgeSeconds,
+      freshnessNote: recordTimestamp === null
+        ? "De timestamp per rit ontbreekt; de versheid is afgeleid van de feed-header."
+        : null,
+      matchMethod: result.method,
+      tripId: record.tripId,
+      routeId: record.routeId ?? null,
+      startDate: record.startDate ?? null,
+      startTime: record.startTime ?? null,
+      directionId: record.directionId ?? null,
+      scheduleRelationship: record.scheduleRelationship ?? null,
+      departure: summarizeRealtimeEvent(fromUpdate, "departure"),
+      arrival: summarizeRealtimeEvent(toUpdate, "arrival")
+    };
+  }
+
+  const nowSeconds = Date.now() / 1000;
+
+  const relevantAlerts = alertFeed.ok &&
+    alertFeed.freshness === "fresh"
+    ? (alertFeed.entities ?? []).filter((alert: any) => {
+        if (!alertIsActive(alert, nowSeconds)) return false;
+
+        return (alert.informedEntities ?? []).some((entity: any) => {
+          const routeId = normalizeOpenovId(entity.routeId);
+          const stopId = normalizeOpenovId(entity.stopId);
+          const tripId = parseOpenovTripId(entity.tripId).tripId;
+
+          return (
+            (routeId && relevantRoutes.has(routeId)) ||
+            (stopId && relevantStops.has(stopId)) ||
+            (tripId && relevantTrips.has(tripId))
+          );
+        });
+      }).map((alert: any) => ({
+        id: alert.entityId,
+        header: alert.header,
+        description: alert.description,
+        url: alert.url,
+        cause: alert.cause,
+        effect: alert.effect,
+        activePeriods: alert.activePeriods
+      }))
+    : [];
+
+  plan.openovAlerts = relevantAlerts;
+  plan.openovRealtimeMeta = {
+    source: "OpenOV GTFS-Realtime",
+    checkedAt: new Date().toISOString(),
+    matchedLegCount: matchedCount,
+    unknownLegCount: unknownCount,
+    alertCount: relevantAlerts.length,
+    feeds: {
+      tripUpdates: {
+        ok: Boolean(tripFeed.ok),
+        freshness: tripFeed.freshness ?? "unavailable",
+        ageSeconds: tripFeed.ageSeconds ?? null
+      },
+      trainUpdates: {
+        ok: Boolean(trainFeed.ok),
+        freshness: trainFeed.freshness ?? "unavailable",
+        ageSeconds: trainFeed.ageSeconds ?? null
+      },
+      alerts: {
+        ok: Boolean(alertFeed.ok),
+        freshness: alertFeed.freshness ?? "unavailable",
+        ageSeconds: alertFeed.ageSeconds ?? null
+      }
+    }
+  };
+
+  return plan;
+}
+
+async function handleApi(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const origin = request.headers.get("origin");
+  const headers = corsHeaders(origin);
+
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
+  if (request.method !== "GET") return json({ error: "Alleen GET is toegestaan." }, 405, headers);
+
+  if (url.pathname === "/api/health") {
+    // Decodeer de echte feeds in plaats van alleen HEAD/HTTP te controleren.
+    const entries = Object.entries(OPENOV) as Array<
+      [keyof typeof OPENOV, string]
+    >;
+
+    const feedEntries: Array<[string, any]> = await Promise.all(
+      entries.map(async ([key, feedUrl]): Promise<[string, any]> => {
+        const result = await safeOpenovFeed(feedUrl, key);
+
+        return [
+          String(key),
+          {
+            ok: Boolean(result.ok),
+            status: result.httpStatus ?? result.status ?? (
+              result.ok ? 200 : 502
+            ),
+            checkedAt: result.checkedAt ?? new Date().toISOString(),
+            sourceUrl: result.sourceUrl ?? feedUrl,
+            feedTimestamp: result.feedTimestamp ?? null,
+            ageSeconds: result.ageSeconds ?? null,
+            freshness: result.freshness ?? (
+              result.ok ? "stale_or_unknown" : "unavailable"
+            ),
+            entityCount: result.entityCount ?? (
+              Array.isArray(result.entities)
+                ? result.entities.length
+                : null
+            ),
+            fetchDurationMs: result.fetchDurationMs ?? null,
+            error: result.ok
+              ? null
+              : result.error ?? "Feed ophalen of decoderen is mislukt."
+          }
+        ];
+      })
+    );
+
+    return json({
+      service: "OVLive",
+      status: "diagnostic",
+      checkedAt: new Date().toISOString(),
+      notes: [
+        "De feeds worden opgehaald en als GTFS-Realtime-protobuf gedecodeerd.",
+        "De itemaantallen zijn gedecodeerde items, niet noodzakelijk unieke ritten.",
+        "Een beschikbare feed garandeert niet dat iedere rit een realtime-update heeft.",
+        "Geen update voor een rit betekent NIET dat die rit op tijd rijdt."
+      ],
+      feeds: Object.fromEntries(feedEntries)
+    }, 200, headers);
+  }
+
+  if (url.pathname === "/api/realtime") {
+    const kind = url.searchParams.get("kind") ?? "tripUpdates";
+    if (!["tripUpdates", "alerts", "trainUpdates", "vehiclePositions"].includes(kind)) {
+      return json({ error: "Ongeldig kind. Gebruik tripUpdates, alerts, trainUpdates of vehiclePositions." }, 400, headers);
+    }
+    const feedUrl = OPENOV[kind as keyof typeof OPENOV];
+    try {
+      const data = await getOpenovFeed(feedUrl, kind as keyof typeof OPENOV);
+      const { entities = [], ...meta } = data as any;
+
+      // Optionele filters: filter de volledige gedecodeerde feed vóór de limiet.
+      // Zo kunnen we een specifieke route onderzoeken zonder duizenden
+      // niet-relevante realtime-items terug te sturen.
+      const routeFilters = (url.searchParams.get("routeId") ?? "")
+        .split(",")
+        .map((value: string) => normalizeOpenovId(value))
+        .filter(Boolean);
+
+      const tripFilters = (url.searchParams.get("tripId") ?? "")
+        .split(",")
+        .map((value: string) => parseOpenovTripId(value).tripId)
+        .filter(Boolean);
+
+      const stopFilters = (url.searchParams.get("stopId") ?? "")
+        .split(",")
+        .map((value: string) => normalizeOpenovId(value))
+        .filter(Boolean);
+
+      const filteredEntities = (entities as any[]).filter((entity: any) => {
+        if (
+          routeFilters.length > 0 &&
+          !routeFilters.includes(normalizeOpenovId(entity.routeId))
+        ) return false;
+
+        if (
+          tripFilters.length > 0 &&
+          !tripFilters.includes(parseOpenovTripId(entity.tripId).tripId)
+        ) return false;
+
+        if (stopFilters.length > 0) {
+          const stopIds = [
+            entity.stopId,
+            ...(entity.stopUpdates ?? []).map((stop: any) => stop.stopId),
+            ...(entity.informedEntities ?? []).map((item: any) => item.stopId)
+          ]
+            .map((value: unknown) => normalizeOpenovId(value))
+            .filter(Boolean);
+
+          if (!stopFilters.some((stopId: string) => stopIds.includes(stopId))) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+
+      const limit = Math.min(
+        2000,
+        Math.max(1, Number(url.searchParams.get("limit") ?? 500))
+      );
+
+      return json({
+        ...meta,
+        appliedFilters: {
+          routeIds: routeFilters,
+          tripIds: tripFilters,
+          stopIds: stopFilters
+        },
+        matchingCount: filteredEntities.length,
+        entities: filteredEntities.slice(0, limit),
+        returnedCount: Math.min(filteredEntities.length, limit)
+      }, data.ok ? 200 : 502, headers);
+    } catch (error) {
+      return json({
+        ok: false,
+        sourceUrl: feedUrl,
+        checkedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : "Feed kon niet worden gelezen."
+      }, 502, headers);
+    }
+  }
+
+
+  if (url.pathname === "/api/geocode") {
+    const query = (url.searchParams.get("q") ?? "").trim();
+    if (query.length < 2 || query.length > 160) {
+      return json({ error: "Voer minimaal 2 en maximaal 160 tekens in." }, 400, headers);
+    }
+    try {
+      const upstream = new URL("https://photon.komoot.io/api/");
+      upstream.searchParams.set("q", query);
+      upstream.searchParams.set("limit", "6");
+      const response = await fetch(upstream, {
+        headers: {
+          "accept": "application/geo+json, application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        cf: { cacheTtl: 30, cacheEverything: true },
+        signal: AbortSignal.timeout(10000)
+      });
+      if (!response.ok) return json({ error: `Geocoder gaf HTTP ${response.status}.` }, 502, headers);
+      return new Response(await response.text(), {
+        status: 200,
+        headers: { ...headers, "content-type": "application/geo+json; charset=utf-8", "cache-control": "public, max-age=30" }
+      });
+    } catch (error) {
+      return json({ error: "Plaats zoeken is tijdelijk niet beschikbaar." }, 502, headers);
+    }
+  }
+
+  if (url.pathname === "/api/plan") {
+    const fromPlace = url.searchParams.get("fromPlace");
+    const toPlace = url.searchParams.get("toPlace");
+    if (!fromPlace || !toPlace) {
+      return json({ error: "Geef fromPlace en toPlace op als latitude,longitude of een Transitous-stop-ID." }, 400, headers);
+    }
+    if (fromPlace.length > 200 || toPlace.length > 200) {
+      return json({ error: "Locatieparameter te lang." }, 400, headers);
+    }
+
+    const upstream = new URL(`${TRANSITOUS}/plan`);
+    url.searchParams.forEach((value, key) => {
+      if (MAX_ROUTE_PARAMS.has(key)) upstream.searchParams.set(key, value);
+    });
+    upstream.searchParams.set("fromPlace", fromPlace);
+    upstream.searchParams.set("toPlace", toPlace);
+
+    if (env.APP_CONTACT && env.APP_CONTACT.includes("replace-with-contact")) {
+      return json({ error: "Configureer APP_CONTACT in wrangler.toml voordat je Transitous gebruikt." }, 503, headers);
+    }
+
+    try {
+      const response = await fetch(upstream, {
+        headers: {
+          "accept": "application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(25000)
+      });
+      const body = await response.text();
+      const responseHeaders = {
+        ...headers,
+        "content-type": response.headers.get("content-type") ?? "application/json",
+        "cache-control": "no-store",
+        "x-upstream": "Transitous MOTIS v6"
+      };
+
+      if (!response.ok) {
+        return new Response(body, {
+          status: response.status,
+          headers: responseHeaders
+        });
+      }
+
+      let planData: any;
+
+      try {
+        planData = JSON.parse(body);
+      } catch {
+        return new Response(body, {
+          status: response.status,
+          headers: responseHeaders
+        });
+      }
+
+      try {
+        planData = await enrichTransitousPlan(planData);
+      } catch (error) {
+        console.error(
+          "[OVLIVE_ENRICHMENT_ERROR]",
+          error instanceof Error ? error.stack ?? error.message : error
+        );
+
+        if (
+          planData &&
+          typeof planData === "object" &&
+          !Array.isArray(planData)
+        ) {
+          planData.openovRealtimeMeta = {
+            status: "enrichment_failed",
+            message: "De reis is opgehaald, maar realtime kon niet worden toegevoegd."
+          };
+        }
+      }
+
+      return json(planData, response.status, {
+        ...headers,
+        "x-upstream": "Transitous MOTIS v6"
+      });
+    } catch (error) {
+      return json({
+        error: "De reisplanner is tijdelijk niet bereikbaar.",
+        detail: error instanceof Error ? error.message : "Onbekende fout"
+      }, 502, headers);
+    }
+  }
+
+  if (url.pathname === "/api/stoptimes") {
+    const stopId = url.searchParams.get("stopId");
+    if (!stopId || stopId.length > 200) return json({ error: "Geef een geldige stopId op." }, 400, headers);
+    const upstream = new URL(`${TRANSITOUS}/stoptimes`);
+    upstream.searchParams.set("stopId", stopId);
+    upstream.searchParams.set("n", String(Math.min(50, Math.max(1, Number(url.searchParams.get("n") ?? 20)))));
+    try {
+      const response = await fetch(upstream, {
+        headers: {
+          "accept": "application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(15000)
+      });
+      return new Response(await response.text(), {
+        status: response.status,
+        headers: { ...headers, "content-type": "application/json", "cache-control": "no-store" }
+      });
+    } catch (error) {
+      return json({ error: "Realtime vertrektijden tijdelijk niet beschikbaar." }, 502, headers);
+    }
+  }
+
+  return json({ error: "API-route niet gevonden." }, 404, headers);
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/ovapi-test/match-plan") {
+      const matchResponse = await handleTransitousOvapiMatch(request);
+      if (matchResponse) return matchResponse;
+    }
+    if (url.pathname.startsWith("/api/ovapi-test/")) {
+      const ovapiTestResponse = await handleOvapiTestApi(request);
+      if (ovapiTestResponse) return ovapiTestResponse;
+    }
+    if (url.pathname.startsWith("/api/")) return handleApi(request, env);
+    return env.ASSETS.fetch(request);
+  }
+};

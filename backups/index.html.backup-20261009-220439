@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f97316">
+  <title>OVLive — realtime reisplanner</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101317;--panel:#191e24;--line:#303842;--muted:#a8b0ba;--text:#f6f7f9;--accent:#fb923c;--green:#86efac;--red:#fca5a5}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,sans-serif}
+    main{max-width:900px;margin:auto;padding:28px 18px 60px}.brand{display:flex;gap:12px;align-items:center;margin-bottom:24px}.logo{background:var(--accent);color:#1b1208;border-radius:14px;padding:9px 12px;font-weight:900}
+    h1{font-size:clamp(28px,5vw,42px);line-height:1.1;margin:0}p{color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px;margin:16px 0}
+    label{display:block;font-size:13px;color:var(--muted);margin:0 0 6px}input,select,button{font:inherit;border-radius:10px;border:1px solid var(--line);padding:12px;background:#11161b;color:var(--text);width:100%}
+    button{background:var(--accent);color:#241405;border:0;font-weight:750;cursor:pointer;margin-top:12px}
+    button.secondary{background:#303842;color:var(--text);margin:6px 0 8px}button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:var(--muted);font-size:13px}.status{padding:10px 12px;border-radius:10px;background:#222a32;margin:8px 0}.ok{color:var(--green)}.bad{color:var(--red)}
+    .journey{border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}.leg{padding:10px 0;border-bottom:1px solid var(--line)}.leg:last-child{border-bottom:0}.pill{font-size:12px;border-radius:999px;background:#2a3038;padding:3px 8px;display:inline-block;margin-right:6px}.source{font-size:12px;color:var(--muted);overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#dbe4ee;font-size:12px}
+    @media(max-width:600px){.grid{grid-template-columns:1fr}.panel{padding:14px}}
+  </style>
+</head>
+<body>
+<main>
+  <div class="brand"><div class="logo">OV</div><div><h1>OVLive</h1><div class="muted">Open data · reisadvies · realtime diagnose</div></div></div>
+  <p>Een testbare Cloudflare-versie van een Nederlandse OV-reisplanner. De planner gebruikt Transitous; realtimefeeds worden apart gecontroleerd. Een ontbrekende update wordt nooit als “op tijd” gepresenteerd.</p>
+
+  <section class="panel">
+    <h2>Reis plannen</h2>
+    <p class="muted">Zoek vertrek- en aankomstplek en kies het juiste resultaat. Je kunt ook latitude,longitude of een Transitous-stop-ID invoeren. Geocodering gebruikt Photon/OpenStreetMap; de route wordt berekend door Transitous.</p>
+    <div class="grid">
+      <div><label for="from">Van (plaats, adres of halte)</label><input id="from" value="Den Haag Centraal" autocomplete="off"><button type="button" id="fromFind" class="secondary">Zoek vertrekplek</button><select id="fromChoice" aria-label="Kies vertrekplek"><option value="">Kies een gevonden plek…</option></select></div>
+      <div><label for="to">Naar (plaats, adres of halte)</label><input id="to" value="Utrecht Centraal" autocomplete="off"><button type="button" id="toFind" class="secondary">Zoek bestemming</button><select id="toChoice" aria-label="Kies bestemming"><option value="">Kies een gevonden plek…</option></select></div>
+      <div><label for="when">Vertrektijd (optioneel)</label><input id="when" type="datetime-local"></div>
+      <div><label for="mode">Reisinstelling</label><select id="mode"><option value="">Alle OV-modi</option><option value="BUS,TRAM,SUBWAY">Bus, tram en metro</option><option value="TRAIN">Trein</option></select></div>
+    </div>
+    <button id="planBtn">Zoek reizen</button>
+    <div id="planStatus" class="muted" aria-live="polite"></div>
+    <div id="journeys"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Realtimebron controleren</h2>
+    <p class="muted">Controleert of OpenOV GTFS-RT-feeds opgehaald en gedecodeerd kunnen worden en toont de timestamp uit de feed. Dit is geen bewijs van volledige landelijke dekking.</p>
+    <button id="healthBtn">Test OpenOV-feeds</button>
+    <div id="healthStatus" aria-live="polite"></div>
+    <div id="healthDetails"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Actuele meldingen / vertragingen</h2>
+    <div class="grid"><div><label for="feedKind">Feed</label><select id="feedKind"><option value="tripUpdates">Ritupdates / vertragingen / annuleringen</option><option value="alerts">Storingsmeldingen</option><option value="trainUpdates">Treinupdates</option><option value="vehiclePositions">Voertuigposities</option></select></div><div><label for="feedLimit">Maximaal aantal items</label><select id="feedLimit"><option>100</option><option selected>300</option><option>500</option><option>1000</option></select></div></div>
+    <button id="feedBtn">Laad realtime-data</button>
+    <div id="feedStatus" aria-live="polite"></div><div id="feedRows"></div>
+  </section>
+
+  <footer class="source">Bronnen: <a href="https://openov.nl/" target="_blank" rel="noreferrer">openOV</a> · <a href="https://transitous.org/sources/" target="_blank" rel="noreferrer">Transitous-bronnen</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap</a>. Realtime-data is best-effort en kan ontbreken of verouderd zijn.</footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const fmt = t => t ? new Date(t).toLocaleString('nl-NL',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : 'onbekend';
+const esc = s => String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path){const r=await fetch(path);const data=await r.json().catch(()=>({error:'Ongeldig antwoord'}));if(!r.ok)throw new Error(data.error||`HTTP ${r.status}`);return data;}
+
+async function findPlaces(inputId, selectId, statusId) {
+  const query = $(inputId).value.trim();
+  const select = $(selectId);
+  select.innerHTML = '<option value="">Zoekresultaten laden…</option>';
+  try {
+    const data = await api('/api/geocode?q=' + encodeURIComponent(query));
+    const features = data.features || [];
+    select.innerHTML = '<option value="">Kies de juiste plek…</option>' + features.map((f, i) => {
+      const p = f.properties || {};
+      const coords = f.geometry?.coordinates || [];
+      const label = [p.name, p.street, p.housenumber, p.postcode, p.city || p.locality, p.state].filter(Boolean).join(', ');
+      return `<option value="${esc(coords[1] + ',' + coords[0])}" data-label="${esc(label)}">${esc(label || query)} (${esc(p.osm_value || p.type || 'plek')})</option>`;
+    }).join('');
+    if (features.length === 1) select.selectedIndex = 1;
+    $(statusId).textContent = features.length ? `${features.length} resultaten gevonden. Kies de juiste plek.` : 'Geen plek gevonden; probeer een specifiekere naam.';
+  } catch(e) {
+    select.innerHTML = '<option value="">Geen resultaten</option>';
+    $(statusId).textContent = e.message;
+  }
+}
+$('fromFind').onclick = () => findPlaces('from','fromChoice','planStatus');
+$('toFind').onclick = () => findPlaces('to','toChoice','planStatus');
+$('fromChoice').onchange = () => { const o=$('fromChoice').selectedOptions[0]; if(o?.dataset.label) $('from').value=o.dataset.label; };
+$('toChoice').onchange = () => { const o=$('toChoice').selectedOptions[0]; if(o?.dataset.label) $('to').value=o.dataset.label; };
+function resolvePlace(inputId, choiceId) {
+  const raw = $(inputId).value.trim();
+  const selected = $(choiceId).value;
+  if (selected && $(choiceId).selectedOptions[0]?.dataset.label === raw) return selected;
+  if (/^-?\\d+(?:\\.\\d+)?\\s*,\\s*-?\\d+(?:\\.\\d+)?$/.test(raw)) return raw.replace(/\\s/g,'');
+  // Transitous stop IDs can be pasted directly.
+  if (/^[A-Za-z0-9_.:-]{3,200}$/.test(raw) && !/\\s/.test(raw)) return raw;
+  throw new Error(`Zoek en selecteer eerst de plek bij "${inputId === 'from' ? 'Van' : 'Naar'}".`);
+}
+
+$('planBtn').onclick = async () => {
+  $('planBtn').disabled=true; $('planStatus').textContent='Reizen ophalen…'; $('journeys').innerHTML='';
+  try {
+    const q=new URLSearchParams({fromPlace:resolvePlace('from','fromChoice'),toPlace:resolvePlace('to','toChoice')});
+    const when=$('when').value;
+    if(when){const d=new Date(when);q.set('time',d.toISOString());}
+    if($('mode').value)q.set('transitModes',$('mode').value);
+    q.set('numItineraries','5');
+    const data=await api('/api/plan?'+q);
+    const journeys=data.itineraries||data.journeys||[];
+    $('planStatus').textContent=`Plannerantwoord ontvangen · ${journeys.length} opties. Realtime-koppeling per rit moet afzonderlijk worden gevalideerd.`;
+    if(!journeys.length){$('journeys').innerHTML='<p>Geen reisopties ontvangen. Controleer de locaties of probeer een andere tijd.</p><pre>'+esc(JSON.stringify(data,null,2).slice(0,8000))+'</pre>';return;}
+    $('journeys').innerHTML=journeys.slice(0,5).map((j,i)=>{
+      const legs=j.legs||j.transitLegs||[];
+      const dep=j.startTime||j.start_time||j.departureTime;
+      const arr=j.endTime||j.end_time||j.arrivalTime;
+      return `<div class="journey"><strong>Reis ${i+1}</strong><div>${esc(fmt(dep))} → ${esc(fmt(arr))}</div>${legs.map(l=>{
+        const mode=l.mode||l.transportMode||'OV'; const line=l.routeShortName||l.line||l.displayName||l.route?.name||'Lijn niet opgegeven';
+        const from=l.from?.name||l.origin?.name||'?'; const to=l.to?.name||l.destination?.name||'?';
+        const ld=l.startTime||l.departureTime, la=l.endTime||l.arrivalTime;
+        return `<div class="leg"><span class="pill">${esc(mode)}</span><strong>${esc(line)}</strong><div>${esc(from)} (${esc(fmt(ld))}) → ${esc(to)} (${esc(fmt(la))})</div><div class="muted">Realtimestatus: niet als actueel bevestigd in deze prototypeweergave. Controleer de bronupdates hieronder.</div></div>`;
+      }).join('')||'<pre>'+esc(JSON.stringify(j,null,2).slice(0,3000))+'</pre>'}</div>`;
+    }).join('');
+  } catch(e){$('planStatus').innerHTML='<span class="bad">'+esc(e.message)+'</span>';}
+  finally{$('planBtn').disabled=false;}
+};
+$('healthBtn').onclick=async()=>{
+ $('healthBtn').disabled=true;$('healthStatus').textContent='Feeds controleren…';$('healthDetails').innerHTML='';
+ try{const d=await api('/api/health');$('healthStatus').textContent='Controle afgerond: downloadstatus en feed-timestamps zijn opgehaald.';
+ $('healthDetails').innerHTML=Object.entries(d.feeds||{}).map(([name,f])=>`<div class="status"><strong>${esc(name)}</strong> · ${f.ok?'<span class="ok">HTTP/feed OK</span>':'<span class="bad">Niet OK</span>'}<div class="muted">Feedtijd: ${esc(f.feedTimestamp||'onbekend')} · ouderdom: ${esc(f.ageSeconds??'?')} sec · items: ${esc(f.entityCount??'?')}</div><div class="muted">${esc(f.error||f.freshness||'')}</div></div>`).join('');}
+ catch(e){$('healthStatus').innerHTML='<span class="bad">'+esc(e.message)+'</span>';}finally{$('healthBtn').disabled=false;}
+};
+$('feedBtn').onclick=async()=>{
+ $('feedBtn').disabled=true;$('feedStatus').textContent='Realtime-data laden…';$('feedRows').innerHTML='';
+ try{const kind=$('feedKind').value;const d=await api(`/api/realtime?kind=${encodeURIComponent(kind)}&limit=${encodeURIComponent($('feedLimit').value)}`);
+ $('feedStatus').textContent=`${d.returnedCount} items · feedtijd ${d.feedTimestamp||'onbekend'} · ouderdom ${d.ageSeconds??'?'} sec · status ${d.freshness||'onbekend'}`;
+ $('feedRows').innerHTML=(d.entities||[]).slice(0,100).map(e=>{
+   if(kind==='alerts')return `<div class="status"><strong>${esc(e.header||'Melding zonder titel')}</strong><div>${esc(e.description||'')}</div><div class="muted">Effect: ${esc(e.effect||'?')} · betrokken: ${esc((e.informedEntities||[]).map(x=>x.routeId||x.stopId||x.tripId||x.agencyId).filter(Boolean).join(', ')||'niet gespecificeerd')}</div></div>`;
+   if(kind==='tripUpdates'||kind==='trainUpdates')return `<div class="status"><strong>Rit ${esc(e.tripId||'onbekend')}</strong><div>Lijn/route: ${esc(e.routeId||'?')} · status: ${esc(e.scheduleRelationship||'geen annulering gemeld')}</div><div class="muted">Vertraging: ${e.delaySeconds==null?'niet op ritniveau opgegeven':esc(Math.round(e.delaySeconds/60*10)/10)+' min'} · voertuig: ${esc(e.vehicleId||'?')}</div><div class="muted">${esc((e.stopUpdates||[]).slice(0,3).map(s=>`${s.stopId||'?'}: ${s.departureDelaySeconds??s.arrivalDelaySeconds??'?'}s`).join(' · '))}</div></div>`;
+   return `<div class="status"><strong>Voertuig ${esc(e.vehicleId||'?')}</strong><div>Rit: ${esc(e.tripId||'?')} · route: ${esc(e.routeId||'?')}</div><div class="muted">Positie: ${esc(e.latitude??'?')}, ${esc(e.longitude??'?')} · tijd: ${esc(fmt(e.timestamp?e.timestamp*1000:null))}</div></div>`;
+ }).join('')||'<p>Geen items in deze feed.</p>';
+ }catch(e){$('feedStatus').innerHTML='<span class="bad">'+esc(e.message)+'</span>';}finally{$('feedBtn').disabled=false;}
+};
+</script>
+</body></html>

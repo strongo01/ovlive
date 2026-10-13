@@ -463,6 +463,118 @@ function normalizeStopSide(value) {
     .trim();
 }
 
+
+
+// Generated OpenOV GTFS stop_id -> official NDOV CHB StopPlace crosswalk.
+const OPENOV_STOP_PLACE_CROSSWALK_ROOT = "ndov-openov-stopplace-crosswalk";
+let openovStopPlaceManifestPromise = null;
+const openovStopPlaceShardCache = new Map();
+
+function openovStopPlaceKey(value) {
+  const match = String(value ?? "").trim().match(/^(?:nl-openov_)?(\d+)$/i);
+  return match ? match[1] : null;
+}
+
+function openovStopPlaceShardNumber(key, shardCount) {
+  // Must match the Python FNV-1a UTF-8 hash used by the generator.
+  const bytes = new TextEncoder().encode(key);
+  let hash = 0x811c9dc5;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash % shardCount;
+}
+
+async function getOpenovStopPlaceIndex(env, stopIds = []) {
+  if (!openovStopPlaceManifestPromise) {
+    openovStopPlaceManifestPromise = readAssetJson(
+      env,
+      `${OPENOV_STOP_PLACE_CROSSWALK_ROOT}/manifest.json`,
+    ).catch((error) => {
+      openovStopPlaceManifestPromise = null;
+      throw error;
+    });
+  }
+
+  const manifest = await openovStopPlaceManifestPromise;
+  const shardCount = Number(manifest?.shardCount);
+
+  if (
+    manifest?.schemaVersion !== 1 ||
+    !Number.isInteger(shardCount) ||
+    shardCount < 1 ||
+    shardCount > 256
+  ) {
+    throw new Error("Ongeldig OpenOV/CHB-stopcrosswalkmanifest.");
+  }
+
+  const keys = [...new Set(
+    (Array.isArray(stopIds) ? stopIds : [])
+      .map(openovStopPlaceKey)
+      .filter(Boolean),
+  )];
+
+  const shardNumbers = [...new Set(
+    keys.map((key) => openovStopPlaceShardNumber(key, shardCount)),
+  )];
+
+  const stopPlaces = Object.create(null);
+
+  await Promise.all(shardNumbers.map(async (shardNumber) => {
+    const cacheKey = String(shardNumber);
+    let shardPromise = openovStopPlaceShardCache.get(cacheKey);
+
+    if (!shardPromise) {
+      shardPromise = readAssetJson(
+        env,
+        `${OPENOV_STOP_PLACE_CROSSWALK_ROOT}/shards/openov-stop-places-${shardNumber}.json`,
+      ).catch((error) => {
+        openovStopPlaceShardCache.delete(cacheKey);
+        throw error;
+      });
+
+      openovStopPlaceShardCache.set(cacheKey, shardPromise);
+    }
+
+    const shard = await shardPromise;
+    Object.assign(stopPlaces, shard?.stopPlaces ?? {});
+  }));
+
+  return { ...manifest, stopPlaces };
+}
+
+function expectedStopWithOpenovStopPlaceCrosswalk(stop, index) {
+  if (!stop || typeof stop !== "object") return stop;
+
+  const key = openovStopPlaceKey(stop.stopId);
+  const mapping = key ? index?.stopPlaces?.[key] : null;
+
+  // Unmapped stops remain untouched. Never infer a mapping from name alone.
+  if (!mapping) return stop;
+
+  const mappedPlace = normalizeStopPlaceIdentity(mapping.stopPlaceCode);
+  const existingPlace = normalizeStopPlaceIdentity(
+    stop.parentId ?? stop.parentStation ?? stop.stopPlaceRef ?? stop.stopPlaceCode,
+  );
+
+  // If Transitous already provides a conflicting parent identity, fail closed.
+  if (existingPlace && existingPlace !== mappedPlace) return stop;
+
+  return {
+    ...stop,
+    stopPlaceCode: mapping.stopPlaceCode,
+    stopPlaceRef: `NL:CHB:StopPlace:${String(mapping.stopPlaceCode).replace(/^NL:S:/, "")}`,
+    ndovOpenovStopCrosswalk: {
+      method: mapping.method ?? "generated_openov_chb_crosswalk",
+      quayCode: mapping.quayCode ?? null,
+      distanceMeters: mapping.distanceMeters ?? null,
+      generatedAt: index.generatedAt ?? null,
+    },
+  };
+}
+
+
 function assignmentDateKey(value) {
   const match = String(value ?? "").match(/(\d{4})-?(\d{2})-?(\d{2})/);
   return match ? `${match[1]}${match[2]}${match[3]}` : null;
@@ -889,6 +1001,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   // fresh KV78 rows and never opens a feed connection from /api/plan.
   let kv78Error = null;
   let stopAssignmentIndex = null;
+  let openovStopPlaceIndex = null;
   try {
     const kv78Snapshot = await getKv78Snapshot(env);
     kv78FeedState = kv78Snapshot.state ?? "unknown";
@@ -901,6 +1014,21 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         item,
         rows: await getCurrentKv78Rows(env, item.identityKey),
       })));
+
+      try {
+        const plannedStopIds = rowResults.flatMap(({ item }) => [
+          item?.leg?.from?.stopId,
+          item?.leg?.to?.stopId,
+        ]);
+        openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, plannedStopIds);
+      } catch (error) {
+        kv78Error = [
+          kv78Error,
+          `OpenOV/CHB-stopcrosswalk niet beschikbaar: ${
+            error instanceof Error ? error.message : "onbekende fout"
+          }`,
+        ].filter(Boolean).join("; ");
+      }
       const assignmentKeys = [...new Set(rowResults.flatMap((entry) => entry.rows.map((row) => {
         const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
         const stopCode = String(row?.userStopCode ?? "").trim();
@@ -918,10 +1046,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         const scheduledArrival = valueOf(item.leg.to, "arrival") ?? valueOf(item.leg, "endTime", "arrivalTime");
         const operationDate = item.identity?.serviceDate ?? item.realtimeIdentity?.operationDate ?? item.identity?.operationDate ?? null;
         const departureMatch = matchKv78RowByScheduleTime(rows, scheduledDeparture, "targetDepartureTime", 180, {
-          expectedStop: item.leg.from, assignmentIndex: stopAssignmentIndex, operationDate,
+          expectedStop: expectedStopWithOpenovStopPlaceCrosswalk(item.leg.from, openovStopPlaceIndex), assignmentIndex: stopAssignmentIndex, operationDate,
         });
         const arrivalMatch = matchKv78RowByScheduleTime(rows, scheduledArrival, "targetArrivalTime", 180, {
-          expectedStop: item.leg.to, assignmentIndex: stopAssignmentIndex, operationDate,
+          expectedStop: expectedStopWithOpenovStopPlaceCrosswalk(item.leg.to, openovStopPlaceIndex), assignmentIndex: stopAssignmentIndex, operationDate,
         });
         let departure = kv78StopEvent(departureMatch?.row, "departureDelaySeconds", departureMatch);
         let arrival = kv78StopEvent(arrivalMatch?.row, "arrivalDelaySeconds", arrivalMatch);

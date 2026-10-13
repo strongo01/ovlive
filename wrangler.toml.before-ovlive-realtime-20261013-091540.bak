@@ -1,0 +1,28 @@
+name = "ovlive-ovapi-crossmatch-test"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[vars]
+APP_NAME = "OVLive"
+APP_VERSION = "0.3.0-ovapi-crossmatch-test"
+# Set this to a contact email or website before using Transitous in production.
+APP_CONTACT = "newstapper@outlook.com"
+NDOV_AUTOCOLLECT = "true"
+
+# Lokale NDOV-diagnosebridge. Deze endpoints accepteren alleen loopback-hosts.
+[[durable_objects.bindings]]
+name = "NDOV_FEEDS"
+class_name = "NdovFeedHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NdovFeedHub"]
+
+[triggers]
+crons = ["*/5 * * * *"]

@@ -1,0 +1,381 @@
+import GtfsRealtimeBindings from "gtfs-realtime-bindings";
+
+interface Env {
+  ASSETS: Fetcher;
+  APP_NAME: string;
+  APP_VERSION: string;
+  APP_CONTACT: string;
+}
+
+const OPENOV = {
+  tripUpdates: "https://gtfs.openov.nl/gtfs-rt/tripUpdates.pb",
+  alerts: "https://gtfs.openov.nl/gtfs-rt/alerts.pb",
+  trainUpdates: "https://gtfs.openov.nl/gtfs-rt/trainUpdates.pb",
+  vehiclePositions: "https://gtfs.openov.nl/gtfs-rt/vehiclePositions.pb"
+};
+
+const TRANSITOUS = "https://api.transitous.org/api/v6";
+const MAX_BODY_BYTES = 20 * 1024 * 1024;
+const MAX_ROUTE_PARAMS = new Set([
+  "fromPlace", "toPlace", "time", "arriveBy", "transitModes",
+  "maxTransfers", "maxTravelTime", "timetableView", "numItineraries",
+  "maxItineraries", "searchWindow", "preTransitModes", "postTransitModes",
+  "language", "wheelchair"
+]);
+
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      ...extraHeaders
+    }
+  });
+}
+
+function corsHeaders(origin: string | null) {
+  // Same-origin frontend is the intended production deployment. CORS is deliberately
+  // not wildcard-enabled to avoid turning this Worker into a public open proxy.
+  const headers: Record<string, string> = {
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "content-type",
+    "vary": "Origin"
+  };
+  if (origin && (origin === "https://ovlive.pages.dev" || origin.startsWith("http://localhost:"))) {
+    headers["access-control-allow-origin"] = origin;
+  }
+  return headers;
+}
+
+function toNumber(value: any): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "number") return value;
+  if (typeof value.toNumber === "function") return value.toNumber();
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function translatedText(value: any): string | undefined {
+  const translations = value?.translation;
+  if (!Array.isArray(translations) || translations.length === 0) return undefined;
+  const dutch = translations.find((t: any) => t.language === "nl");
+  return (dutch ?? translations[0])?.text;
+}
+
+function enumName(enumObject: any, value: any): string | undefined {
+  if (value == null) return undefined;
+  return typeof value === "string" ? value : enumObject?.[value];
+}
+
+function normalizeTripUpdates(feed: any) {
+  const rt = (GtfsRealtimeBindings as any).transit_realtime;
+  const rows: any[] = [];
+  for (const entity of feed.entity ?? []) {
+    const tu = entity.tripUpdate;
+    if (!tu) continue;
+    const trip = tu.trip ?? {};
+    const stopUpdates = (tu.stopTimeUpdate ?? []).map((s: any) => ({
+      stopId: s.stopId,
+      stopSequence: s.stopSequence,
+      arrivalTime: toNumber(s.arrival?.time),
+      arrivalDelaySeconds: s.arrival?.delay,
+      departureTime: toNumber(s.departure?.time),
+      departureDelaySeconds: s.departure?.delay,
+      scheduleRelationship: enumName(rt.StopTimeUpdate?.ScheduleRelationship, s.scheduleRelationship)
+    }));
+    rows.push({
+      entityId: entity.id,
+      tripId: trip.tripId,
+      routeId: trip.routeId,
+      startDate: trip.startDate,
+      startTime: trip.startTime,
+      scheduleRelationship: enumName(rt.TripDescriptor?.ScheduleRelationship, trip.scheduleRelationship),
+      delaySeconds: tu.delay,
+      vehicleId: tu.vehicle?.id,
+      timestamp: toNumber(tu.timestamp),
+      stopUpdates
+    });
+  }
+  return rows;
+}
+
+function normalizeAlerts(feed: any) {
+  const rt = (GtfsRealtimeBindings as any).transit_realtime;
+  const rows: any[] = [];
+  for (const entity of feed.entity ?? []) {
+    const alert = entity.alert;
+    if (!alert) continue;
+    rows.push({
+      entityId: entity.id,
+      header: translatedText(alert.headerText),
+      description: translatedText(alert.descriptionText),
+      url: translatedText(alert.url),
+      cause: enumName(rt.Alert?.Cause, alert.cause),
+      effect: enumName(rt.Alert?.Effect, alert.effect),
+      activePeriods: (alert.activePeriod ?? []).map((p: any) => ({
+        start: toNumber(p.start),
+        end: toNumber(p.end)
+      })),
+      informedEntities: (alert.informedEntity ?? []).map((e: any) => ({
+        agencyId: e.agencyId,
+        routeId: e.routeId,
+        stopId: e.stopId,
+        tripId: e.trip?.tripId
+      }))
+    });
+  }
+  return rows;
+}
+
+async function getOpenovFeed(url: string, kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions") {
+  const startedAt = Date.now();
+  const response = await fetch(url, {
+    headers: {
+      "user-agent": "OVLive/0.1.0 (open-source Dutch transit realtime client)",
+      "accept-encoding": "gzip"
+    },
+    cf: { cacheTtl: 8, cacheEverything: true }
+  });
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      sourceUrl: url,
+      checkedAt: new Date().toISOString(),
+      error: response.status === 429 ? "De bron beperkt het aantal verzoeken (429)." : `Bron gaf HTTP ${response.status}.`
+    };
+  }
+
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (declaredLength > MAX_BODY_BYTES) {
+    return { ok: false, status: 502, sourceUrl: url, checkedAt: new Date().toISOString(), error: "Feed groter dan ingestelde veiligheidslimiet." };
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_BODY_BYTES) {
+    return { ok: false, status: 502, sourceUrl: url, checkedAt: new Date().toISOString(), error: "Feed groter dan ingestelde veiligheidslimiet." };
+  }
+
+  const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
+  const feedTimestamp = toNumber(feed.header?.timestamp);
+  const ageSeconds = feedTimestamp == null ? undefined : Math.max(0, Math.round(Date.now() / 1000 - feedTimestamp));
+  const isStale = ageSeconds == null || ageSeconds > 180;
+  const entities = kind === "tripUpdates"
+    ? normalizeTripUpdates(feed)
+    : kind === "alerts"
+      ? normalizeAlerts(feed)
+      : (feed.entity ?? []).map((e: any) => ({
+          entityId: e.id,
+          vehicleId: e.vehicle?.vehicle?.id,
+          tripId: e.vehicle?.trip?.tripId,
+          routeId: e.vehicle?.trip?.routeId,
+          stopId: e.vehicle?.stopId,
+          latitude: e.vehicle?.position?.latitude,
+          longitude: e.vehicle?.position?.longitude,
+          timestamp: toNumber(e.vehicle?.timestamp)
+        })).filter((e: any) => e.vehicleId || e.tripId || e.latitude != null);
+
+  return {
+    ok: true,
+    source: "OpenOV / OVapi GTFS-Realtime",
+    sourceUrl: url,
+    httpStatus: response.status,
+    checkedAt: new Date().toISOString(),
+    fetchDurationMs: Date.now() - startedAt,
+    feedTimestamp: feedTimestamp == null ? null : new Date(feedTimestamp * 1000).toISOString(),
+    ageSeconds: ageSeconds ?? null,
+    freshness: isStale ? "stale_or_unknown" : "fresh",
+    entityCount: entities.length,
+    entities
+  };
+}
+
+async function handleApi(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const origin = request.headers.get("origin");
+  const headers = corsHeaders(origin);
+
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
+  if (request.method !== "GET") return json({ error: "Alleen GET is toegestaan." }, 405, headers);
+
+  if (url.pathname === "/api/health") {
+    const feeds = await Promise.all(Object.entries(OPENOV).map(async ([key, feedUrl]) => {
+      try {
+        let response = await fetch(feedUrl, {
+          method: "HEAD",
+          headers: { "user-agent": "OVLive/0.1.0 (open-source Dutch transit realtime client)" },
+          cf: { cacheTtl: 5, cacheEverything: true },
+          signal: AbortSignal.timeout(10000)
+        });
+        if (response.status === 405 || response.status === 501) {
+          response = await fetch(feedUrl, {
+            headers: { "user-agent": "OVLive/0.1.0 (open-source Dutch transit realtime client)", "range": "bytes=0-0" },
+            cf: { cacheTtl: 5, cacheEverything: true },
+            signal: AbortSignal.timeout(10000)
+          });
+          await response.body?.cancel();
+        }
+        return [key, {
+          ok: response.ok,
+          status: response.status,
+          checkedAt: new Date().toISOString(),
+          lastModified: response.headers.get("last-modified"),
+          contentLength: response.headers.get("content-length"),
+          note: "HTTP-bereikbaarheidstest; gebruik de feedviewer om protobuf te decoderen en de feedtimestamp te controleren.",
+          error: response.ok ? undefined : `Bron gaf HTTP ${response.status}.`
+        }];
+      } catch (error) {
+        return [key, {
+          ok: false,
+          checkedAt: new Date().toISOString(),
+          error: error instanceof Error ? error.message : "Onbekende fout"
+        }];
+      }
+    }));
+    return json({
+      service: "OVLive",
+      status: "diagnostic",
+      checkedAt: new Date().toISOString(),
+      notes: [
+        "Deze test controleert alleen HTTP-bereikbaarheid; de feedviewer decodeert de realtime-inhoud.",
+        "Een succesvolle download bewijst niet dat iedere vervoerder realtime-data levert.",
+        "Geen update voor een rit betekent NIET dat die rit op tijd rijdt."
+      ],
+      feeds: Object.fromEntries(feeds)
+    }, 200, headers);
+  }
+
+  if (url.pathname === "/api/realtime") {
+    const kind = url.searchParams.get("kind") ?? "tripUpdates";
+    if (!["tripUpdates", "alerts", "trainUpdates", "vehiclePositions"].includes(kind)) {
+      return json({ error: "Ongeldig kind. Gebruik tripUpdates, alerts, trainUpdates of vehiclePositions." }, 400, headers);
+    }
+    const feedUrl = OPENOV[kind as keyof typeof OPENOV];
+    try {
+      const data = await getOpenovFeed(feedUrl, kind as keyof typeof OPENOV);
+      const { entities = [], ...meta } = data as any;
+      // Alerts and trip updates can be large; limit the response size.
+      const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit") ?? 500)));
+      return json({ ...meta, entities: entities.slice(0, limit), returnedCount: Math.min(entities.length, limit) }, data.ok ? 200 : 502, headers);
+    } catch (error) {
+      return json({
+        ok: false,
+        sourceUrl: feedUrl,
+        checkedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : "Feed kon niet worden gelezen."
+      }, 502, headers);
+    }
+  }
+
+
+  if (url.pathname === "/api/geocode") {
+    const query = (url.searchParams.get("q") ?? "").trim();
+    if (query.length < 2 || query.length > 160) {
+      return json({ error: "Voer minimaal 2 en maximaal 160 tekens in." }, 400, headers);
+    }
+    try {
+      const upstream = new URL("https://photon.komoot.io/api/");
+      upstream.searchParams.set("q", query);
+      upstream.searchParams.set("limit", "6");
+      upstream.searchParams.set("lang", "nl");
+      const response = await fetch(upstream, {
+        headers: {
+          "accept": "application/geo+json, application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        cf: { cacheTtl: 30, cacheEverything: true },
+        signal: AbortSignal.timeout(10000)
+      });
+      if (!response.ok) return json({ error: `Geocoder gaf HTTP ${response.status}.` }, 502, headers);
+      return new Response(await response.text(), {
+        status: 200,
+        headers: { ...headers, "content-type": "application/geo+json; charset=utf-8", "cache-control": "public, max-age=30" }
+      });
+    } catch (error) {
+      return json({ error: "Plaats zoeken is tijdelijk niet beschikbaar." }, 502, headers);
+    }
+  }
+
+  if (url.pathname === "/api/plan") {
+    const fromPlace = url.searchParams.get("fromPlace");
+    const toPlace = url.searchParams.get("toPlace");
+    if (!fromPlace || !toPlace) {
+      return json({ error: "Geef fromPlace en toPlace op als latitude,longitude of een Transitous-stop-ID." }, 400, headers);
+    }
+    if (fromPlace.length > 200 || toPlace.length > 200) {
+      return json({ error: "Locatieparameter te lang." }, 400, headers);
+    }
+
+    const upstream = new URL(`${TRANSITOUS}/plan`);
+    url.searchParams.forEach((value, key) => {
+      if (MAX_ROUTE_PARAMS.has(key)) upstream.searchParams.set(key, value);
+    });
+    upstream.searchParams.set("fromPlace", fromPlace);
+    upstream.searchParams.set("toPlace", toPlace);
+
+    if (env.APP_CONTACT && env.APP_CONTACT.includes("replace-with-contact")) {
+      return json({ error: "Configureer APP_CONTACT in wrangler.toml voordat je Transitous gebruikt." }, 503, headers);
+    }
+
+    try {
+      const response = await fetch(upstream, {
+        headers: {
+          "accept": "application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(25000)
+      });
+      const body = await response.text();
+      return new Response(body, {
+        status: response.status,
+        headers: {
+          ...headers,
+          "content-type": response.headers.get("content-type") ?? "application/json",
+          "cache-control": "no-store",
+          "x-upstream": "Transitous MOTIS v6"
+        }
+      });
+    } catch (error) {
+      return json({
+        error: "De reisplanner is tijdelijk niet bereikbaar.",
+        detail: error instanceof Error ? error.message : "Onbekende fout"
+      }, 502, headers);
+    }
+  }
+
+  if (url.pathname === "/api/stoptimes") {
+    const stopId = url.searchParams.get("stopId");
+    if (!stopId || stopId.length > 200) return json({ error: "Geef een geldige stopId op." }, 400, headers);
+    const upstream = new URL(`${TRANSITOUS}/stoptimes`);
+    upstream.searchParams.set("stopId", stopId);
+    upstream.searchParams.set("n", String(Math.min(50, Math.max(1, Number(url.searchParams.get("n") ?? 20)))));
+    try {
+      const response = await fetch(upstream, {
+        headers: {
+          "accept": "application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(15000)
+      });
+      return new Response(await response.text(), {
+        status: response.status,
+        headers: { ...headers, "content-type": "application/json", "cache-control": "no-store" }
+      });
+    } catch (error) {
+      return json({ error: "Realtime vertrektijden tijdelijk niet beschikbaar." }, 502, headers);
+    }
+  }
+
+  return json({ error: "API-route niet gevonden." }, 404, headers);
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/")) return handleApi(request, env);
+    return env.ASSETS.fetch(request);
+  }
+};
