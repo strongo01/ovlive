@@ -359,22 +359,60 @@ function eventFrom(row: any, kind: "departure" | "arrival"): any {
   const plannedMs = toMs(row?.plannedDateTime);
   const actualMs = toMs(row?.actualDateTime);
   const cancelled = row?.cancelled === true;
+  const status = row?.[
+    kind === "departure" ? "departureStatus" : "arrivalStatus"
+  ] ?? null;
+  const normalizedStatus = text(status).toUpperCase();
+  const hasKnownStatus = Boolean(
+    normalizedStatus && normalizedStatus !== "UNKNOWN"
+  );
+
+  const reportedDelay =
+    typeof row?.delayInSeconds === "number" &&
+    Number.isFinite(row.delayInSeconds)
+      ? row.delayInSeconds
+      : null;
+
+  const differenceMs =
+    plannedMs !== null && actualMs !== null
+      ? actualMs - plannedMs
+      : null;
+
+  // Gelijke tijden zijn niet zelfstandig bewijs van een actuele
+  // prognose als de NS-status ontbreekt of UNKNOWN is.
+  const unconfirmedScheduleEcho =
+    !cancelled &&
+    differenceMs !== null &&
+    Math.abs(differenceMs) < 1000 &&
+    !hasKnownStatus &&
+    reportedDelay === null;
+
+  let delaySeconds: number | null = null;
+
+  if (!cancelled) {
+    if (reportedDelay !== null) {
+      delaySeconds = reportedDelay;
+    } else if (differenceMs !== null && Math.abs(differenceMs) >= 1000) {
+      delaySeconds = Math.round(differenceMs / 1000);
+    } else if (differenceMs !== null && hasKnownStatus) {
+      delaySeconds = 0;
+    }
+  }
+
+  const usableActualMs = unconfirmedScheduleEcho ? null : actualMs;
 
   return {
     source: "NS Reisinformatie API",
-    time: !cancelled && actualMs !== null
-      ? new Date(actualMs).toISOString()
+    time: !cancelled && usableActualMs !== null
+      ? new Date(usableActualMs).toISOString()
       : null,
     plannedTime: plannedMs !== null
       ? new Date(plannedMs).toISOString()
       : null,
-    actualTime: actualMs !== null
-      ? new Date(actualMs).toISOString()
+    actualTime: usableActualMs !== null
+      ? new Date(usableActualMs).toISOString()
       : null,
-    delaySeconds:
-      !cancelled && plannedMs !== null && actualMs !== null
-        ? Math.round((actualMs - plannedMs) / 1000)
-        : null,
+    delaySeconds,
     cancelled,
     plannedTrack: row?.plannedTrack ?? null,
     actualTrack: row?.actualTrack ?? null,
@@ -382,8 +420,7 @@ function eventFrom(row: any, kind: "departure" | "arrival"): any {
     platformChange: row?.platformChange === true ||
       Boolean(row?.actualTrack && row?.plannedTrack &&
         String(row.actualTrack) !== String(row.plannedTrack)),
-    status: row?.[kind === "departure" ? "departureStatus" : "arrivalStatus"]
-      ?? null
+    status
   };
 }
 
