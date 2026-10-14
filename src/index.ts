@@ -6,6 +6,7 @@ import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 
 import { applyNdovCancellationsToPlan } from "./ndov-plan-cancellation.js";
 import { enrichNsTrainPlan } from "./ns-train-realtime";
+import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
 interface Env {
   ASSETS: Fetcher;
@@ -16,6 +17,8 @@ interface Env {
   APP_CONTACT: string;
   NS_API_SUBSCRIPTION_KEY?: string;
   GEOAPIFY_API_KEY?: string;
+  API_RATE_LIMITER?: ApiRateLimitBinding;
+  PLAN_RATE_LIMITER?: ApiRateLimitBinding;
 }
 
 const OPENOV = {
@@ -2096,6 +2099,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
   if (request.method !== "GET") return json({ error: "Alleen GET is toegestaan." }, 405, headers);
 
+  const rateLimitResponse = await enforcePublicApiRateLimit(request, env, headers);
+  if (rateLimitResponse) return rateLimitResponse;
+
   if (url.pathname === "/api/health") {
     // Decodeer de echte feeds in plaats van alleen HEAD/HTTP te controleren.
     const entries = Object.entries(OPENOV) as Array<
@@ -2572,6 +2578,8 @@ export default {
       if (matchResponse) return matchResponse;
     }
     if (url.pathname.startsWith("/api/ovapi-test/")) {
+      // OVAPI-experimentele endpoints blijven lokaal; ze starten upstream-aanvragen.
+      if (!isLoopbackHost(url.hostname)) return new Response("Not found", { status: 404 });
       const ovapiTestResponse = await handleOvapiTestApi(request);
       if (ovapiTestResponse) return ovapiTestResponse;
     }
