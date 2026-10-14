@@ -6,6 +6,25 @@ const source = await readFile(
   new URL("../src/api-rate-limit.ts", import.meta.url),
   "utf8"
 );
+const workerSource = await readFile(
+  new URL("../src/index.ts", import.meta.url),
+  "utf8"
+);
+
+// Statische dispatch-regressie: alle OVAPI-testendpoints moeten worden
+// afgewezen voor publieke hosts voordat een specifieke handler kan lopen.
+const ovapiGuard = workerSource.indexOf(
+  'url.pathname.startsWith("/api/ovapi-test/") &&'
+);
+const ovapiMatchDispatch = workerSource.indexOf(
+  'if (url.pathname === "/api/ovapi-test/match-plan")'
+);
+assert.ok(ovapiGuard >= 0, "OVAPI publieke-hostguard ontbreekt");
+assert.ok(
+  ovapiMatchDispatch > ovapiGuard,
+  "OVAPI match-plan wordt vóór de publieke-hostguard afgehandeld"
+);
+console.log("PASS: publieke OVAPI-diagnoseroutes worden vóór dispatch geblokkeerd");
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
