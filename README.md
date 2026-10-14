@@ -22,7 +22,7 @@ The OpenOV site lists its realtime products as KV78turbo (bus/tram/metro, DOVA s
 1. Keep the source code public/open source if using Transitous, and check its current use policy. Transitous describes its API as best-effort, non-commercial and asks developers to contact the team before resource-intensive routing or multi-user traffic. Add a meaningful contact email/website and visible source attribution.
 2. Replace `APP_CONTACT` in `wrangler.toml` with a real contact address or website.
 3. Test feed timestamps and update coverage for each operator, including cancellations and alert selectors.
-4. Add rate limiting / abuse protection (Cloudflare WAF/rate limiting or Turnstile) before exposing this as a public API. The current code has fixed upstreams but is not a complete abuse-control system.
+4. A Worker-level baseline is configured: up to 60 public API requests per minute per client IP and up to 10 `/api/plan` requests per minute per client IP. These counters are per Cloudflare location and eventually consistent, so they are not a hard global quota. Before broad public exposure, add/verify Cloudflare edge WAF/rate-limiting rules and monitor 429 responses. The `/api/ovapi-test/*` diagnostic endpoints are loopback-only and should not be exposed on the public Worker.
 5. Add monitoring and alerting for stale feeds, upstream errors and schema changes.
 6. Implement verified itinerary-to-feed matching. Match by full trip identity (including service date/start time where required), not route alone. Missing realtime must display “geen realtimegegevens”, not “op tijd”.
 7. Verify current terms and attribution for every upstream source, and provide an accessible privacy notice if logging user queries.
