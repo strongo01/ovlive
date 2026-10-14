@@ -258,23 +258,16 @@ async function getBoard(
 }
 
 
-async function selectJourneyArrival(
-  env: NsEnv,
+export function selectJourneyEventFromStops(
+  stops: any[],
   trainNumber: string,
-  departureMs: number,
   stationCode: string,
-  stations: StationIndex,
-  plannedArrivalMs: number
-): Promise<any | null> {
-  const data = await nsJson("/api/v2/journey", {
-    train: trainNumber,
-    dateTime: new Date(departureMs).toISOString(),
-    lang: "nl"
-  }, env);
-
-  const body = data?.payload ?? data;
-  const stops = Array.isArray(body?.stops) ? body.stops : [];
+  stations: { uics: Map<string, string> },
+  plannedEventMs: number,
+  kind: "departure" | "arrival"
+): any | null {
   const candidates: Array<{ row: any; diff: number }> = [];
+  const collectionKey = kind === "departure" ? "departures" : "arrivals";
 
   for (const stop of stops) {
     const place = stop?.stop ?? stop?.station ?? {};
@@ -284,22 +277,26 @@ async function selectJourneyArrival(
       resolvedCode ?? text(place?.code ?? place?.stationCode)
     ).toUpperCase();
 
-    // Alleen de exacte bestemming van dit reisplan accepteren.
+    // Alleen de exacte herkomst/bestemming uit dit reisplan accepteren.
     if (stopCode !== stationCode) continue;
 
-    const stopArrivals = Array.isArray(stop?.arrivals) ? stop.arrivals : [];
+    const eventRows = Array.isArray(stop?.[collectionKey])
+      ? stop[collectionKey]
+      : [];
 
-    for (const row of stopArrivals) {
+    for (const row of eventRows) {
       const number = text(row?.product?.number ?? row?.trainNumber);
       if (number !== trainNumber) continue;
 
-      // NS-reisdetails gebruiken plannedTime/actualTime, niet
-      // plannedDateTime/actualDateTime zoals de vertrek- en aankomstborden.
+      // Reisdetails gebruiken plannedTime/actualTime; borden gebruiken
+      // plannedDateTime/actualDateTime.
       const plannedValue = row?.plannedTime ?? row?.plannedDateTime;
       const actualValue = row?.actualTime ?? row?.actualDateTime;
       const planned = toMs(plannedValue);
-
       if (planned === null) continue;
+
+      const diff = Math.abs(planned - plannedEventMs);
+      if (diff > MATCH_TOLERANCE_MS) continue;
 
       candidates.push({
         row: {
@@ -307,13 +304,12 @@ async function selectJourneyArrival(
           plannedDateTime: plannedValue,
           actualDateTime: actualValue ?? null
         },
-        diff: Math.abs(planned - plannedArrivalMs)
+        diff
       });
     }
   }
 
   if (!candidates.length) return null;
-
   candidates.sort((a, b) => a.diff - b.diff);
 
   // Bij een even goede dubbele match niet gokken.
@@ -325,6 +321,21 @@ async function selectJourneyArrival(
   }
 
   return candidates[0].row;
+}
+
+async function getJourneyStops(
+  env: NsEnv,
+  trainNumber: string,
+  departureMs: number
+): Promise<any[]> {
+  const data = await nsJson("/api/v2/journey", {
+    train: trainNumber,
+    dateTime: new Date(departureMs).toISOString(),
+    lang: "nl"
+  }, env);
+
+  const body = data?.payload ?? data;
+  return Array.isArray(body?.stops) ? body.stops : [];
 }
 
 function selectBoardRow(
@@ -527,25 +538,61 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
         getBoard(env, "arrivals", toCode, arriveMs)
       ]);
 
-      const depRow = selectBoardRow(departures, number, departMs);
+      let depRow = selectBoardRow(departures, number, departMs);
       let arrRow = selectBoardRow(arrivals, number, arriveMs);
-      let arrivalMatchSource = "NS-aankomstbord";
+      let departure = eventFrom(depRow, "departure");
+      let arrival = eventFrom(arrRow, "arrival");
+      let departureUsedJourney = false;
+      let arrivalUsedJourney = false;
 
-      // Reservebron: de exacte NS-reisdetails. Een lege aankomstlijst
-      // betekent niet automatisch dat de trein niet aankomt.
-      if (!arrRow) {
+      // De vertrek-/aankomstborden bevatten soms alleen de geplande tijd
+      // en geen delayInSeconds. Vraag dan één keer de volledige NS-reis op
+      // en zoek daarin de juiste halte + trein + geplande tijd.
+      const needsDepartureJourney =
+        departure?.cancelled !== true &&
+        (!depRow || !hasKnownPunctualityDeviation(departure));
+      const needsArrivalJourney =
+        arrival?.cancelled !== true &&
+        (!arrRow || !hasKnownPunctualityDeviation(arrival));
+
+      if (needsDepartureJourney || needsArrivalJourney) {
         try {
-          arrRow = await selectJourneyArrival(
-            env, number, departMs, toCode, stations, arriveMs
-          );
-          if (arrRow) arrivalMatchSource = "NS-reisdetails";
+          const journeyStops = await getJourneyStops(env, number, departMs);
+
+          if (needsDepartureJourney) {
+            const journeyDeparture = selectJourneyEventFromStops(
+              journeyStops, number, fromCode, stations, departMs, "departure"
+            );
+            if (journeyDeparture) {
+              const journeyEvent = eventFrom(journeyDeparture, "departure");
+              // Vervang een bestaande bordregel alleen als reisdetails
+              // daadwerkelijk een afwijking (ook expliciet 0 seconden) geven.
+              if (!depRow || hasKnownPunctualityDeviation(journeyEvent)) {
+                depRow = journeyDeparture;
+                departure = journeyEvent;
+                departureUsedJourney = true;
+              }
+            }
+          }
+
+          if (needsArrivalJourney) {
+            const journeyArrival = selectJourneyEventFromStops(
+              journeyStops, number, toCode, stations, arriveMs, "arrival"
+            );
+            if (journeyArrival) {
+              const journeyEvent = eventFrom(journeyArrival, "arrival");
+              if (!arrRow || hasKnownPunctualityDeviation(journeyEvent)) {
+                arrRow = journeyArrival;
+                arrival = journeyEvent;
+                arrivalUsedJourney = true;
+              }
+            }
+          }
         } catch {
-          // Behoud een al bevestigde vertrekmatch als de reservebron faalt.
+          // Behoud elke bruikbare bordmatch als reisdetails niet beschikbaar zijn.
         }
       }
 
-      const departure = eventFrom(depRow, "departure");
-      const arrival = eventFrom(arrRow, "arrival");
       const cancelled =
         departure?.cancelled === true || arrival?.cancelled === true;
       const matched = Boolean(depRow || arrRow);
@@ -555,8 +602,8 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
         status: cancelled ? "cancelled" : matched ? "matched" : "unknown",
         trainNumber: number,
         checkedAt: new Date().toISOString(),
-        matchMethod: arrivalMatchSource === "NS-reisdetails"
-          ? "NS-reisdetails: treinnummer + exacte UIC-stationcode"
+        matchMethod: departureUsedJourney || arrivalUsedJourney
+          ? "NS-reisdetails: treinnummer + stationcode + geplande tijd binnen 3 minuten"
           : "NS-treinnummer + stationcode + geplande tijd binnen 3 minuten",
         departure,
         arrival,
