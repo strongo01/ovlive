@@ -1588,6 +1588,7 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 }
 
 type NdovStreamName = "kv78" | "bison";
+const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
 
 type NdovSnapshot = Record<string, any>;
 
@@ -1604,7 +1605,7 @@ async function callNdovHub(
   waitForCompletion = false,
   includeAllRows = false,
 ): Promise<NdovSnapshot> {
-  const id = env.NDOV_FEEDS.idFromName(stream);
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
   const target = new URL(`https://ndov-hub.local/${action}`);
   target.searchParams.set("stream", stream);
@@ -1757,7 +1758,7 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
       }, 400);
     }
 
-    const id = env.NDOV_FEEDS.idFromName("kv78");
+    const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
     const stub = env.NDOV_FEEDS.get(id);
     const target = new URL("https://ndov-hub.local/rows");
     target.searchParams.set("stream", "kv78");
@@ -1773,7 +1774,7 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
     if (!/^[A-Za-z0-9_-]+\|\d{4}-\d{2}-\d{2}\|[^|]+\|[^|]+\|[^|]+$/.test(identity)) {
       return json({ ok: false, error: "Gebruik identity=owner|YYYY-MM-DD|line|journey|reinforcement." }, 400);
     }
-    const id = env.NDOV_FEEDS.idFromName("bison");
+    const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
     const stub = env.NDOV_FEEDS.get(id);
     const target = new URL("https://ndov-hub.local/events");
     target.searchParams.set("stream", "bison");
