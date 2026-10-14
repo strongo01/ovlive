@@ -235,7 +235,7 @@ export class NdovFeedHub extends DurableObject {
   async fetch(request) {
     await this.ready;
     const url = new URL(request.url);
-    const stream = url.searchParams.get('stream') || state.snapshot.stream || 'kv78';
+    const stream = url.searchParams.get('stream') || 'kv78';
     if (!CONFIG[stream]) return Response.json({ ok: false, error: 'unknown stream' }, { status: 400 });
     const state = this.stateFor(stream);
     if (url.pathname === '/status') {
@@ -418,7 +418,7 @@ export class NdovFeedHub extends DurableObject {
     const startTask = () => {
       const task = this.collect(stream, seconds).catch(async (error) => {
         state.snapshot = { ...state.snapshot, state: 'error', error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() };
-        await this.persist(true);
+        await this.persist(stream, true, false);
       }).finally(() => { state.running = false; state.socket = null; });
       this.ctx.waitUntil(task);
       return task;
@@ -453,7 +453,7 @@ export class NdovFeedHub extends DurableObject {
   async persistFullKv78Rows(stream, force = false) {
     const state = this.stateFor(stream);
     if (!force || state.snapshot.stream !== 'kv78') return;
-    this.pruneRows();
+    this.pruneRows(stream);
     const entries = [...state.rows.entries()];
     const chunkCount = Math.ceil(entries.length / ROW_CHUNK_SIZE);
     const previousCount = Number(await this.ctx.storage.get(stream + ':rowsGzipChunkCount')) || 0;
@@ -465,12 +465,12 @@ export class NdovFeedHub extends DurableObject {
     for (let i = 0; i < chunkCount; i += 1) {
       const bytes = await gzipJson(entries.slice(i * ROW_CHUNK_SIZE, (i + 1) * ROW_CHUNK_SIZE));
       if (bytes.length > 1_500_000) throw new Error(`Compressed KV78 chunk ${i} exceeds safe storage value size`);
-      await this.ctx.storage.put(`rows:gzip:${i}`, bytes);
+      await this.ctx.storage.put(stream + ':rows:gzip:' + i, bytes);
     }
     await this.ctx.storage.put(stream + ':rowsGzipChunkCount', chunkCount);
     const obsolete = [];
-    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(`rows:gzip:${i}`);
-    for (let i = 0; i < legacyCount; i += 1) obsolete.push(`rows:${i}`);
+    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(stream + ':rows:gzip:' + i);
+    for (let i = 0; i < legacyCount; i += 1) obsolete.push(stream + ':rows:' + i);
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
     if (legacyCount) await this.ctx.storage.delete(stream + ':rowsChunkCount');
   }
@@ -478,18 +478,18 @@ export class NdovFeedHub extends DurableObject {
   async persistFullBisonEvents(stream, force = false) {
     const state = this.stateFor(stream);
     if (!force || state.snapshot.stream !== 'bison') return;
-    this.pruneEvents();
+    this.pruneEvents(stream);
     const entries = [...state.events.entries()];
     const chunkCount = Math.ceil(entries.length / MUTATION_CHUNK_SIZE);
     const previousCount = Number(await this.ctx.storage.get(stream + ':eventsGzipChunkCount')) || 0;
     for (let i = 0; i < chunkCount; i += 1) {
       const bytes = await gzipJson(entries.slice(i * MUTATION_CHUNK_SIZE, (i + 1) * MUTATION_CHUNK_SIZE));
       if (bytes.length > 1_500_000) throw new Error(`Compressed KV6 event chunk ${i} exceeds safe storage value size`);
-      await this.ctx.storage.put(`events:gzip:${i}`, bytes);
+      await this.ctx.storage.put(stream + ':events:gzip:' + i, bytes);
     }
     await this.ctx.storage.put(stream + ':eventsGzipChunkCount', chunkCount);
     const obsolete = [];
-    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(`events:gzip:${i}`);
+    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(stream + ':events:gzip:' + i);
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
   }
 
@@ -503,12 +503,12 @@ export class NdovFeedHub extends DurableObject {
     for (let i = 0; i < chunkCount; i += 1) {
       const bytes = await gzipJson(entries.slice(i * MUTATION_CHUNK_SIZE, (i + 1) * MUTATION_CHUNK_SIZE));
       if (bytes.length > 1_500_000) throw new Error(`Compressed KV17 chunk ${i} exceeds safe storage value size`);
-      await this.ctx.storage.put(`mutations:gzip:${i}`, bytes);
+      await this.ctx.storage.put(stream + ':mutations:gzip:' + i, bytes);
     }
     await this.ctx.storage.put(stream + ':mutationsGzipChunkCount', chunkCount);
     const obsolete = [];
-    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(`mutations:gzip:${i}`);
-    for (let i = 0; i < legacyCount; i += 1) obsolete.push(`mutations:${i}`);
+    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(stream + ':mutations:gzip:' + i);
+    for (let i = 0; i < legacyCount; i += 1) obsolete.push(stream + ':mutations:' + i);
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
     if (legacyCount) await this.ctx.storage.delete(stream + ':mutationsChunkCount');
   }
@@ -648,7 +648,7 @@ export class NdovFeedHub extends DurableObject {
       if (ready.name !== 'READY') throw new Error(`Expected READY, received ${ready.name}`);
       await writer.write(concatBytes(...config.prefixes.map((p) => makeSubscribeFrame(p, greeting.negotiatedMinor))));
       state.snapshot = { ...state.snapshot, state: 'listening', zmtpVersion: `${greeting.major}.${greeting.negotiatedMinor}`, handshake: ready.name, prefixes: config.prefixes };
-      await this.persist(true);
+      await this.persist(stream, true, false);
 
       while (Date.now() < deadline && !state.stopRequested) {
         const lastMessageTimeMs = Date.parse(
