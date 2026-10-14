@@ -17,6 +17,11 @@ const scheduled = worker.slice(scheduledStart, scheduledEnd);
 assert.match(scheduled, /NDOV_AUTOCOLLECT !== "true"/);
 assert.match(scheduled, /callNdovHub\(env, "kv78", "continuous\/disable"\)/);
 assert.match(scheduled, /callNdovHub\(env, "bison", "continuous\/disable"\)/);
+assert.match(scheduled, /disableLegacyCollector\("kv78"\)/);
+assert.match(scheduled, /disableLegacyCollector\("bison"\)/);
+assert.match(scheduled, /idFromName\(stream\)/);
+assert.match(scheduled, /legacyStub\.fetch\(target\.toString\(\)\)/);
+console.log("PASS: noodstop schakelt ook oude KV78- en BISON-object-ID's uit");
 assert.ok(
   scheduled.indexOf('"continuous/disable"') < scheduled.indexOf('"continuous/enable"'),
   "de disable-tak moet eerder staan dan het enable-pad"
