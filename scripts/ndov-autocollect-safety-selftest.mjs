@@ -24,11 +24,13 @@ assert.ok(
 console.log("PASS: scheduled handler schakelt bestaande KV78- en BISON-collectors daadwerkelijk uit");
 
 const disableStart = hub.indexOf("if (url.pathname === '/continuous/disable')");
-const enableStart = hub.indexOf("if (url.pathname === '/continuous/enable')");
-assert.ok(disableStart >= 0 && enableStart > disableStart);
-const disableBlock = hub.slice(disableStart, enableStart);
+const eventsStart = hub.indexOf("if (url.pathname === '/events')", disableStart);
+assert.ok(disableStart >= 0 && eventsStart > disableStart);
+const disableBlock = hub.slice(disableStart, eventsStart);
 assert.match(disableBlock, /alreadyDisabled/);
 assert.match(disableBlock, /Collector stond al uit/);
+assert.match(disableBlock, /deleteAlarm\(\)/);
+assert.match(disableBlock, /this\.socket\.close\(\)/);
 console.log("PASS: herhaalde collectorpauzes vermijden onnodige opslagwrites");
 
 console.log("Alle NDOV-autocollect-safety-tests geslaagd.");
