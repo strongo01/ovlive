@@ -16,7 +16,8 @@
     "ndov:build-openov-route-crosswalk": "python3 scripts/build-ndov-openov-route-crosswalk.py",
     "ndov:openov-route-crossmatch-selftest": "node scripts/ndov-openov-route-crossmatch-selftest.mjs",
     "openov:prediction-selftest": "node scripts/openov-realtime-prediction-selftest.mjs",
-    "ns:realtime-selftest": "node scripts/ns-train-realtime-selftest.mjs"
+    "ns:realtime-selftest": "node scripts/ns-train-realtime-selftest.mjs",
+    "api:rate-limit-selftest": "node scripts/api-rate-limit-selftest.mjs"
   },
   "dependencies": {
     "gtfs-realtime-bindings": "^1.1.1"
