@@ -2573,13 +2573,19 @@ export default {
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Beveilig alle OVAPI-experimentele routes vóór specifieke dispatch,
+    // inclusief match-plan, zodat geen handler deze controle kan overslaan.
+    if (
+      url.pathname.startsWith("/api/ovapi-test/") &&
+      !isLoopbackHost(url.hostname)
+    ) {
+      return new Response("Not found", { status: 404 });
+    }
     if (url.pathname === "/api/ovapi-test/match-plan") {
       const matchResponse = await handleTransitousOvapiMatch(request);
       if (matchResponse) return matchResponse;
     }
     if (url.pathname.startsWith("/api/ovapi-test/")) {
-      // OVAPI-experimentele endpoints blijven lokaal; ze starten upstream-aanvragen.
-      if (!isLoopbackHost(url.hostname)) return new Response("Not found", { status: 404 });
       const ovapiTestResponse = await handleOvapiTestApi(request);
       if (ovapiTestResponse) return ovapiTestResponse;
     }
