@@ -5,6 +5,7 @@ import { NdovFeedHub } from "./ndov-stream-hub.js";
 import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 
 import { applyNdovCancellationsToPlan } from "./ndov-plan-cancellation.js";
+import { enrichNsTrainPlan } from "./ns-train-realtime";
 
 interface Env {
   ASSETS: Fetcher;
@@ -13,6 +14,7 @@ interface Env {
   APP_NAME: string;
   APP_VERSION: string;
   APP_CONTACT: string;
+  NS_API_SUBSCRIPTION_KEY?: string;
 }
 
 const OPENOV = {
@@ -622,11 +624,25 @@ function matchOpenovRealtime(leg: any, records: any[]) {
   // Voorkeursmethode: exacte rit-ID, met routecontrole als de
   // realtimefeed ook een route-ID bevat.
   const exact = records.filter((record: any) => {
-    const recordTripId = parseOpenovTripId(record.tripId).tripId;
+    const recordIdentity = parseOpenovTripId(record.tripId);
+    const recordTripId = recordIdentity.tripId;
     const recordRouteId = normalizeOpenovId(record.routeId);
 
+    // Een numeriek GTFS-rit-ID kan op meerdere exploitatiedagen voorkomen.
+    // Gebruik daarom geen update van morgen voor een reis van vandaag.
+    const expectedDate = String(identity.startDate ?? "")
+      .replace(/\D/g, "")
+      .slice(0, 8);
+    const recordDate = String(record.startDate ?? recordIdentity.startDate ?? "")
+      .replace(/\D/g, "")
+      .slice(0, 8);
+    const serviceDateMatches =
+      !expectedDate ||
+      (recordDate.length > 0 && recordDate === expectedDate);
+
     return recordTripId === identity.tripId &&
-      (!recordRouteId || recordRouteId === routeId);
+      (!recordRouteId || recordRouteId === routeId) &&
+      serviceDateMatches;
   });
 
   // TIJDELIJKE DIAGNOSE: tel kandidaten per matchingstap.
@@ -1099,12 +1115,14 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     const departurePrediction = summarizeRealtimeEvent(
       fromUpdate,
       "departure",
-      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime
+      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime,
+      { hasPerTripTimestamp: recordTimestamp !== null }
     );
     const arrivalPrediction = summarizeRealtimeEvent(
       toUpdate,
       "arrival",
-      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime
+      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime,
+      { hasPerTripTimestamp: recordTimestamp !== null }
     );
 
     const hasExplicitStopPrediction = Boolean(
@@ -1904,6 +1922,183 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
   }
 
+
+  // Lokale diagnostische proxy voor NS Reisinformatie API.
+  // De subscription key blijft uitsluitend server-side.
+  if (url.pathname === "/api/ns/departures") {
+    if (request.method !== "GET") {
+      return json({ error: "Alleen GET is toegestaan." }, 405, headers);
+    }
+
+    const subscriptionKey = String(
+      env.NS_API_SUBSCRIPTION_KEY ?? ""
+    ).trim();
+
+    if (!subscriptionKey) {
+      return json({
+        ok: false,
+        source: "NS Reisinformatie API",
+        error: "NS_API_SUBSCRIPTION_KEY is niet ingesteld in de Worker-configuratie."
+      }, 503, headers);
+    }
+
+    const station = String(url.searchParams.get("station") ?? "")
+      .trim()
+      .toUpperCase();
+
+    if (!/^[A-Z0-9]{2,6}$/.test(station)) {
+      return json({
+        ok: false,
+        error: "Geef een geldige NS-stationscode op, bijvoorbeeld GVC of UT."
+      }, 400, headers);
+    }
+
+    const requestedCount = Number(
+      url.searchParams.get("maxJourneys") ?? "8"
+    );
+
+    if (
+      !Number.isInteger(requestedCount) ||
+      requestedCount < 1 ||
+      requestedCount > 10
+    ) {
+      return json({
+        ok: false,
+        error: "maxJourneys moet tussen 1 en 10 liggen."
+      }, 400, headers);
+    }
+
+    const upstream = new URL(
+      "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/departures"
+    );
+    upstream.searchParams.set("station", station);
+    upstream.searchParams.set("maxJourneys", String(requestedCount));
+    upstream.searchParams.set("lang", "nl");
+
+    try {
+      const response = await fetch(upstream, {
+        method: "GET",
+        headers: {
+          "accept": "application/json",
+          "Ocp-Apim-Subscription-Key": subscriptionKey,
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(12000)
+      });
+
+      if (!response.ok) {
+        const status = response.status === 429 ? 429 : 502;
+        const message =
+          response.status === 401 || response.status === 403
+            ? "NS heeft de aanvraag geweigerd. Controleer of de Ns-App-sleutel toegang heeft tot de Reisinformatie API."
+            : response.status === 429
+              ? "De NS API heeft de aanvraaglimiet bereikt."
+              : `De NS API gaf HTTP ${response.status}.`;
+
+        console.warn("[OVLIVE_NS_API]", JSON.stringify({
+          status: response.status,
+          station
+        }));
+
+        return json({
+          ok: false,
+          source: "NS Reisinformatie API",
+          station,
+          upstreamStatus: response.status,
+          error: message,
+          checkedAt: new Date().toISOString()
+        }, status, headers);
+      }
+
+      let data: any;
+      try {
+        data = await response.json();
+      } catch {
+        return json({
+          ok: false,
+          source: "NS Reisinformatie API",
+          error: "NS gaf geen geldige JSON terug.",
+          checkedAt: new Date().toISOString()
+        }, 502, headers);
+      }
+
+      const payload = data?.payload ?? data;
+      const rows = payload?.departures;
+
+      if (!Array.isArray(rows)) {
+        return json({
+          ok: false,
+          source: "NS Reisinformatie API",
+          station,
+          error: "Onverwachte NS-response: het veld payload.departures ontbreekt.",
+          responseFields: Object.keys(data ?? {}),
+          payloadFields: Object.keys(payload ?? {}),
+          checkedAt: new Date().toISOString()
+        }, 502, headers);
+      }
+
+      const departures = rows.slice(0, requestedCount).map((item: any) => {
+        const plannedDateTime = item?.plannedDateTime ?? null;
+        const actualDateTime = item?.actualDateTime ?? null;
+        const plannedMs = typeof plannedDateTime === "string"
+          ? Date.parse(plannedDateTime)
+          : Number.NaN;
+        const actualMs = typeof actualDateTime === "string"
+          ? Date.parse(actualDateTime)
+          : Number.NaN;
+
+        // We berekenen alleen een afwijking als NS beide absolute tijden geeft.
+        const delaySeconds =
+          Number.isFinite(plannedMs) && Number.isFinite(actualMs)
+            ? Math.round((actualMs - plannedMs) / 1000)
+            : null;
+
+        return {
+          trainNumber: item?.product?.number
+            ?? item?.trainNumber
+            ?? null,
+          name: item?.name ?? null,
+          category: item?.trainCategory
+            ?? item?.product?.category
+            ?? item?.product?.longCategoryName
+            ?? null,
+          direction: item?.direction ?? null,
+          plannedDateTime,
+          actualDateTime,
+          delaySeconds,
+          cancelled: item?.cancelled === true,
+          platformChange: item?.platformChange === true,
+          plannedTrack: item?.plannedTrack ?? null,
+          actualTrack: item?.actualTrack ?? null,
+          journeyDetailUri: item?.journeyDetailRef?.uri ?? null,
+          responseFields: Object.keys(item ?? {})
+        };
+      });
+
+      return json({
+        ok: true,
+        source: "NS Reisinformatie API",
+        station,
+        checkedAt: new Date().toISOString(),
+        upstreamStatus: response.status,
+        count: departures.length,
+        departures
+      }, 200, headers);
+    } catch (error) {
+      console.error("[OVLIVE_NS_API]", error instanceof Error
+        ? error.message
+        : "Onbekende fout");
+
+      return json({
+        ok: false,
+        source: "NS Reisinformatie API",
+        station,
+        error: "NS was niet bereikbaar of reageerde niet op tijd.",
+        checkedAt: new Date().toISOString()
+      }, 502, headers);
+    }
+  }
+
   if (url.pathname === "/api/plan") {
     const fromPlace = url.searchParams.get("fromPlace");
     const toPlace = url.searchParams.get("toPlace");
@@ -1962,6 +2157,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       try {
         planData = await enrichTransitousPlan(planData);
         await applyNdovCancellationsToPlan(planData, env);
+        await enrichNsTrainPlan(planData, env);
       } catch (error) {
         console.error(
           "[OVLIVE_ENRICHMENT_ERROR]",

@@ -38,6 +38,7 @@ const explicitZero = summarizeRealtimeEvent(
   { departureTime: Date.parse(scheduled) / 1000 },
   "departure",
   scheduled,
+  { hasPerTripTimestamp: true },
 );
 assert.equal(explicitZero?.time, scheduled);
 assert.equal(explicitZero?.delaySeconds, 0);
@@ -58,5 +59,79 @@ const absoluteWins = summarizeRealtimeEvent(
 );
 assert.equal(absoluteWins?.delaySeconds, 67);
 console.log("PASS: absolute voorspelling heeft voorrang op gerapporteerde vertraging");
+
+
+// Een absolute haltevoorspelling exact één dag later is geen betrouwbare
+// 24-uursvertraging als de timestamp van de rit zelf ontbreekt.
+const scheduledSeconds = Date.parse(scheduled) / 1000;
+const nextDaySeconds = scheduledSeconds + 86400;
+
+const unconfirmedDayShift = summarizeRealtimeEvent(
+  {
+    departureTime: nextDaySeconds,
+    effectiveDepartureDelaySeconds: 86400,
+  },
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: false },
+);
+assert.equal(unconfirmedDayShift?.time, null);
+assert.equal(unconfirmedDayShift?.delaySeconds, null);
+assert.equal(unconfirmedDayShift?.delayBasis, "unconfirmed_whole_day_offset");
+console.log("PASS: onbetrouwbare verschuiving van 24 uur blijft onbekend");
+
+// Dezelfde controle geldt wanneer alleen een delay van één dag is opgegeven.
+const unconfirmedDelayOnly = summarizeRealtimeEvent(
+  { effectiveDepartureDelaySeconds: 86400 },
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: false },
+);
+assert.equal(unconfirmedDelayOnly?.time, null);
+assert.equal(unconfirmedDelayOnly?.delaySeconds, null);
+console.log("PASS: losse vertraging van 24 uur zonder rit-timestamp wordt geweigerd");
+
+// Een expliciete rit-timestamp schakelt deze specifieke beveiliging uit.
+// Andere controles en de verdere beoordeling van de bron blijven nodig.
+const timestampedDayShift = summarizeRealtimeEvent(
+  { departureTime: nextDaySeconds },
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: true },
+);
+assert.equal(timestampedDayShift?.delaySeconds, 86400);
+console.log("PASS: verschuiving wordt niet blind weggefilterd bij een rit-timestamp");
+
+
+// Een tijd die de dienstregeling exact herhaalt zonder rit-timestamp
+// bewijst niet dat de trein realtime is gevolgd.
+const scheduledEpochSeconds = Date.parse(scheduled) / 1000;
+const scheduleEcho = summarizeRealtimeEvent(
+  {
+    departureTime: scheduledEpochSeconds,
+    departureDelaySeconds: 0,
+  },
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: false },
+);
+assert.equal(scheduleEcho?.time, null);
+assert.equal(scheduleEcho?.delaySeconds, null);
+assert.equal(scheduleEcho?.delayBasis, "unconfirmed_schedule_echo");
+console.log("PASS: dienstregeling-echo zonder rit-timestamp blijft onbekend");
+
+// Een echte afwijking wordt niet verborgen alleen omdat de rit-timestamp ontbreekt.
+const smallRealDeviation = summarizeRealtimeEvent(
+  {
+    departureTime: scheduledEpochSeconds + 2,
+    departureDelaySeconds: 2,
+  },
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: false },
+);
+assert.equal(smallRealDeviation?.delaySeconds, 2);
+assert.ok(smallRealDeviation?.time);
+console.log("PASS: echte afwijking van 2 seconden blijft zichtbaar");
 
 console.log("Alle OpenOV-voorspellingsregressietests geslaagd.");

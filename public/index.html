@@ -19,8 +19,19 @@
     .leg-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
     .leg-time{font-variant-numeric:tabular-nums;font-weight:650}
     .rt-status{border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-top:10px;font-size:13px}
-    .rt-ok{color:var(--green)}.rt-unknown{color:#fcd34d}.rt-cancelled{color:var(--red)}
+    .rt-ok{color:#4ade80!important;font-weight:650}
+    .rt-delay{color:#fb923c!important;font-weight:700}
+    .rt-early{color:#38bdf8!important;font-weight:650}
+    .rt-warning{color:#facc15!important;font-weight:650}
+    .rt-unknown{color:#a1a1aa!important}
+    .rt-cancelled{color:#f87171!important;font-weight:700}
     .rt-details{color:var(--muted);margin-top:5px;font-size:12px}
+    .rt-legend{border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0;background:rgba(127,127,127,.05)}
+    .rt-legend-title{font-size:13px;font-weight:700;margin-bottom:8px}
+    .rt-legend-items{display:flex;flex-wrap:wrap;gap:7px 14px}
+    .rt-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+    .rt-legend-dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:currentColor;flex:none}
+    .rt-journey-note{margin:8px 0 0;color:var(--muted);font-size:12px;line-height:1.45}
     .alert-card{border:1px solid #6b4b26;background:#29231c;padding:12px;border-radius:12px;margin:8px 0}
     .alert-card p{margin:5px 0;font-size:13px}
     .alert-heading{margin-top:20px}
@@ -360,11 +371,14 @@ function stopEventHtml(label, event, scheduledValue) {
     ? delayLabel(delay)
     : 'geen vertraging voor deze halte opgegeven';
 
-  // Een berekende tijd is op zichzelf geen bevestiging dat de rit rijdt.
-  const colorClass =
-    !event.time || delay === null || delay > 60
-      ? 'rt-unknown'
-      : 'rt-ok';
+  // Kleur de gemelde afwijking zelf; ontbrekende data blijft grijs.
+  const colorClass = delay === null
+    ? 'rt-unknown'
+    : delay > 0
+      ? 'rt-delay'
+      : delay < 0
+        ? 'rt-early'
+        : 'rt-ok';
 
   return `<div>${esc(label)}: <span class="leg-time">${esc(time)}</span>
     <span class="muted">(${esc(timeType)})</span>
@@ -431,6 +445,22 @@ function stopEventHtml(label, event, scheduledValue) {
   return `${events.length ? events.join(" · ") : "geen bruikbare halteprognose"} · ${reliability}`;
 }
 
+function renderRealtimeLegend() {
+  return `<section class="rt-legend" aria-label="Betekenis van realtime-statuskleuren">
+    <div class="rt-legend-title">Betekenis van statuskleuren</div>
+    <div class="rt-legend-items">
+      <span class="rt-legend-item rt-ok"><i class="rt-legend-dot"></i>Op tijd</span>
+      <span class="rt-legend-item rt-delay"><i class="rt-legend-dot"></i>Vertraging</span>
+      <span class="rt-legend-item rt-early"><i class="rt-legend-dot"></i>Te vroeg</span>
+      <span class="rt-legend-item rt-warning"><i class="rt-legend-dot"></i>Onzeker / bronverschil</span>
+      <span class="rt-legend-item rt-unknown"><i class="rt-legend-dot"></i>Realtime onbekend</span>
+      <span class="rt-legend-item rt-cancelled"><i class="rt-legend-dot"></i>Uitgevallen</span>
+    </div>
+    <p class="rt-journey-note"><strong>Reistijden:</strong> de tijden bovenaan zijn volgens de routeplanning. Per halte kan hieronder een realtimeverwachting staan. De totale reisduur, loopdelen en overstappen worden nog niet automatisch opnieuw berekend.</p>
+    <p class="rt-journey-note"><strong>Bij uitval:</strong> een bevestigde annulering wordt rood gemeld; automatisch een vervangende reis zoeken is nog niet actief. Grijs betekent onbekend, niet op tijd.</p>
+  </section>`;
+}
+
 function realtimeHtml(leg) {
   if (leg.mode === 'WALK') {
     const minutes = typeof leg.duration === 'number'
@@ -444,6 +474,81 @@ function realtimeHtml(leg) {
     const prefix = leg.estimatedWalkingTime ? 'Geschatte looptijd · ' : '';
 
     return `<div class="rt-details">${details ? `${prefix}${esc(details)}` : 'Loopverbinding'}</div>`;
+  }
+
+  // NS is leidend voor gekoppelde NS-treinen. Bij een onbekende NS-status
+  // wordt de OpenOV-tijd niet alsnog als realtime gepresenteerd.
+  if (leg.nsRealtime) {
+    const ns = leg.nsRealtime;
+    const train = esc(ns.trainNumber || leg.tripShortName || leg.routeShortName || "onbekend");
+
+    if (ns.status === "cancelled") {
+      return `<div class="rt-status rt-cancelled">
+        <strong>NS · trein ${train} is geannuleerd</strong>
+        <div class="rt-details">Deze status komt uit de NS Reisinformatie API. Controleer de actuele reisopties voor een alternatief.</div>
+      </div>`;
+    }
+
+    if (ns.status !== "matched") {
+      return `<div class="rt-status rt-unknown">
+        <strong>NS · realtime onbekend</strong>
+        <div class="rt-details">${esc(ns.message || "Geen betrouwbare NS-bordmatch gevonden.")}</div>
+        <div class="rt-details">De tijden in het reisschema blijven geplande tijden; OpenOV wordt voor deze NS-trein niet als stille terugval gebruikt.</div>
+      </div>`;
+    }
+
+    const renderNsEvent = (label, event, plannedValue) => {
+      if (!event) {
+        return `<div>${esc(label)}: <span class="rt-unknown">geen passende NS-regel; geplande tijd blijft leidend</span></div>`;
+      }
+
+      const validTime = event.time && Number.isFinite(Date.parse(event.time))
+        ? event.time : null;
+      const shownTime = validTime
+        ? clock(validTime)
+        : plannedValue ? clock(plannedValue) : "—";
+      const rawDelay = typeof event.delaySeconds === "number" &&
+        Number.isFinite(event.delaySeconds) ? event.delaySeconds : null;
+      const delayText = rawDelay === null
+        ? "actuele afwijking onbekend"
+        : rawDelay === 0
+          ? "op tijd volgens NS"
+          : delayLabel(rawDelay);
+      const color = rawDelay === null ? "rt-unknown"
+        : rawDelay > 0 ? "rt-delay"
+        : rawDelay < 0 ? "rt-early"
+        : "rt-ok";
+
+      const plannedMs = Date.parse(plannedValue || "");
+      const actualMs = validTime ? Date.parse(validTime) : NaN;
+      const plannedNote = Number.isFinite(plannedMs) &&
+        Number.isFinite(actualMs) &&
+        Math.abs(plannedMs - actualMs) >= 1000
+          ? `<span class="muted"> · volgens planning ${esc(clock(plannedValue))}</span>`
+          : "";
+
+      const track = event.actualTrack || event.plannedTrack;
+      const trackHtml = track
+        ? `<div class="rt-details">Spoor: ${esc(track)}${event.platformChange ? " · spoor gewijzigd volgens NS" : ""}</div>`
+        : "";
+
+      return `<div>${esc(label)}: <span class="leg-time">${esc(shownTime)}</span>
+        <span class="muted">(${validTime ? "verwacht volgens NS" : "geplande tijd; NS-tijd ontbreekt"})</span>
+        <span class="${color}">· ${esc(delayText)}</span>${plannedNote}</div>${trackHtml}`;
+    };
+
+    const fromTime = leg.from?.scheduledDeparture || leg.from?.departure ||
+      leg.scheduledStartTime || leg.startTime;
+    const toTime = leg.to?.scheduledArrival || leg.to?.arrival ||
+      leg.scheduledEndTime || leg.endTime;
+
+    return `<div class="rt-status">
+      <strong class="rt-ok">NS · treininformatie gekoppeld</strong>
+      <div class="rt-details">Trein ${train}${leg.headsign ? ` · richting ${esc(leg.headsign)}` : ""}</div>
+      ${ns.departure ? renderNsEvent("Vertrek", ns.departure, fromTime) : '<div class="rt-details rt-unknown">Geen unieke NS-vertrekregel gevonden.</div>'}
+      ${ns.arrival ? renderNsEvent("Aankomst", ns.arrival, toTime) : '<div class="rt-details rt-unknown">Geen unieke NS-aankomstregel gevonden.</div>'}
+      <div class="rt-details">Bron: NS Reisinformatie API · match op treinnummer, station en geplande tijd.</div>
+    </div>`;
   }
 
   const rt = leg.ndovRealtime?.status === 'cancelled'
@@ -464,7 +569,7 @@ function realtimeHtml(leg) {
       ? `${candidateCount} mogelijke NDOV-ritten gevonden.`
       : 'Meerdere mogelijke NDOV-ritten gevonden.';
     return `<div class="rt-status">
-      <strong>NDOV · geen eenduidige ritmatch</strong>
+      <strong class="rt-warning">NDOV · geen eenduidige ritmatch</strong>
       <div class="rt-details">${esc(candidateText)} Realtimegegevens zijn bewust niet gekoppeld om een verkeerde rit te voorkomen.</div>
     </div>`;
   }
@@ -549,6 +654,13 @@ function realtimeHtml(leg) {
         : kv6Seconds < 0
           ? `${Math.floor(kv6Abs / 60)} min ${kv6Abs % 60} sec te vroeg volgens voertuigupdate`
           : 'Voertuigupdate meldt op tijd';
+    const kv6ColorClass = kv6Seconds == null || !Number.isFinite(kv6Seconds)
+      ? 'rt-unknown'
+      : kv6Seconds > 0
+        ? 'rt-delay'
+        : kv6Seconds < 0
+          ? 'rt-early'
+          : 'rt-ok';
     // Toon een waarschuwing bij een duidelijk verschil tussen
     // haltevertragingen van OpenOV en KV78Turbo. Verander geen bronwaarden.
     const formatDelayDuration = (value) => {
@@ -613,13 +725,13 @@ function realtimeHtml(leg) {
     ].filter(Boolean).join(" ");
 
     const sourceConflictHtml = sourceDisagreements.length
-      ? `<div class="rt-details rt-unknown"><strong>⚠️ Realtimebronnen spreken elkaar tegen.</strong> ${esc(sourceDisagreements.join(" "))} ${esc(conflictNotes)}</div>`
+      ? `<div class="rt-details rt-warning"><strong>⚠️ Realtimebronnen spreken elkaar tegen.</strong> ${esc(sourceDisagreements.join(" "))} ${esc(conflictNotes)}</div>`
       : "";
 
     return `<div class="rt-status">
-      <strong class="rt-ok">NDOV · actuele haltegegevens (KV78Turbo)</strong>
+      <strong>NDOV · actuele haltegegevens (KV78Turbo)</strong>
       ${sourceConflictHtml}
-      ${kv6DelayLabel ? `<div class="rt-details">${esc(kv6DelayLabel)}${kv6?.vehicleNumber ? ` · voertuig ${esc(kv6.vehicleNumber)}` : ''}</div>` : ''}
+      ${kv6DelayLabel ? `<div class="rt-details"><span class="${kv6ColorClass}">${esc(kv6DelayLabel)}</span>${kv6?.vehicleNumber ? ` · voertuig ${esc(kv6.vehicleNumber)}` : ''}</div>` : ''}
       ${kv78.freshnessNote ? `<div class="rt-details">${esc(kv78.freshnessNote)}</div>` : ''}
       ${departure}
       ${arrival}
@@ -640,6 +752,13 @@ function realtimeHtml(leg) {
       : delay < 0
         ? `${Math.floor(seconds / 60)} min ${seconds % 60} sec te vroeg`
         : 'Op tijd volgens de actuele voertuigupdate';
+    const delayColorClass = !Number.isFinite(delay)
+      ? 'rt-unknown'
+      : delay > 0
+        ? 'rt-delay'
+        : delay < 0
+          ? 'rt-early'
+          : 'rt-ok';
     const vehicle = ndov.vehicleNumber ? `Voertuig: ${esc(ndov.vehicleNumber)}` : '';
     const block = ndov.blockCode ? `Blok: ${esc(ndov.blockCode)}` : '';
     const stop = ndov.currentStopCode ? `Laatste haltecode: ${esc(ndov.currentStopCode)}` : '';
@@ -648,7 +767,7 @@ function realtimeHtml(leg) {
       : `${esc(ndov.feedAgeSeconds ?? '?')} sec geleden`;
     return `<div class="rt-status">
       <strong>NDOV · live voertuigupdate (KV6)</strong>
-      <div class="rt-details">${esc(delayLabel)}</div>
+      <div class="rt-details"><span class="${delayColorClass}">${esc(delayLabel)}</span></div>
       ${vehicle ? `<div class="rt-details">${vehicle}</div>` : ''}
       ${block ? `<div class="rt-details">${block}</div>` : ''}
       ${stop ? `<div class="rt-details">${stop}</div>` : ''}
@@ -837,9 +956,19 @@ function renderAlerts(alerts) {
 }
 
 function timelineRealtimePrediction(leg, kind, scheduledTime) {
+  if (!leg || leg.mode === 'WALK') return null;
+
+  // NS is leidend voor treinreisdelen die de server aan een NS-rit heeft gekoppeld.
+  if (leg.nsRealtime) {
+    if (leg.nsRealtime.status !== 'matched') return null;
+    const nsEvent = leg.nsRealtime[kind];
+    if (nsEvent?.time && Number.isFinite(Date.parse(nsEvent.time))) {
+      return { time: nsEvent.time, source: 'NS Reisinformatie API' };
+    }
+    return null;
+  }
+
   if (
-    !leg ||
-    leg.mode === 'WALK' ||
     leg.cancelled === true ||
     leg.ndovRealtime?.status === 'cancelled' ||
     leg.openovRealtime?.status === 'cancelled'
@@ -1110,7 +1239,16 @@ $('planBtn').onclick = async () => {
     });
 
     const when = $('when').value;
-    if (when) q.set('time', new Date(when).toISOString());
+    const requestedDeparture = when
+      ? new Date(when)
+      : new Date();
+
+    if (!Number.isFinite(requestedDeparture.getTime())) {
+      $('planStatus').textContent = 'Kies een geldige vertrektijd.';
+      return;
+    }
+
+    q.set('time', requestedDeparture.toISOString());
     const selectedModes = Array.from(
       document.querySelectorAll('input[name="transitMode"]:checked'),
       input => input.value
@@ -1161,11 +1299,21 @@ q.set('pedestrianSpeed', '1.5');
         : [];
 
     const meta = data.openovRealtimeMeta;
+    const nsMeta = data.nsRealtimeMeta;
+    const nsSummary = !nsMeta
+      ? ' · NS-status niet ontvangen.'
+      : nsMeta.status === 'not_applicable'
+        ? ' · NS: geen exact gekoppelde treinen om te controleren.'
+        : ` · NS: ${nsMeta.matchedLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0} gekoppeld; ` +
+          `vertrek ${nsMeta.departureMatchedLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}, ` +
+          `aankomst ${nsMeta.arrivalMatchedLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}; ` +
+          `${nsMeta.cancelledLegCount ?? 0} geannuleerd, ` +
+          `${nsMeta.unknownLegCount ?? 0} onbekend.`;
     if (meta?.status === 'enrichment_failed') {
       $('planStatus').textContent =
         `Reisplanner klaar · realtimeverwerking mislukt. ` +
         `${meta.message || 'De ritstatussen konden niet worden gecontroleerd.'} ` +
-        'Er wordt geen realtime-status als bevestigd getoond.';
+        'Er wordt geen realtime-status als bevestigd getoond.' + nsSummary;
     } else if (meta) {
       $('planStatus').textContent =
         `Reisplanner klaar · OpenOV: ${meta.matchedLegCount ?? 0} ritten gekoppeld; ` +
@@ -1175,11 +1323,12 @@ q.set('pedestrianSpeed', '1.5');
         `Storingsmeldingen: ${(data.openovAlerts || []).length}.` +
         (data.ndovRealtimeMeta
           ? ` NDOV KV6: ${data.ndovRealtimeMeta.kv6MatchedLegCount ?? 0} live ritmatches (${data.ndovRealtimeMeta.kv6DelayLegCount ?? 0} met vertraging); KV78: ${data.ndovRealtimeMeta.kv78DataLegCount ?? 0} reisdelen met haltegegevens (${data.ndovRealtimeMeta.kv78DelayLegCount ?? 0} met vertraging); KV17: ${data.ndovRealtimeMeta.cancelledLegCount ?? 0} exacte annuleringen.`
-          : ' NDOV-status niet ontvangen.');
+          : ' NDOV-status niet ontvangen.') +
+        nsSummary;
     } else {
       $('planStatus').textContent =
         `Plannerantwoord ontvangen · ${journeys.length} opties. ` +
-        'Geen realtime-overzicht ontvangen.';
+        'Geen realtime-overzicht ontvangen.' + nsSummary;
     }
 
     const feedInfo = meta?.feeds
@@ -1300,7 +1449,7 @@ q.set('pedestrianSpeed', '1.5');
       return `<article class="journey">
         <strong>Reis ${index + 1}</strong>
         <div class="journey-summary">
-          <span>Gepland: ${esc(clock(departure))} → ${esc(clock(arrival))}</span>
+          <span>Volgens routeplanning: ${esc(clock(departure))} → ${esc(clock(arrival))}</span>
           <span>${transitLegs.length} OV-ritten · ${transfers} overstappen</span>
         </div>
         ${legs.map(renderLeg).join('') ||
@@ -1309,7 +1458,7 @@ q.set('pedestrianSpeed', '1.5');
     }).join('');
 
     $('journeys').innerHTML =
-      feedInfo + cards + renderAlerts(data.openovAlerts || []);
+      feedInfo + renderRealtimeLegend() + cards + renderAlerts(data.openovAlerts || []);
 
   } catch (error) {
     $('planStatus').innerHTML =
