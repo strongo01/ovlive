@@ -4,7 +4,8 @@ This is a **production-oriented test scaffold**, not a certified production jour
 
 ## What it does now
 
-- Searches place names through Photon/OpenStreetMap and proxies journey planning through Transitous MOTIS v6.
+- Searches place names through Nominatim (OpenStreetMap) first, and falls back to Geoapify if Nominatim fails technically. Journey planning is provided by Transitous MOTIS v6.
+- Keeps the Geoapify API key server-side in the Worker environment; it is not sent to the browser. The UI provides OpenStreetMap and Geoapify attribution.
 - Fetches and decodes OpenOV / OVapi GTFS-Realtime feeds (`tripUpdates.pb`, `alerts.pb`, `trainUpdates.pb`, `vehiclePositions.pb`).
 - Shows feed timestamp, measured age, HTTP status, entity count and raw normalized data.
 - Explicitly marks unknown/stale feeds. It never infers “on time” from a missing update.
@@ -36,16 +37,21 @@ The OpenOV site lists its realtime products as KV78turbo (bus/tram/metro, DOVA s
    npx wrangler login
    ```
 4. Edit `wrangler.toml`: replace `APP_CONTACT` with your contact email or site URL. Do not deploy with the placeholder.
-5. Test locally (only for development):
+5. Configure the Geoapify fallback key. For local development, add `GEOAPIFY_API_KEY=your-key` to `.dev.vars` (that file is ignored by Git; never commit or share the key). For production, set it as a Cloudflare Worker secret:
+   ```sh
+   npx wrangler secret put GEOAPIFY_API_KEY
+   ```
+   Paste the key only into Wrangler's prompt. Nominatim remains the primary geocoder; Geoapify is used only after a technical Nominatim error.
+6. Test locally (only for development):
    ```sh
    npm run dev
    ```
    Open the local URL shown by Wrangler. The app's backend requests still go to live upstream sources.
-6. Deploy:
+7. Deploy:
    ```sh
    npm run deploy
    ```
-7. Open the deployed `workers.dev` URL and test `/api/health`, then the feed viewer and journey planner.
+8. Open the deployed `workers.dev` URL and test `/api/health`, place search, then the feed viewer and journey planner.
 
 ## API routes
 
@@ -54,7 +60,7 @@ The OpenOV site lists its realtime products as KV78turbo (bus/tram/metro, DOVA s
 - `GET /api/realtime?kind=alerts&limit=300` — alerts.
 - `GET /api/realtime?kind=trainUpdates&limit=300` — train update feed.
 - `GET /api/realtime?kind=vehiclePositions&limit=300` — vehicle positions.
-- `GET /api/geocode?q=Den%20Haag%20Centraal` — place search via Photon.
+- `GET /api/geocode?q=Den%20Haag%20Centraal` — place search via Nominatim, with Geoapify as a technical-failure fallback.
 - `GET /api/plan?fromPlace=52.07,4.30&toPlace=52.09,5.12` — journey planning proxy.
 - `GET /api/stoptimes?stopId=...` — Transitous stop-time query.
 
