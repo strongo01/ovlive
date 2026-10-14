@@ -309,8 +309,27 @@ export class NdovFeedHub extends DurableObject {
       return Response.json({ ok: true, enabled: true, stream, nextAlarmAt: await this.ctx.storage.getAlarm(), note: 'Duurzame alarmgestuurde collector ingeschakeld; huidige verzameling start via alarm.' }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/continuous/disable') {
+      const persistedEnabled = (await this.ctx.storage.get('continuousEnabled')) === true;
+      const existingAlarm = await this.ctx.storage.getAlarm();
+      const alreadyDisabled = !persistedEnabled &&
+        existingAlarm === null &&
+        !this.running &&
+        !this.socket;
+
       this.continuousEnabled = false;
       this.stopRequested = true;
+
+      // Idempotent: als de collector al uit staat, voorkom onnodige writes.
+      if (alreadyDisabled) {
+        return Response.json({
+          ok: true,
+          enabled: false,
+          stream,
+          alreadyDisabled: true,
+          note: 'Collector stond al uit; er is geen opslag gewijzigd.'
+        }, { headers: { 'cache-control': 'no-store' } });
+      }
+
       await this.ctx.storage.put('continuousEnabled', false);
       await this.ctx.storage.deleteAlarm();
       if (this.socket) { try { await this.socket.close(); } catch {} }
