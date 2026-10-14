@@ -2560,7 +2560,25 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
 export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (env.NDOV_AUTOCOLLECT !== "true") return;
+    if (env.NDOV_AUTOCOLLECT !== "true") {
+      // Schakel ook reeds actieve Durable Object-alarmen/verbindingen uit.
+      // Alleen stoppen met nieuwe alarms inplannen laat bestaande collectors lopen.
+      ctx.waitUntil(Promise.all([
+        callNdovHub(env, "kv78", "continuous/disable"),
+        callNdovHub(env, "bison", "continuous/disable"),
+      ]).then((feeds) => {
+        const failed = feeds.filter((feed) => feed.ok !== true || feed.enabled !== false);
+        if (failed.length) {
+          console.error("[NDOV_AUTOCOLLECT] Niet alle collectors konden worden gepauzeerd.", failed);
+        } else {
+          console.log("[NDOV_AUTOCOLLECT] Automatische KV78- en BISON-collectors zijn gepauzeerd.");
+        }
+      }).catch((error) => {
+        console.error("[NDOV_AUTOCOLLECT] Collectorpauze mislukt.", error);
+      }));
+      return;
+    }
+
     ctx.waitUntil(Promise.all([
       callNdovHub(env, "kv78", "continuous/enable"),
       callNdovHub(env, "bison", "continuous/enable"),
