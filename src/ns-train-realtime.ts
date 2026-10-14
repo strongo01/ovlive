@@ -353,7 +353,7 @@ function selectBoardRow(
   return candidates[0].row;
 }
 
-function eventFrom(row: any, kind: "departure" | "arrival"): any {
+export function eventFrom(row: any, kind: "departure" | "arrival"): any {
   if (!row) return null;
 
   const plannedMs = toMs(row?.plannedDateTime);
