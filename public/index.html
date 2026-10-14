@@ -559,7 +559,7 @@ function realtimeHtml(leg) {
       ${ns.departure ? renderNsEvent("Vertrek", ns.departure, fromTime) : '<div class="rt-details rt-unknown">Geen unieke NS-vertrekregel gevonden.</div>'}
       ${ns.arrival ? renderNsEvent("Aankomst", ns.arrival, toTime) : '<div class="rt-details rt-unknown">Geen unieke NS-aankomstregel gevonden.</div>'}
       <div class="${deviationSummaryClass}">Actuele afwijking: vertrek ${departureDeviationKnown ? "bekend" : "onbekend"} · aankomst ${arrivalDeviationKnown ? "bekend" : "onbekend"}. Een ritmatch bevestigt niet automatisch de punctualiteit.</div>
-      <div class="rt-details">Bron: NS Reisinformatie API · match op treinnummer, station en geplande tijd.</div>
+      <div class="rt-details">Bron: NS Reisinformatie API · ${esc(ns.matchMethod || "match op treinnummer, station en geplande tijd")}.</div>
     </div>`;
   }
 
