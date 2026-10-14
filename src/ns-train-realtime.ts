@@ -394,9 +394,7 @@ export function eventFrom(row: any, kind: "departure" | "arrival"): any {
       delaySeconds = reportedDelay;
     } else if (differenceMs !== null && Math.abs(differenceMs) >= 1000) {
       delaySeconds = Math.round(differenceMs / 1000);
-    } else if (differenceMs !== null && hasKnownStatus) {
-      delaySeconds = 0;
-    }
+  }
   }
 
   const usableActualMs = unconfirmedScheduleEcho ? null : actualMs;

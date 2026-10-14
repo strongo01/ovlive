@@ -48,17 +48,30 @@ assert.equal(missingStatus.time, null);
 assert.equal(missingStatus.delaySeconds, null);
 console.log("PASS: ontbrekende NS-status blijft onbekend");
 
-// Een herkenbare status met gelijke tijden mag nulvertraging opleveren.
+// INCOMING beschrijft de treinstatus, niet automatisch de punctualiteit.
+const incomingWithoutDelay = eventFrom({
+  plannedDateTime: planned,
+  actualDateTime: actual,
+  arrivalStatus: "INCOMING",
+  cancelled: false
+}, "arrival");
+
+assert.equal(incomingWithoutDelay.time, planned);
+assert.equal(incomingWithoutDelay.delaySeconds, null);
+console.log("PASS: INCOMING zonder expliciete vertraging blijft punctualiteit onbekend");
+
+// Nulvertraging is wel geldig als NS die expliciet als 0 doorgeeft.
 const confirmedZero = eventFrom({
   plannedDateTime: planned,
   actualDateTime: actual,
-  departureStatus: "ON_STATION",
+  departureStatus: "UNKNOWN",
+  delayInSeconds: 0,
   cancelled: false
 }, "departure");
 
 assert.equal(confirmedZero.time, planned);
 assert.equal(confirmedZero.delaySeconds, 0);
-console.log("PASS: bekende NS-status met gelijke tijden geeft nulvertraging");
+console.log("PASS: expliciete nulvertraging van NS blijft geldig");
 
 // Een werkelijke afwijking mag niet worden weggefilterd.
 const delayed = eventFrom({
