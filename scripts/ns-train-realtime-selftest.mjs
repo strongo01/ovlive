@@ -18,7 +18,7 @@ const moduleUrl =
   "data:text/javascript;base64," +
   Buffer.from(compiled).toString("base64");
 
-const { eventFrom, hasKnownPunctualityDeviation } = await import(moduleUrl);
+const { eventFrom, hasKnownPunctualityDeviation, selectJourneyEventFromStops } = await import(moduleUrl);
 
 const planned = "2026-10-14T11:10:00.000Z";
 const actual = "2026-10-14T11:10:00.000Z";
@@ -102,5 +102,103 @@ const reportedDelay = eventFrom({
 assert.equal(reportedDelay.delaySeconds, 150);
 assert.equal(hasKnownPunctualityDeviation(reportedDelay), true);
 console.log("PASS: expliciet gemelde NS-vertraging blijft behouden");
+
+
+const stationIndex = {
+  uics: new Map([
+    ["8400282", "GVC"],
+    ["8400621", "UT"]
+  ])
+};
+const journeyStops = [
+  {
+    stop: { uicCode: "8400282" },
+    departures: [{
+      product: { number: "661" },
+      plannedTime: planned,
+      actualTime: actual,
+      delayInSeconds: 0,
+      cancelled: false
+    }]
+  },
+  {
+    stop: { uicCode: "8400621" },
+    arrivals: [{
+      product: { number: "661" },
+      plannedTime: "2026-10-14T11:40:00.000Z",
+      actualTime: "2026-10-14T11:42:00.000Z",
+      delayInSeconds: 120,
+      cancelled: false
+    }]
+  }
+];
+
+const journeyDeparture = selectJourneyEventFromStops(
+  journeyStops, "661", "GVC", stationIndex, Date.parse(planned), "departure"
+);
+assert.ok(journeyDeparture);
+assert.equal(journeyDeparture.plannedDateTime, planned);
+assert.equal(eventFrom(journeyDeparture, "departure").delaySeconds, 0);
+assert.equal(
+  hasKnownPunctualityDeviation(eventFrom(journeyDeparture, "departure")),
+  true
+);
+console.log("PASS: reisdetails leveren expliciete nulvertraging bij exact vertrek");
+
+const journeyArrival = selectJourneyEventFromStops(
+  journeyStops, "661", "UT", stationIndex,
+  Date.parse("2026-10-14T11:40:00.000Z"), "arrival"
+);
+assert.ok(journeyArrival);
+assert.equal(
+  eventFrom(journeyArrival, "arrival").delaySeconds,
+  120
+);
+console.log("PASS: reisdetails leveren vertraging bij exacte aankomst");
+
+assert.equal(
+  selectJourneyEventFromStops(
+    journeyStops, "9999", "GVC", stationIndex,
+    Date.parse(planned), "departure"
+  ),
+  null
+);
+assert.equal(
+  selectJourneyEventFromStops(
+    journeyStops, "661", "UT", stationIndex,
+    Date.parse(planned), "departure"
+  ),
+  null
+);
+assert.equal(
+  selectJourneyEventFromStops(
+    journeyStops, "661", "GVC", stationIndex,
+    Date.parse("2026-10-14T11:20:00.000Z"), "departure"
+  ),
+  null
+);
+console.log("PASS: reisdetails vereisen exact treinnummer, station en tijdvenster");
+
+const ambiguousJourneyStops = [
+  ...journeyStops,
+  {
+    stop: { uicCode: "8400282" },
+    departures: [{
+      product: { number: "661" },
+      plannedTime: "2026-10-14T11:09:00.000Z",
+      actualTime: "2026-10-14T11:09:00.000Z",
+      delayInSeconds: 0,
+      cancelled: false
+    }]
+  }
+];
+assert.equal(
+  selectJourneyEventFromStops(
+    ambiguousJourneyStops, "661", "GVC", stationIndex,
+    Date.parse("2026-10-14T11:09:30.000Z"), "departure"
+  ),
+  null
+);
+console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
 
 console.log("Alle NS-regressietests geslaagd.");
