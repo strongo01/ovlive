@@ -2564,18 +2564,36 @@ export default {
     if (env.NDOV_AUTOCOLLECT !== "true") {
       // Schakel ook reeds actieve Durable Object-alarmen/verbindingen uit.
       // Alleen stoppen met nieuwe alarms inplannen laat bestaande collectors lopen.
+      // Stop ook de legacy Durable Objects die vóór de migratie naar het
+      // gedeelde object onder id's "kv78" en "bison" draaiden. Een nieuwe
+      // namespace-naam migreert bestaande alarms/verbindingen niet automatisch.
+      const disableLegacyCollector = async (stream: NdovStreamName): Promise<Record<string, any>> => {
+        const legacyId = env.NDOV_FEEDS.idFromName(stream);
+        const legacyStub = env.NDOV_FEEDS.get(legacyId);
+        const target = new URL("https://ndov-hub.local/continuous/disable");
+        target.searchParams.set("stream", stream);
+        const response = await legacyStub.fetch(target.toString());
+        const data = await response.json().catch(() => ({})) as Record<string, any>;
+        if (!response.ok || data.ok !== true || data.enabled !== false) {
+          throw new Error(`Legacy ${stream}-collector stop mislukt: HTTP ${response.status} ${JSON.stringify(data)}`);
+        }
+        return { stream, legacy: true, ...data };
+      };
+
       ctx.waitUntil(Promise.all([
         callNdovHub(env, "kv78", "continuous/disable"),
         callNdovHub(env, "bison", "continuous/disable"),
+        disableLegacyCollector("kv78"),
+        disableLegacyCollector("bison"),
       ]).then((feeds) => {
         const failed = feeds.filter((feed) => feed.ok !== true || feed.enabled !== false);
         if (failed.length) {
-          console.error("[NDOV_AUTOCOLLECT] Niet alle collectors konden worden gepauzeerd.", failed);
+          console.error("[NDOV_AUTOCOLLECT] Niet alle gedeelde/legacy collectors konden worden gepauzeerd.", failed);
         } else {
-          console.log("[NDOV_AUTOCOLLECT] Automatische KV78- en BISON-collectors zijn gepauzeerd.");
+          console.log("[NDOV_AUTOCOLLECT] Gedeelde én legacy KV78/BISON-collectors zijn gepauzeerd.", feeds);
         }
       }).catch((error) => {
-        console.error("[NDOV_AUTOCOLLECT] Collectorpauze mislukt.", error);
+        console.error("[NDOV_AUTOCOLLECT] Collectorpauze mislukt voor gedeelde of legacy collectors.", error);
       }));
       return;
     }
