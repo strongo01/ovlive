@@ -15,6 +15,7 @@ interface Env {
   APP_VERSION: string;
   APP_CONTACT: string;
   NS_API_SUBSCRIPTION_KEY?: string;
+  GEOAPIFY_API_KEY?: string;
 }
 
 const OPENOV = {
@@ -25,6 +26,341 @@ const OPENOV = {
 };
 
 const TRANSITOUS = "https://api.transitous.org/api/v6";
+
+// NOMINATIM_LOCAL_GEOCODER_V1
+// Cache en wachtrij voor lokale tests. De wachtrij geldt per Worker-isolate.
+const NOMINATIM_CACHE_TTL_MS = 10 * 60 * 1000;
+const NOMINATIM_MIN_INTERVAL_MS = 1100;
+const NOMINATIM_MAX_CACHE_ENTRIES = 200;
+
+const nominatimGeocodeCache = new Map<
+  string,
+  { expiresAtMs: number; data: any }
+>();
+const nominatimGeocodeInflight = new Map<string, Promise<any>>();
+
+let nominatimRequestQueue: Promise<void> = Promise.resolve();
+let nominatimLastRequestAtMs = 0;
+
+async function fetchNominatimSerialized(
+  url: URL,
+  env: Env
+): Promise<Response> {
+  const request = nominatimRequestQueue.then(async () => {
+    const waitMs = Math.max(
+      0,
+      NOMINATIM_MIN_INTERVAL_MS -
+        (Date.now() - nominatimLastRequestAtMs)
+    );
+
+    if (waitMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
+
+    nominatimLastRequestAtMs = Date.now();
+
+    return fetch(url, {
+      headers: {
+        "accept": "application/json",
+        "user-agent":
+          `${env.APP_NAME}/${env.APP_VERSION} (contact: ${env.APP_CONTACT})`
+      },
+      signal: AbortSignal.timeout(10000),
+      cf: { cacheTtl: 600, cacheEverything: true }
+    });
+  });
+
+  nominatimRequestQueue = request.then(
+    () => undefined,
+    () => undefined
+  );
+
+  return request;
+}
+
+async function getNominatimFeatures(
+  query: string,
+  env: Env
+): Promise<any> {
+  const cacheKey = query.trim().toLocaleLowerCase("nl-NL");
+  const now = Date.now();
+  const cached = nominatimGeocodeCache.get(cacheKey);
+
+  if (cached && cached.expiresAtMs > now) {
+    return cached.data;
+  }
+
+  if (cached) nominatimGeocodeCache.delete(cacheKey);
+
+  const inFlight = nominatimGeocodeInflight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const task = (async () => {
+    const upstream = new URL(
+      "https://nominatim.openstreetmap.org/search"
+    );
+    upstream.searchParams.set("q", query);
+    upstream.searchParams.set("format", "jsonv2");
+    upstream.searchParams.set("addressdetails", "1");
+    upstream.searchParams.set("limit", "6");
+    upstream.searchParams.set("accept-language", "nl");
+
+    const response = await fetchNominatimSerialized(upstream, env);
+
+    if (!response.ok) {
+      throw new Error(`Nominatim gaf HTTP ${response.status}.`);
+    }
+
+    const items = await response.json();
+
+    if (!Array.isArray(items)) {
+      throw new Error("Nominatim gaf geen geldige lijst met zoekresultaten.");
+    }
+
+    const features = items.map((item: any) => {
+      const address = item?.address ?? {};
+      const lon = Number(item?.lon);
+      const lat = Number(item?.lat);
+
+      return {
+        type: "Feature",
+        properties: {
+          osm_type: item?.osm_type ?? null,
+          osm_id: item?.osm_id ?? null,
+          osm_key: item?.class ?? null,
+          osm_value: item?.type ?? item?.class ?? "place",
+          type: item?.type ?? item?.class ?? "place",
+          name: item?.name ?? null,
+          street:
+            address.road ??
+            address.pedestrian ??
+            address.residential ??
+            address.footway ??
+            address.path ??
+            null,
+          housenumber: address.house_number ?? null,
+          postcode: address.postcode ?? null,
+          city:
+            address.city ??
+            address.town ??
+            address.village ??
+            address.municipality ??
+            address.hamlet ??
+            null,
+          locality:
+            address.suburb ??
+            address.neighbourhood ??
+            address.quarter ??
+            null,
+          district:
+            address.city_district ??
+            address.borough ??
+            null,
+          state: address.state ?? null,
+          country: address.country ?? null,
+          countrycode: address.country_code
+            ? String(address.country_code).toUpperCase()
+            : null,
+          display_name: item?.display_name ?? null
+        },
+        geometry: {
+          type: "Point",
+          coordinates: [lon, lat]
+        }
+      };
+    }).filter((feature: any) =>
+      feature.geometry.coordinates.every(
+        (coordinate: number) => Number.isFinite(coordinate)
+      )
+    );
+
+    const data = {
+      type: "FeatureCollection",
+      features
+    };
+
+    if (nominatimGeocodeCache.size >= NOMINATIM_MAX_CACHE_ENTRIES) {
+      const oldestKey = nominatimGeocodeCache.keys().next().value;
+      if (oldestKey) nominatimGeocodeCache.delete(oldestKey);
+    }
+
+    nominatimGeocodeCache.set(cacheKey, {
+      expiresAtMs: Date.now() + NOMINATIM_CACHE_TTL_MS,
+      data
+    });
+
+    return data;
+  })();
+
+  nominatimGeocodeInflight.set(cacheKey, task);
+
+  try {
+    return await task;
+  } finally {
+    if (nominatimGeocodeInflight.get(cacheKey) === task) {
+      nominatimGeocodeInflight.delete(cacheKey);
+    }
+  }
+}
+
+
+// GEOAPIFY FALLBACK: alleen aangeroepen als Nominatim een technische fout geeft.
+const GEOAPIFY_CACHE_TTL_MS = 10 * 60 * 1000;
+const GEOAPIFY_MAX_CACHE_ENTRIES = 200;
+
+const geoapifyGeocodeCache = new Map<
+  string,
+  { expiresAtMs: number; data: any }
+>();
+const geoapifyGeocodeInflight = new Map<string, Promise<any>>();
+
+async function getGeoapifyFeatures(
+  query: string,
+  env: Env
+): Promise<any> {
+  const apiKey = env.GEOAPIFY_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Geoapify API-sleutel ontbreekt.");
+  }
+
+  const cacheKey = query.trim().toLocaleLowerCase("nl-NL");
+  const now = Date.now();
+  const cached = geoapifyGeocodeCache.get(cacheKey);
+
+  if (cached && cached.expiresAtMs > now) {
+    return cached.data;
+  }
+  if (cached) geoapifyGeocodeCache.delete(cacheKey);
+
+  const inFlight = geoapifyGeocodeInflight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const task = (async () => {
+    const upstream = new URL(
+      "https://api.geoapify.com/v1/geocode/search"
+    );
+    upstream.searchParams.set("text", query);
+    upstream.searchParams.set("format", "json");
+    upstream.searchParams.set("limit", "6");
+    upstream.searchParams.set("lang", "nl");
+    upstream.searchParams.set("apiKey", apiKey);
+
+    const response = await fetch(upstream, {
+      headers: { "accept": "application/json" },
+      signal: AbortSignal.timeout(10000),
+      cf: { cacheTtl: 600, cacheEverything: true }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Geoapify gaf HTTP ${response.status}.`);
+    }
+
+    const body: any = await response.json();
+    if (!Array.isArray(body?.results)) {
+      throw new Error("Geoapify gaf geen geldige zoekresultaten.");
+    }
+
+    // Normaliseer naar hetzelfde FeatureCollection-formaat als Nominatim.
+    const features = body.results.map((item: any) => {
+      const lon = Number(item?.lon);
+      const lat = Number(item?.lat);
+      const address = item ?? {};
+
+      return {
+        type: "Feature",
+        properties: {
+          osm_type: item?.datasource?.raw?.osm_type ?? null,
+          osm_id: item?.datasource?.raw?.osm_id ?? null,
+          osm_key: item?.category ?? item?.datasource?.sourcename ?? null,
+          osm_value: item?.result_type ?? item?.type ?? "place",
+          type: item?.result_type ?? item?.type ?? "place",
+          name: item?.name ?? item?.address_line1 ?? null,
+          street: address.street ?? null,
+          housenumber: address.housenumber ?? null,
+          postcode: address.postcode ?? null,
+          city:
+            address.city ??
+            address.town ??
+            address.village ??
+            address.municipality ??
+            null,
+          locality: address.suburb ?? address.district ?? null,
+          district: address.county ?? null,
+          state: address.state ?? null,
+          country: address.country ?? null,
+          countrycode: address.country_code
+            ? String(address.country_code).toUpperCase()
+            : null,
+          display_name: address.formatted ?? null
+        },
+        geometry: {
+          type: "Point",
+          coordinates: [lon, lat]
+        }
+      };
+    }).filter((feature: any) =>
+      feature.geometry.coordinates.every(
+        (coordinate: number) => Number.isFinite(coordinate)
+      )
+    );
+
+    const data = {
+      type: "FeatureCollection",
+      features
+    };
+
+    if (geoapifyGeocodeCache.size >= GEOAPIFY_MAX_CACHE_ENTRIES) {
+      const oldestKey = geoapifyGeocodeCache.keys().next().value;
+      if (oldestKey) geoapifyGeocodeCache.delete(oldestKey);
+    }
+
+    geoapifyGeocodeCache.set(cacheKey, {
+      expiresAtMs: Date.now() + GEOAPIFY_CACHE_TTL_MS,
+      data
+    });
+
+    return data;
+  })();
+
+  geoapifyGeocodeInflight.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    if (geoapifyGeocodeInflight.get(cacheKey) === task) {
+      geoapifyGeocodeInflight.delete(cacheKey);
+    }
+  }
+}
+
+async function getGeocodeFeatures(
+  query: string,
+  env: Env
+): Promise<any> {
+  try {
+    // Nominatim blijft altijd de primaire bron.
+    return await getNominatimFeatures(query, env);
+  } catch (primaryError) {
+    console.warn(
+      "[OVLIVE_GEOCODE] Nominatim mislukt; Geoapify-fallback wordt geprobeerd.",
+      primaryError instanceof Error ? primaryError.message : "Onbekende fout"
+    );
+
+    if (!env.GEOAPIFY_API_KEY?.trim()) {
+      throw primaryError;
+    }
+
+    try {
+      return await getGeoapifyFeatures(query, env);
+    } catch (fallbackError) {
+      console.warn(
+        "[OVLIVE_GEOCODE] Ook Geoapify is niet beschikbaar.",
+        fallbackError instanceof Error ? fallbackError.message : "Onbekende fout"
+      );
+      throw new Error("Nominatim en Geoapify zijn tijdelijk niet beschikbaar.");
+    }
+  }
+}
+
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
 const MAX_ROUTE_PARAMS = new Set([
   "fromPlace", "toPlace", "time", "arriveBy", "realtimeMode", "transitModes",
@@ -1897,34 +2233,36 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (url.pathname === "/api/geocode") {
     const query = (url.searchParams.get("q") ?? "").trim();
+
     if (query.length < 2 || query.length > 160) {
-      return json({ error: "Voer minimaal 2 en maximaal 160 tekens in." }, 400, headers);
+      return json(
+        { error: "Voer minimaal 2 en maximaal 160 tekens in." },
+        400,
+        headers
+      );
     }
+
     try {
-      const upstream = new URL("https://photon.komoot.io/api/");
-      upstream.searchParams.set("q", query);
-      upstream.searchParams.set("limit", "6");
-      const response = await fetch(upstream, {
-        headers: {
-          "accept": "application/geo+json, application/json",
-          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
-        },
-        cf: { cacheTtl: 30, cacheEverything: true },
-        signal: AbortSignal.timeout(10000)
-      });
-      if (!response.ok) return json({ error: `Geocoder gaf HTTP ${response.status}.` }, 502, headers);
-      return new Response(await response.text(), {
-        status: 200,
-        headers: { ...headers, "content-type": "application/geo+json; charset=utf-8", "cache-control": "public, max-age=30" }
+      const data = await getGeocodeFeatures(query, env);
+
+      return json(data, 200, {
+        ...headers,
+        "cache-control": "public, max-age=600"
       });
     } catch (error) {
-      return json({ error: "Plaats zoeken is tijdelijk niet beschikbaar." }, 502, headers);
+      console.warn(
+        "[OVLIVE_GEOCODE]",
+        error instanceof Error ? error.message : "Onbekende geocoderfout"
+      );
+
+      return json(
+        { error: "Plaats zoeken is tijdelijk niet beschikbaar." },
+        502,
+        headers
+      );
     }
   }
 
-
-  // Lokale diagnostische proxy voor NS Reisinformatie API.
-  // De subscription key blijft uitsluitend server-side.
   if (url.pathname === "/api/ns/departures") {
     if (request.method !== "GET") {
       return json({ error: "Alleen GET is toegestaan." }, 405, headers);

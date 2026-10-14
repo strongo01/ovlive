@@ -75,7 +75,7 @@
 
   <section class="panel">
     <h2>Reis plannen</h2>
-    <p class="muted">Zoek vertrek- en aankomstplek en kies het juiste resultaat. Je kunt ook latitude,longitude of een Transitous-stop-ID invoeren. Geocodering gebruikt Photon/OpenStreetMap; de route wordt berekend door Transitous.</p>
+    <p class="muted">Zoek vertrek- en aankomstplek en kies het juiste resultaat. Je kunt ook latitude,longitude of een Transitous-stop-ID invoeren. Geocodering probeert eerst Nominatim (OpenStreetMap); bij een technische storing gebruikt OVLive Geoapify als reserve. De reisroute wordt berekend door Transitous. Bronnen: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a> · <a href="https://www.geoapify.com/" target="_blank" rel="noopener noreferrer">Powered by Geoapify</a>.</p>
     <div class="grid">
       <div><label for="from">Van (plaats, adres of halte)</label><input id="from" value="Den Haag Centraal" autocomplete="off"><button type="button" id="fromFind" class="secondary">Zoek vertrekplek</button><select id="fromChoice" aria-label="Kies vertrekplek"><option value="">Kies een gevonden plek…</option></select></div>
       <div><label for="to">Naar (plaats, adres of halte)</label><input id="to" value="Utrecht Centraal" autocomplete="off"><button type="button" id="toFind" class="secondary">Zoek bestemming</button><select id="toChoice" aria-label="Kies bestemming"><option value="">Kies een gevonden plek…</option></select></div>
