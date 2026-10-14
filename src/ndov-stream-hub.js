@@ -32,11 +32,11 @@ const FRESH_ROW_MS = 180 * 1000;
 const AUTO_SESSION_SECONDS = 600;
 const AUTO_REST_MS = 5 * 1000;
 const AUTO_CYCLE_MS = AUTO_SESSION_SECONDS * 1000 + AUTO_REST_MS;
-const CONTINUOUS_FULL_CHECKPOINT_MS = 60 * 1000;
+const CONTINUOUS_FULL_CHECKPOINT_MS = 10 * 60 * 1000;
 const AUTO_DATA_IDLE_RECONNECT_MS = 120 * 1000;
 const AUTO_RETRY_BASE_MS = 30 * 1000;
 const AUTO_RETRY_MAX_MS = 5 * 60 * 1000;
-const CONTINUOUS_PERSIST_INTERVAL_MS = 30 * 1000;
+const CONTINUOUS_PERSIST_INTERVAL_MS = 60 * 1000;
 const ROW_CHUNK_SIZE = 1000;
 const MUTATION_CHUNK_SIZE = 1000;
 
@@ -115,97 +115,132 @@ export class NdovFeedHub extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.ctx = ctx;
-    this.snapshot = initialSnapshot('kv78');
-    this.rows = new Map();
-    this.events = new Map();
-    // Map identity -> the most recent timestamp and its same-timestamp KV17 actions.
-    this.mutations = new Map();
-    this.running = false;
-    this.continuousMode = false;
-    this.continuousEnabled = false;
-    this.stopRequested = false;
-    this.socket = null;
-    this.lastPersistAt = 0;
-    this.lastFullPersistAt = 0;
+    // Eén fysieke DO-instantie beheert beide feeds; de streamtoestand blijft gescheiden.
+    this.streamStates = new Map(Object.keys(CONFIG).map((stream) => [stream, {
+      snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
+      running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
+      socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0,
+    }]));
     this.ready = ctx.blockConcurrencyWhile(async () => {
-      const saved = await ctx.storage.get('snapshot');
-      if (saved) this.snapshot = saved;
-      this.continuousEnabled = (await ctx.storage.get('continuousEnabled')) === true;
-      const savedRows = await ctx.storage.get('rows');
-      const compressedRowCount = Number(await ctx.storage.get('rowsGzipChunkCount')) || 0;
-      const savedRowChunkCount = Number(await ctx.storage.get('rowsChunkCount')) || 0;
-      const savedEvents = await ctx.storage.get('events');
-      const compressedEventCount = Number(await ctx.storage.get('eventsGzipChunkCount')) || 0;
-      const savedMutations = await ctx.storage.get('mutations');
-      if (compressedRowCount > 0) {
-        const rowChunks = await Promise.all(Array.from({ length: compressedRowCount }, (_, i) => ctx.storage.get(`rows:gzip:${i}`)));
-        const entries = [];
-        for (const chunk of rowChunks) if (chunk) entries.push(...await gunzipJson(chunk));
-        this.rows = new Map(entries);
-      } else if (savedRowChunkCount > 0) {
-        const rowChunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(`rows:${i}`)));
-        this.rows = new Map(rowChunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
-      } else {
-        this.rows = new Map(savedRows ?? []);
-      }
-      this.events = new Map();
-      if (compressedEventCount > 0) {
-        const eventChunks = await Promise.all(Array.from({ length: compressedEventCount }, (_, i) => ctx.storage.get(`events:gzip:${i}`)));
-        for (const chunk of eventChunks) if (chunk) {
-          for (const [savedKey, event] of await gunzipJson(chunk)) {
-            const key = canonicalBisonTripIdentity(event) ?? savedKey;
-            this.events.set(key, { ...event, identity: key });
+      for (const stream of Object.keys(CONFIG)) {
+        const state = this.stateFor(stream);
+        const key = (suffix) => stream + ':' + suffix;
+        const saved = await ctx.storage.get(key('snapshot'));
+        if (saved) state.snapshot = saved;
+        state.continuousEnabled = (await ctx.storage.get(key('continuousEnabled'))) === true;
+        const savedRows = await ctx.storage.get(key('rows'));
+        const compressedRowCount = Number(await ctx.storage.get(key('rowsGzipChunkCount'))) || 0;
+        const savedRowChunkCount = Number(await ctx.storage.get(key('rowsChunkCount'))) || 0;
+        const savedEvents = await ctx.storage.get(key('events'));
+        const compressedEventCount = Number(await ctx.storage.get(key('eventsGzipChunkCount'))) || 0;
+        const savedMutations = await ctx.storage.get(key('mutations'));
+
+        if (compressedRowCount > 0) {
+          const chunks = await Promise.all(Array.from({ length: compressedRowCount }, (_, i) => ctx.storage.get(key('rows:gzip:' + i))));
+          const entries = [];
+          for (const chunk of chunks) if (chunk) entries.push(...await gunzipJson(chunk));
+          state.rows = new Map(entries);
+        } else if (savedRowChunkCount > 0) {
+          const chunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(key('rows:' + i))));
+          state.rows = new Map(chunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
+        } else state.rows = new Map(savedRows ?? []);
+
+        state.events = new Map();
+        if (compressedEventCount > 0) {
+          const chunks = await Promise.all(Array.from({ length: compressedEventCount }, (_, i) => ctx.storage.get(key('events:gzip:' + i))));
+          for (const chunk of chunks) if (chunk) {
+            for (const [savedKey, event] of await gunzipJson(chunk)) {
+              const identity = canonicalBisonTripIdentity(event) ?? savedKey;
+              state.events.set(identity, { ...event, identity });
+            }
+          }
+        } else {
+          for (const [savedKey, event] of (savedEvents ?? [])) {
+            const identity = canonicalBisonTripIdentity(event) ?? savedKey;
+            state.events.set(identity, { ...event, identity });
           }
         }
-      } else {
-        for (const [savedKey, event] of (savedEvents ?? [])) {
-          const key = canonicalBisonTripIdentity(event) ?? savedKey;
-          this.events.set(key, { ...event, identity: key });
+
+        const compressedMutationCount = Number(await ctx.storage.get(key('mutationsGzipChunkCount'))) || 0;
+        const legacyMutationChunkCount = Number(await ctx.storage.get(key('mutationsChunkCount'))) || 0;
+        if (compressedMutationCount > 0) {
+          const chunks = await Promise.all(Array.from({ length: compressedMutationCount }, (_, i) => ctx.storage.get(key('mutations:gzip:' + i))));
+          for (const chunk of chunks) if (chunk) {
+            for (const [identity, mutationState] of await gunzipJson(chunk)) state.mutations.set(identity, mutationState);
+          }
+        } else if (legacyMutationChunkCount > 0) {
+          const chunks = await Promise.all(Array.from({ length: legacyMutationChunkCount }, (_, i) => ctx.storage.get(key('mutations:' + i))));
+          for (const chunk of chunks) for (const [identity, mutation] of (Array.isArray(chunk) ? chunk : [])) {
+            if (mutation?.events && mutation?.identity) state.mutations.set(identity, mutation);
+            else upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT);
+          }
+        } else {
+          for (const item of new Map(savedMutations ?? []).values()) {
+            if (item?.events && item?.identity) state.mutations.set(item.identity, item);
+            else upsertCurrentMutationState(state.mutations, item, KV17_STATE_LIMIT);
+          }
         }
+
+        // KV17-mutaties worden ook per exacte identiteit opgeslagen; checkpoints zijn minder frequent.
+        if (stream === 'bison') {
+          const prefix = key('mutation:');
+          let startAfter;
+          while (true) {
+            const options = { prefix, limit: 1000 };
+            if (startAfter) options.startAfter = startAfter;
+            const entries = await ctx.storage.list(options);
+            if (entries.size === 0) break;
+            for (const [storageKey, mutationState] of entries) {
+              const identity = storageKey.slice(prefix.length);
+              const current = state.mutations.get(identity);
+              if (mutationState?.identity && (!current || Number(mutationState.timestampMs) >= Number(current.timestampMs))) state.mutations.set(identity, mutationState);
+            }
+            const lastKey = [...entries.keys()].at(-1);
+            if (entries.size < 1000 || !lastKey) break;
+            startAfter = lastKey;
+          }
+          while (state.mutations.size > KV17_STATE_LIMIT) state.mutations.delete(state.mutations.keys().next().value);
+        }
+
+        this.pruneRows(stream);
+        this.pruneEvents(stream);
+        await this.pruneMutationDates(stream);
+        state.lastFullPersistAt = Date.now();
       }
-      const compressedMutationCount = Number(await ctx.storage.get('mutationsGzipChunkCount')) || 0;
-      const legacyMutationChunkCount = Number(await ctx.storage.get('mutationsChunkCount')) || 0;
-      if (compressedMutationCount > 0) {
-        const mutationChunks = await Promise.all(Array.from({ length: compressedMutationCount }, (_, i) => ctx.storage.get(`mutations:gzip:${i}`)));
-        for (const chunk of mutationChunks) if (chunk) {
-          for (const [identity, state] of await gunzipJson(chunk)) this.mutations.set(identity, state);
-        }
-      } else if (legacyMutationChunkCount > 0) {
-        const mutationChunks = await Promise.all(Array.from({ length: legacyMutationChunkCount }, (_, i) => ctx.storage.get(`mutations:${i}`)));
-        for (const chunk of mutationChunks) for (const [key, mutation] of (Array.isArray(chunk) ? chunk : [])) upsertCurrentMutationState(this.mutations, mutation, KV17_STATE_LIMIT);
-      } else {
-        // Migrate the bounded event map saved by older bridge versions.
-        for (const item of new Map(savedMutations ?? []).values()) {
-          if (item?.events && item?.identity) this.mutations.set(item.identity, item);
-          else upsertCurrentMutationState(this.mutations, item, KV17_STATE_LIMIT);
-        }
-      }
-      this.pruneRows();
-      this.pruneEvents();
-      this.pruneMutationDates();
     });
   }
 
-  pruneMutationDates() {
-    // Keep the current and previous two operating dates. Some GTFS service
-    // trips cross midnight; pruning at midnight would drop still-relevant KV17.
-    const currentDate = normalizeOperatingDate(currentOperatingDateAmsterdam());
-    const cutoffDate = operatingDateRetentionCutoff(currentDate, 2);
+  stateFor(stream) {
+    const state = this.streamStates.get(stream);
+    if (!state) throw new Error('Unknown NDOV stream: ' + stream);
+    return state;
+  }
+
+  async pruneMutationDates(stream) {
+    if (stream !== 'bison') return;
+    const state = this.stateFor(stream);
+    const cutoffDate = operatingDateRetentionCutoff(normalizeOperatingDate(currentOperatingDateAmsterdam()), 2);
     if (!cutoffDate) return;
-    for (const [identity] of this.mutations.entries()) {
+    const expired = [];
+    for (const [identity] of state.mutations.entries()) {
       const identityDate = normalizeOperatingDate(identity.split('|')[1]);
-      if (/^\d{8}$/.test(identityDate) && identityDate < cutoffDate) this.mutations.delete(identity);
+      if (/^\d{8}$/.test(identityDate) && identityDate < cutoffDate) {
+        state.mutations.delete(identity);
+        expired.push('bison:mutation:' + identity);
+      }
     }
+    for (let i = 0; i < expired.length; i += 500) await this.ctx.storage.delete(expired.slice(i, i + 500));
   }
 
   async fetch(request) {
     await this.ready;
     const url = new URL(request.url);
-    const stream = url.searchParams.get('stream') || this.snapshot.stream || 'kv78';
+    const stream = url.searchParams.get('stream') || state.snapshot.stream || 'kv78';
     if (!CONFIG[stream]) return Response.json({ ok: false, error: 'unknown stream' }, { status: 400 });
+    const state = this.stateFor(stream);
     if (url.pathname === '/status') {
-      if (stream === 'bison') this.pruneEvents();
-      const base = this.snapshot.state === 'idle' ? initialSnapshot(stream) : this.snapshot;
+      if (stream === 'bison') this.pruneEvents(stream);
+      const base = state.snapshot.state === 'idle' ? initialSnapshot(stream) : state.snapshot;
       const kv78IdentityDiagnostics =
         stream === "kv78" && url.searchParams.get("identityDiagnostics") === "1"
           ? (() => {
@@ -213,7 +248,7 @@ export class NdovFeedHub extends DurableObject {
               const groups = new Map();
               let matchingRowCount = 0;
 
-              for (const row of this.rows.values()) {
+              for (const row of state.rows.values()) {
                 const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
                 const date = normalizeOperatingDate(row?.operationDate);
                 const line = String(row?.linePlanningNumber ?? "").trim().toUpperCase();
@@ -274,7 +309,7 @@ export class NdovFeedHub extends DurableObject {
 
               return {
                 currentDate,
-                cacheSize: this.rows.size,
+                cacheSize: state.rows.size,
                 cacheLimit: KV78_ROW_LIMIT,
                 matchingRowCount,
                 identityCount: trips.length,
@@ -282,58 +317,56 @@ export class NdovFeedHub extends DurableObject {
               };
             })()
           : null;
-      const currentMutations = flattenCurrentMutations(this.mutations, 300);
+      const currentMutations = flattenCurrentMutations(state.mutations, 300);
       return Response.json({
         ...base,
         latestRows: url.searchParams.get('includeAllRows') === '1'
-          ? [...this.rows.values()]
-          : [...this.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
-        latestEvents: [...this.events.values()].slice(-100),
-        storedKv6TripCount: this.events.size,
+          ? [...state.rows.values()]
+          : [...state.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
+        latestEvents: [...state.events.values()].slice(-100),
+        storedKv6TripCount: state.events.size,
         latestMutations: currentMutations,
-        storedKv78RowCount: this.rows.size,
+        storedKv78RowCount: state.rows.size,
         kv78IdentityDiagnostics,
-        storedMutationIdentityCount: this.mutations.size,
-        continuousEnabled: this.continuousEnabled,
+        storedMutationIdentityCount: state.mutations.size,
+        continuousEnabled: state.continuousEnabled,
         nextAlarmAt: await this.ctx.storage.getAlarm(),
-        autoCollector: { enabled: this.continuousEnabled, sessionSeconds: AUTO_SESSION_SECONDS, restSeconds: AUTO_REST_MS / 1000, rowRetentionSeconds: ROW_RETENTION_MS / 1000, freshnessSeconds: FRESH_ROW_MS / 1000 },
+        autoCollector: { enabled: state.continuousEnabled, sessionSeconds: AUTO_SESSION_SECONDS, restSeconds: AUTO_REST_MS / 1000, rowRetentionSeconds: ROW_RETENTION_MS / 1000, freshnessSeconds: FRESH_ROW_MS / 1000 },
       }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/continuous/enable') {
-      this.continuousEnabled = true;
-      this.stopRequested = false;
-      if (this.snapshot.stream !== stream) this.snapshot = initialSnapshot(stream);
-      await this.ctx.storage.put({ continuousEnabled: true, collectorStream: stream, snapshot: this.snapshot });
+      state.continuousEnabled = true;
+      state.stopRequested = false;
+      if (state.snapshot.stream !== stream) state.snapshot = initialSnapshot(stream);
+      await this.ctx.storage.put({ [stream + ':continuousEnabled']: true, [stream + ':snapshot']: state.snapshot });
       const alarmAt = await this.ctx.storage.getAlarm();
       if (alarmAt === null) await this.ctx.storage.setAlarm(Date.now() + 1000);
       return Response.json({ ok: true, enabled: true, stream, nextAlarmAt: await this.ctx.storage.getAlarm(), note: 'Duurzame alarmgestuurde collector ingeschakeld; huidige verzameling start via alarm.' }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/continuous/disable') {
-      const persistedEnabled = (await this.ctx.storage.get('continuousEnabled')) === true;
+      const persistedEnabled = (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       const existingAlarm = await this.ctx.storage.getAlarm();
       const alreadyDisabled = !persistedEnabled &&
         existingAlarm === null &&
-        !this.running &&
-        !this.socket;
+        !state.running &&
+        !state.socket;
 
-      this.continuousEnabled = false;
-      this.stopRequested = true;
+      state.continuousEnabled = false;
+      state.stopRequested = true;
 
       // Idempotent: als de collector al uit staat, voorkom onnodige writes.
       if (alreadyDisabled) {
-        return Response.json({
-          ok: true,
-          enabled: false,
-          stream,
-          alreadyDisabled: true,
-          note: 'Collector stond al uit; er is geen opslag gewijzigd.'
-        }, { headers: { 'cache-control': 'no-store' } });
+        const anotherCollectorEnabled = [...this.streamStates.entries()].some(([otherStream, otherState]) => otherStream !== stream && otherState.continuousEnabled);
+        if (anotherCollectorEnabled && existingAlarm === null) await this.ctx.storage.setAlarm(Date.now() + 1000);
+        return Response.json({ ok: true, enabled: false, stream, anotherCollectorEnabled, alreadyDisabled: true, note: 'Collector stond al uit; er is geen opslag gewijzigd.' }, { headers: { 'cache-control': 'no-store' } });
       }
 
-      await this.ctx.storage.put('continuousEnabled', false);
-      await this.ctx.storage.deleteAlarm();
-      if (this.socket) { try { await this.socket.close(); } catch {} }
-      return Response.json({ ok: true, enabled: false, stream, note: 'Automatische collector uitgeschakeld; geen nieuwe alarmen worden gepland.' }, { headers: { 'cache-control': 'no-store' } });
+      await this.ctx.storage.put(stream + ':continuousEnabled', false);
+      if (state.socket) { try { await state.socket.close(); } catch {} }
+      const anotherCollectorEnabled = [...this.streamStates.entries()].some(([otherStream, otherState]) => otherStream !== stream && otherState.continuousEnabled);
+      if (!anotherCollectorEnabled) await this.ctx.storage.deleteAlarm();
+      else if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1000);
+      return Response.json({ ok: true, enabled: false, stream, anotherCollectorEnabled, note: 'Deze automatische collector is uitgeschakeld.' }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/events') {
       if (stream !== 'bison') return Response.json({ ok: false, error: 'KV6-events zijn alleen beschikbaar op de BISON-stream.' }, { status: 400 });
@@ -341,52 +374,52 @@ export class NdovFeedHub extends DurableObject {
         const lookup = normalizeTripLookupIdentity(value);
         return lookup ? [lookup.owner, lookup.date, lookup.line, lookup.journey, lookup.reinforcement].join('|') : null;
       }).filter(Boolean))].slice(0, 20);
-      this.pruneEvents();
-      const events = identities.map((identity) => this.events.get(identity)).filter((event) => {
+      this.pruneEvents(stream);
+      const events = identities.map((identity) => state.events.get(identity)).filter((event) => {
         if (!event) return false;
         const receivedMs = Date.parse(event.punctualityReceivedAt ?? '');
         return Number.isFinite(receivedMs) && receivedMs <= Date.now() + 30000 && Date.now() - receivedMs <= KV6_EVENT_STATUS_FRESH_MS && event.punctualitySeconds !== null && event.punctualitySeconds !== undefined;
       });
-      return Response.json({ ok: true, state: this.snapshot.state, latestMessageAt: this.snapshot.latestMessageAt, returnedCount: events.length, events }, { headers: { 'cache-control': 'no-store' } });
+      return Response.json({ ok: true, state: state.snapshot.state, latestMessageAt: state.snapshot.latestMessageAt, returnedCount: events.length, events }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/mutations') {
       if (stream !== 'bison') return Response.json({ ok: false, error: 'KV17-mutaties zijn alleen beschikbaar op de BISON-stream.' }, { status: 400 });
       const identities = url.searchParams.getAll('identity').filter(Boolean).slice(0, 20);
-      const mutations = eventsForIdentities(this.mutations, identities);
-      return Response.json({ ok: true, state: this.snapshot.state, latestMessageAt: this.snapshot.latestMessageAt, mutations }, { headers: { 'cache-control': 'no-store' } });
+      const mutations = eventsForIdentities(state.mutations, identities);
+      return Response.json({ ok: true, state: state.snapshot.state, latestMessageAt: state.snapshot.latestMessageAt, mutations }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/rows') {
       if (stream !== 'kv78') return Response.json({ ok: false, error: 'KV78-halterijen zijn alleen beschikbaar op de KV78-stream.' }, { status: 400 });
       const identity = normalizeTripLookupIdentity(url.searchParams.get('identity'));
       if (!identity) return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement op.' }, { status: 400 });
       const now = Date.now();
-      const rows = [...this.rows.values()].filter((row) => rowMatchesIdentity(row, identity));
+      const rows = [...state.rows.values()].filter((row) => rowMatchesIdentity(row, identity));
       const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
       return Response.json({ ok: true, identity: [identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement].join('|'), returnedCount: Math.min(fresh.length, 200), staleCount: rows.length - fresh.length, rows: fresh.slice(0, 200) }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname !== '/start') return new Response('not found', { status: 404 });
     const rawSeconds = Number(url.searchParams.get('seconds') || '45');
     const seconds = Number.isFinite(rawSeconds) ? Math.max(10, Math.min(120, Math.floor(rawSeconds))) : 45;
-    if (this.running) {
-      return Response.json({ ok: true, alreadyRunning: true, stream, snapshot: this.snapshot });
+    if (state.running) {
+      return Response.json({ ok: true, alreadyRunning: true, stream, snapshot: state.snapshot });
     }
     // Each short session starts with fresh KV78/KV6 samples, but retain the latest
     // KV17 state for the current Dutch operating date. KV17 is event-driven: a
     // CANCEL remains the latest known state until a newer RECOVER/change arrives.
     // Old operating dates are discarded so yesterday's mutations cannot fill the cache.
-    if (stream === 'kv78' && !this.continuousEnabled) this.rows.clear();
+    if (stream === 'kv78' && !state.continuousEnabled) state.rows.clear();
     if (stream === 'bison') {
-      this.events.clear();
-      this.pruneMutationDates();
+      state.events.clear();
+      await this.pruneMutationDates(stream);
     }
-    this.snapshot = { ...initialSnapshot(stream), state: 'connecting', startedAt: new Date().toISOString(), sessionSeconds: seconds };
+    state.snapshot = { ...initialSnapshot(stream), state: 'connecting', startedAt: new Date().toISOString(), sessionSeconds: seconds };
     const waitForCompletion = url.searchParams.get('wait') === '1';
-    this.running = true;
+    state.running = true;
     const startTask = () => {
       const task = this.collect(stream, seconds).catch(async (error) => {
-        this.snapshot = { ...this.snapshot, state: 'error', error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() };
+        state.snapshot = { ...state.snapshot, state: 'error', error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() };
         await this.persist(true);
-      }).finally(() => { this.running = false; this.socket = null; });
+      }).finally(() => { state.running = false; state.socket = null; });
       this.ctx.waitUntil(task);
       return task;
     };
@@ -395,35 +428,36 @@ export class NdovFeedHub extends DurableObject {
       // Local diagnostic mode: keep the HTTP request attached until the bounded
       // collector is finished. This distinguishes a feed/read issue from a local
       // dev-runtime/background-task lifecycle issue.
-      await this.persist(true, false);
+      await this.persist(stream, true, false);
       await startTask();
       return Response.json({
-        ok: this.snapshot.state === 'complete', started: true, completed: true,
+        ok: state.snapshot.state === 'complete', started: true, completed: true,
         stream, seconds,
         snapshot: {
-          stream: this.snapshot.stream, state: this.snapshot.state,
-          messageCount: this.snapshot.messageCount, rawBytes: this.snapshot.rawBytes,
-          envelopeCounts: this.snapshot.envelopeCounts,
-          latestMessageAt: this.snapshot.latestMessageAt,
-          startedAt: this.snapshot.startedAt, finishedAt: this.snapshot.finishedAt,
-          error: this.snapshot.error, warnings: this.snapshot.warnings,
+          stream: state.snapshot.stream, state: state.snapshot.state,
+          messageCount: state.snapshot.messageCount, rawBytes: state.snapshot.rawBytes,
+          envelopeCounts: state.snapshot.envelopeCounts,
+          latestMessageAt: state.snapshot.latestMessageAt,
+          startedAt: state.snapshot.startedAt, finishedAt: state.snapshot.finishedAt,
+          error: state.snapshot.error, warnings: state.snapshot.warnings,
         },
       }, { headers: { 'cache-control': 'no-store' } });
     }
 
     const task = startTask();
     // Default mode returns immediately and records the task in waitUntil.
-    await this.persist(true, false);
+    await this.persist(stream, true, false);
     return Response.json({ ok: true, started: true, stream, seconds, note: 'Eén collector gestart voor dit stream-type; raadpleeg /status voor de gedeelde momentopname.' });
   }
 
-  async persistFullKv78Rows(force = false) {
-    if (!force || this.snapshot.stream !== 'kv78') return;
+  async persistFullKv78Rows(stream, force = false) {
+    const state = this.stateFor(stream);
+    if (!force || state.snapshot.stream !== 'kv78') return;
     this.pruneRows();
-    const entries = [...this.rows.entries()];
+    const entries = [...state.rows.entries()];
     const chunkCount = Math.ceil(entries.length / ROW_CHUNK_SIZE);
-    const previousCount = Number(await this.ctx.storage.get('rowsGzipChunkCount')) || 0;
-    const legacyCount = Number(await this.ctx.storage.get('rowsChunkCount')) || 0;
+    const previousCount = Number(await this.ctx.storage.get(stream + ':rowsGzipChunkCount')) || 0;
+    const legacyCount = Number(await this.ctx.storage.get(stream + ':rowsChunkCount')) || 0;
 
     // Compress independently-sized chunks. This keeps each SQLite-backed DO
     // value comfortably below Cloudflare's 2 MB per-value limit while using far
@@ -433,185 +467,173 @@ export class NdovFeedHub extends DurableObject {
       if (bytes.length > 1_500_000) throw new Error(`Compressed KV78 chunk ${i} exceeds safe storage value size`);
       await this.ctx.storage.put(`rows:gzip:${i}`, bytes);
     }
-    await this.ctx.storage.put('rowsGzipChunkCount', chunkCount);
+    await this.ctx.storage.put(stream + ':rowsGzipChunkCount', chunkCount);
     const obsolete = [];
     for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(`rows:gzip:${i}`);
     for (let i = 0; i < legacyCount; i += 1) obsolete.push(`rows:${i}`);
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
-    if (legacyCount) await this.ctx.storage.delete('rowsChunkCount');
+    if (legacyCount) await this.ctx.storage.delete(stream + ':rowsChunkCount');
   }
 
-  async persistFullBisonEvents(force = false) {
-    if (!force || this.snapshot.stream !== 'bison') return;
+  async persistFullBisonEvents(stream, force = false) {
+    const state = this.stateFor(stream);
+    if (!force || state.snapshot.stream !== 'bison') return;
     this.pruneEvents();
-    const entries = [...this.events.entries()];
+    const entries = [...state.events.entries()];
     const chunkCount = Math.ceil(entries.length / MUTATION_CHUNK_SIZE);
-    const previousCount = Number(await this.ctx.storage.get('eventsGzipChunkCount')) || 0;
+    const previousCount = Number(await this.ctx.storage.get(stream + ':eventsGzipChunkCount')) || 0;
     for (let i = 0; i < chunkCount; i += 1) {
       const bytes = await gzipJson(entries.slice(i * MUTATION_CHUNK_SIZE, (i + 1) * MUTATION_CHUNK_SIZE));
       if (bytes.length > 1_500_000) throw new Error(`Compressed KV6 event chunk ${i} exceeds safe storage value size`);
       await this.ctx.storage.put(`events:gzip:${i}`, bytes);
     }
-    await this.ctx.storage.put('eventsGzipChunkCount', chunkCount);
+    await this.ctx.storage.put(stream + ':eventsGzipChunkCount', chunkCount);
     const obsolete = [];
     for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(`events:gzip:${i}`);
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
   }
 
-  async persistFullMutations(force = false) {
-    if (!force || this.snapshot.stream !== 'bison') return;
-    const entries = [...this.mutations.entries()];
+  async persistFullMutations(stream, force = false) {
+    const state = this.stateFor(stream);
+    if (!force || state.snapshot.stream !== 'bison') return;
+    const entries = [...state.mutations.entries()];
     const chunkCount = Math.ceil(entries.length / MUTATION_CHUNK_SIZE);
-    const previousCount = Number(await this.ctx.storage.get('mutationsGzipChunkCount')) || 0;
-    const legacyCount = Number(await this.ctx.storage.get('mutationsChunkCount')) || 0;
+    const previousCount = Number(await this.ctx.storage.get(stream + ':mutationsGzipChunkCount')) || 0;
+    const legacyCount = Number(await this.ctx.storage.get(stream + ':mutationsChunkCount')) || 0;
     for (let i = 0; i < chunkCount; i += 1) {
       const bytes = await gzipJson(entries.slice(i * MUTATION_CHUNK_SIZE, (i + 1) * MUTATION_CHUNK_SIZE));
       if (bytes.length > 1_500_000) throw new Error(`Compressed KV17 chunk ${i} exceeds safe storage value size`);
       await this.ctx.storage.put(`mutations:gzip:${i}`, bytes);
     }
-    await this.ctx.storage.put('mutationsGzipChunkCount', chunkCount);
+    await this.ctx.storage.put(stream + ':mutationsGzipChunkCount', chunkCount);
     const obsolete = [];
     for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(`mutations:gzip:${i}`);
     for (let i = 0; i < legacyCount; i += 1) obsolete.push(`mutations:${i}`);
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
-    if (legacyCount) await this.ctx.storage.delete('mutationsChunkCount');
+    if (legacyCount) await this.ctx.storage.delete(stream + ':mutationsChunkCount');
   }
 
-  pruneEvents() {
-    const now = Date.now();
-    const cutoff = now - KV6_EVENT_RETENTION_MS;
-    for (const [key, event] of this.events.entries()) {
+  pruneEvents(stream) {
+    const state = this.stateFor(stream);
+    const now = Date.now(), cutoff = now - KV6_EVENT_RETENTION_MS;
+    for (const [key, event] of state.events.entries()) {
       const received = Date.parse(event?.receivedAt ?? '');
       const punctualityReceived = Date.parse(event?.punctualityReceivedAt ?? '');
-      if (!Number.isFinite(received) || received < cutoff || (Number.isFinite(punctualityReceived) && punctualityReceived < now - KV6_EVENT_STATUS_FRESH_MS)) this.events.delete(key);
+      if (!Number.isFinite(received) || received < cutoff || (Number.isFinite(punctualityReceived) && punctualityReceived < now - KV6_EVENT_STATUS_FRESH_MS)) state.events.delete(key);
     }
-    while (this.events.size > KV6_EVENT_LIMIT) this.events.delete(this.events.keys().next().value);
+    while (state.events.size > KV6_EVENT_LIMIT) state.events.delete(state.events.keys().next().value);
   }
 
-  pruneRows() {
+  pruneRows(stream) {
+    const state = this.stateFor(stream);
     const cutoff = Date.now() - ROW_RETENTION_MS;
-    for (const [key, row] of this.rows.entries()) {
+    for (const [key, row] of state.rows.entries()) {
       const captured = Date.parse(row?.receivedAt ?? '');
-      if (!Number.isFinite(captured) || captured < cutoff) this.rows.delete(key);
+      if (!Number.isFinite(captured) || captured < cutoff) state.rows.delete(key);
     }
-    while (this.rows.size > KV78_ROW_LIMIT) this.rows.delete(this.rows.keys().next().value);
+    while (state.rows.size > KV78_ROW_LIMIT) state.rows.delete(state.rows.keys().next().value);
   }
 
-  async persist(force = false, bulk = false) {
-    const minInterval = this.continuousMode ? CONTINUOUS_PERSIST_INTERVAL_MS : 5000;
-    if (!force && Date.now() - this.lastPersistAt < minInterval) return;
-
-    const persistStartedAt = Date.now();
-    const persistDiagnostic = this.continuousMode;
-    if (persistDiagnostic) {
-      console.log("[OVLIVE_NDOV_PERSIST_START]", JSON.stringify({
-        stream: this.snapshot.stream,
-        force, bulk,
-        rows: this.rows.size,
-        events: this.events.size,
-        mutations: this.mutations.size,
-        messageCount: this.snapshot.messageCount,
-      }));
-    }
-    this.lastPersistAt = Date.now();
-    this.snapshot.latestRows = [...this.rows.values()].slice(-30);
-    this.snapshot.latestEvents = [...this.events.values()].slice(-20);
-    this.snapshot.latestMutations = flattenCurrentMutations(this.mutations, 30);
-    this.snapshot.storedKv78RowCount = this.rows.size;
-    this.snapshot.storedMutationIdentityCount = this.mutations.size;
-    this.snapshot.continuousEnabled = this.continuousEnabled;
-
+  async persist(stream, force = false, bulk = false) {
+    const state = this.stateFor(stream);
+    const minInterval = state.continuousMode ? CONTINUOUS_PERSIST_INTERVAL_MS : 5000;
+    if (!force && Date.now() - state.lastPersistAt < minInterval) return;
+    const persistStartedAt = Date.now(), persistDiagnostic = state.continuousMode;
+    if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_START]", JSON.stringify({
+      stream: state.snapshot.stream, force, bulk, rows: state.rows.size,
+      events: state.events.size, mutations: state.mutations.size, messageCount: state.snapshot.messageCount,
+    }));
+    state.lastPersistAt = Date.now();
+    state.snapshot.latestRows = [...state.rows.values()].slice(-30);
+    state.snapshot.latestEvents = [...state.events.values()].slice(-20);
+    state.snapshot.latestMutations = flattenCurrentMutations(state.mutations, 30);
+    state.snapshot.storedKv78RowCount = state.rows.size;
+    state.snapshot.storedMutationIdentityCount = state.mutations.size;
+    state.snapshot.continuousEnabled = state.continuousEnabled;
     const now = Date.now();
-    const hasCollectedData = this.snapshot.stream === 'kv78'
-      ? this.rows.size > 0
-      : this.events.size > 0 || this.mutations.size > 0;
-    const checkpointDue = this.continuousMode
-      && hasCollectedData
-      && now - this.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
-    if (bulk || checkpointDue) {
-      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "kv78-start"}));
-      await this.persistFullKv78Rows(true);
-      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "kv78-done"}));
-
-      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "bison-events-start"}));
-      await this.persistFullBisonEvents(true);
-      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "bison-events-done"}));
-
-      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "mutations-start"}));
-      await this.persistFullMutations(true);
-      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "mutations-done"}));
-
-      this.lastFullPersistAt = Date.now();
+    const hasCollectedData = stream === 'kv78' ? state.rows.size > 0 : state.events.size > 0 || state.mutations.size > 0;
+    const checkpointDue = state.continuousMode && hasCollectedData && now - state.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
+    const finalCheckpointDue = bulk && hasCollectedData && (!state.continuousMode || now - state.lastFullPersistAt >= 5000);
+    if (checkpointDue || finalCheckpointDue) {
+      await this.persistFullKv78Rows(stream, true);
+      await this.persistFullBisonEvents(stream, true);
+      await this.persistFullMutations(stream, true);
+      state.lastFullPersistAt = Date.now();
     }
-    // Small legacy-compatible sample for quick cold-start diagnostics; full
-    // rows/mutation state are stored in compressed chunks only at session end.
-    await this.ctx.storage.put({ snapshot: this.snapshot, rows: [...this.rows.entries()].slice(-100), events: [...this.events.entries()].slice(-100), mutations: [...this.mutations.entries()].slice(-50) });
-
-    if (persistDiagnostic) {
-      console.log("[OVLIVE_NDOV_PERSIST_DONE]", JSON.stringify({
-        stream: this.snapshot.stream,
-        elapsedMs: Date.now() - persistStartedAt,
-        messageCount: this.snapshot.messageCount,
-      }));
-    }
+    await this.ctx.storage.put({
+      [stream + ':snapshot']: state.snapshot,
+      [stream + ':rows']: [...state.rows.entries()].slice(-100),
+      [stream + ':events']: [...state.events.entries()].slice(-100),
+      [stream + ':mutations']: [...state.mutations.entries()].slice(-50),
+    });
+    if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_DONE]", JSON.stringify({
+      stream: state.snapshot.stream, elapsedMs: Date.now() - persistStartedAt, messageCount: state.snapshot.messageCount,
+    }));
   }
 
   async alarm() {
     await this.ready;
-    if ((await this.ctx.storage.get('continuousEnabled')) !== true) return;
-    const stream = await this.ctx.storage.get('collectorStream') || this.snapshot.stream;
-    if (!CONFIG[stream]) return;
-
-    // Watchdog alarm is committed first. If the current invocation is cut short,
-    // another attempt still wakes the object. A successful cycle moves it to a
-    // 2-minute rest; a failed cycle uses bounded exponential backoff.
+    const streams = [];
+    for (const stream of Object.keys(CONFIG)) {
+      const state = this.stateFor(stream);
+      state.continuousEnabled = (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
+      if (state.continuousEnabled) streams.push(stream);
+    }
+    if (streams.length === 0) return;
     await this.ctx.storage.setAlarm(Date.now() + AUTO_CYCLE_MS);
-    if (this.running) return;
-    this.running = true;
-    this.continuousMode = true;
-    this.stopRequested = false;
-    try {
-      await this.collect(stream, AUTO_SESSION_SECONDS);
-    } catch (error) {
-      this.snapshot = { ...this.snapshot, state: 'error', error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() };
-      await this.persist(true, true);
-    } finally {
-      this.continuousMode = false;
-      this.running = false;
-      this.socket = null;
-    }
-
-    if ((await this.ctx.storage.get('continuousEnabled')) !== true) return;
-    if (this.snapshot.state === 'complete') {
-      await this.ctx.storage.put('continuousFailures', 0);
-      await this.ctx.storage.setAlarm(Date.now() + AUTO_REST_MS);
-    } else {
-      const failures = Math.min(10, (Number(await this.ctx.storage.get('continuousFailures')) || 0) + 1);
-      await this.ctx.storage.put('continuousFailures', failures);
-      const delay = Math.min(AUTO_RETRY_MAX_MS, AUTO_RETRY_BASE_MS * (2 ** Math.min(failures - 1, 4)));
-      await this.ctx.storage.setAlarm(Date.now() + delay);
-    }
+    const nextDelays = await Promise.all(streams.map(async (stream) => {
+      const state = this.stateFor(stream);
+      if (state.running) return AUTO_REST_MS;
+      state.running = true;
+      state.continuousMode = true;
+      state.stopRequested = false;
+      try {
+        await this.collect(stream, AUTO_SESSION_SECONDS);
+      } catch (error) {
+        state.snapshot = { ...state.snapshot, state: 'error', error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() };
+        await this.persist(stream, true, true);
+      } finally {
+        state.continuousMode = false;
+        state.running = false;
+        state.socket = null;
+      }
+      const stillEnabled = (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
+      state.continuousEnabled = stillEnabled;
+      if (!stillEnabled) return null;
+      if (state.snapshot.state === 'complete' || state.snapshot.state === 'stopped') {
+        await this.ctx.storage.put(stream + ':continuousFailures', 0);
+        return AUTO_REST_MS;
+      }
+      const failureKey = stream + ':continuousFailures';
+      const failures = Math.min(10, (Number(await this.ctx.storage.get(failureKey)) || 0) + 1);
+      await this.ctx.storage.put(failureKey, failures);
+      return Math.min(AUTO_RETRY_MAX_MS, AUTO_RETRY_BASE_MS * (2 ** Math.min(failures - 1, 4)));
+    }));
+    const delays = nextDelays.filter((value) => value !== null);
+    if (delays.length > 0) await this.ctx.storage.setAlarm(Date.now() + Math.min(...delays));
+    else await this.ctx.storage.deleteAlarm();
   }
 
   async collect(stream, seconds) {
     const config = CONFIG[stream];
+    const state = this.stateFor(stream);
     const deadline = Date.now() + seconds * 1000;
     let socket, writer, buffered, reader;
     let multipart = [];
     // Always bind the snapshot to this named stream. A freshly-created BISON
     // object otherwise inherits the constructor's KV78 placeholder and would
     // skip durable mutation persistence at the end of its first session.
-    if (stream === 'bison') this.pruneMutationDates();
-    this.snapshot = {
+    if (stream === 'bison') await this.pruneMutationDates(stream);
+    state.snapshot = {
       ...initialSnapshot(stream),
       state: 'connecting',
       startedAt: new Date().toISOString(),
       sessionSeconds: seconds,
-      continuousEnabled: this.continuousEnabled,
+      continuousEnabled: state.continuousEnabled,
     };
     try {
       socket = connect({ hostname: HOST, port: config.port });
-      this.socket = socket;
+      state.socket = socket;
       await Promise.race([socket.opened, wait(5000).then(() => { throw new Error('TCP connect timed out'); })]);
       writer = socket.writable.getWriter();
       buffered = new BufferedSocketReader(socket.readable.getReader());
@@ -625,12 +647,12 @@ export class NdovFeedHub extends DurableObject {
       const ready = parseCommandBody(readyFrame.body, greeting.negotiatedMinor);
       if (ready.name !== 'READY') throw new Error(`Expected READY, received ${ready.name}`);
       await writer.write(concatBytes(...config.prefixes.map((p) => makeSubscribeFrame(p, greeting.negotiatedMinor))));
-      this.snapshot = { ...this.snapshot, state: 'listening', zmtpVersion: `${greeting.major}.${greeting.negotiatedMinor}`, handshake: ready.name, prefixes: config.prefixes };
+      state.snapshot = { ...state.snapshot, state: 'listening', zmtpVersion: `${greeting.major}.${greeting.negotiatedMinor}`, handshake: ready.name, prefixes: config.prefixes };
       await this.persist(true);
 
-      while (Date.now() < deadline && !this.stopRequested) {
+      while (Date.now() < deadline && !state.stopRequested) {
         const lastMessageTimeMs = Date.parse(
-          this.snapshot.latestMessageAt ?? this.snapshot.startedAt ?? ""
+          state.snapshot.latestMessageAt ?? state.snapshot.startedAt ?? ""
         );
         const lastPayloadMs = Number.isFinite(lastMessageTimeMs)
           ? lastMessageTimeMs
@@ -641,10 +663,10 @@ export class NdovFeedHub extends DurableObject {
           console.log("[OVLIVE_NDOV_IDLE_TIMEOUT]", JSON.stringify({
             stream, stage: "loop-top",
             idleAgeSeconds: Math.floor(idleAgeMs / 1000),
-            messageCount: this.snapshot.messageCount,
-            latestMessageAt: this.snapshot.latestMessageAt,
+            messageCount: state.snapshot.messageCount,
+            latestMessageAt: state.snapshot.latestMessageAt,
           }));
-          this.snapshot.warnings.push(
+          state.snapshot.warnings.push(
             `Geen NDOV-data ontvangen gedurende ${Math.floor(idleAgeMs / 1000)} seconden; verbinding wordt vernieuwd.`
           );
           break;
@@ -673,7 +695,7 @@ export class NdovFeedHub extends DurableObject {
 
         if (!frame) {
           const timeoutMessageTimeMs = Date.parse(
-            this.snapshot.latestMessageAt ?? this.snapshot.startedAt ?? ""
+            state.snapshot.latestMessageAt ?? state.snapshot.startedAt ?? ""
           );
           const timeoutBaseMs = Number.isFinite(timeoutMessageTimeMs)
             ? timeoutMessageTimeMs
@@ -683,13 +705,13 @@ export class NdovFeedHub extends DurableObject {
           console.log("[OVLIVE_NDOV_READ_TIMEOUT]", JSON.stringify({
             stream,
             idleAgeSeconds: Math.floor(timeoutIdleMs / 1000),
-            sessionElapsedSeconds: Math.floor((Date.now() - Date.parse(this.snapshot.startedAt)) / 1000),
-            messageCount: this.snapshot.messageCount,
-            latestMessageAt: this.snapshot.latestMessageAt,
+            sessionElapsedSeconds: Math.floor((Date.now() - Date.parse(state.snapshot.startedAt)) / 1000),
+            messageCount: state.snapshot.messageCount,
+            latestMessageAt: state.snapshot.latestMessageAt,
           }));
 
           if (timeoutIdleMs >= AUTO_DATA_IDLE_RECONNECT_MS) {
-            this.snapshot.warnings.push(
+            state.snapshot.warnings.push(
               `Geen NDOV-data ontvangen gedurende ${Math.floor(timeoutIdleMs / 1000)} seconden; verbinding wordt vernieuwd.`
             );
           }
@@ -701,7 +723,7 @@ export class NdovFeedHub extends DurableObject {
             const context = command.data.length > 2 ? command.data.subarray(2) : new Uint8Array(0);
             await writer.write(makePongFrame(context, greeting.negotiatedMinor));
           } else if (command.name === 'ERROR') {
-            this.snapshot.warnings.push(`Publisher ERROR: ${decodeUtf8(command.data).slice(0, 200)}`);
+            state.snapshot.warnings.push(`Publisher ERROR: ${decodeUtf8(command.data).slice(0, 200)}`);
           }
           continue;
         }
@@ -712,26 +734,26 @@ export class NdovFeedHub extends DurableObject {
           const payload = concatBytes(...multipart.slice(1));
           const expanded = await gunzip(payload);
           const text = decodeUtf8(expanded);
-          this.snapshot.messageCount += 1;
-          this.snapshot.rawBytes += payload.length;
-          this.snapshot.latestMessageAt = new Date().toISOString();
-          this.snapshot.envelopeCounts[envelope] = (this.snapshot.envelopeCounts[envelope] || 0) + 1;
+          state.snapshot.messageCount += 1;
+          state.snapshot.rawBytes += payload.length;
+          state.snapshot.latestMessageAt = new Date().toISOString();
+          state.snapshot.envelopeCounts[envelope] = (state.snapshot.envelopeCounts[envelope] || 0) + 1;
           if (stream === 'kv78' && /\/KV8passtimes\//.test(envelope)) {
             for (const row of parseKv78Payload(text, envelope)) {
               // Keep every line during this bounded diagnostic run. Filtering to
               // U005/U011/U073/24 hid mutations such as CXX L014 and ARR 26010.
               row.receivedAt = new Date().toISOString();
               const key = `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
-              this.rows.delete(key);
-              this.rows.set(key, row);
-              if (this.rows.size > KV78_ROW_LIMIT) this.rows.delete(this.rows.keys().next().value);
+              state.rows.delete(key);
+              state.rows.set(key, row);
+              if (state.rows.size > KV78_ROW_LIMIT) state.rows.delete(state.rows.keys().next().value);
             }
           } else if (stream === 'bison' && /KV6posinfo/.test(envelope)) {
             const receivedAt = new Date().toISOString();
             for (const ev of parseBisonPayload(text, envelope)) {
               const key = canonicalBisonTripIdentity(ev);
               if (!key) continue;
-              const previous = this.events.get(key) ?? {};
+              const previous = state.events.get(key) ?? {};
               const hasPunctuality = ev.punctualitySeconds !== null && ev.punctualitySeconds !== undefined;
               const terminalEvent = ['END', 'CANCEL'].includes(String(ev.eventType ?? '').toUpperCase());
               const next = {
@@ -747,47 +769,57 @@ export class NdovFeedHub extends DurableObject {
                 punctualityTimestamp: terminalEvent ? null : hasPunctuality ? (ev.timestamp ?? receivedAt) : (previous.punctualityTimestamp ?? null),
                 punctualityReceivedAt: terminalEvent ? null : hasPunctuality ? receivedAt : (previous.punctualityReceivedAt ?? null),
               };
-              this.events.delete(key);
-              this.events.set(key, next);
+              state.events.delete(key);
+              state.events.set(key, next);
             }
-            if (Date.now() - (this.lastEventPruneAt ?? 0) > 10000) {
-              this.pruneEvents();
-              this.lastEventPruneAt = Date.now();
+            if (Date.now() - (state.lastEventPruneAt ?? 0) > 10000) {
+              this.pruneEvents(stream);
+              state.lastEventPruneAt = Date.now();
             }
           } else if (stream === 'bison' && /KV17cvlinfo/i.test(envelope)) {
+            const changedMutationIdentities = new Set();
+            const oldestMutationIdentity = state.mutations.keys().next().value;
             for (const mutation of parseKv17Payload(text, envelope)) {
-              // Persist only the newest state per exact identity. Actions with the
-              // same event timestamp are kept together so conflicting CANCEL and
-              // RECOVER records are not resolved by arbitrary ordering.
-              upsertCurrentMutationState(this.mutations, mutation, KV17_STATE_LIMIT);
+              if (upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT)) {
+                const identity = canonicalBisonTripIdentity(mutation);
+                if (identity) changedMutationIdentities.add(identity);
+              }
             }
+            if (oldestMutationIdentity && !state.mutations.has(oldestMutationIdentity)) await this.ctx.storage.delete('bison:mutation:' + oldestMutationIdentity);
+            if (changedMutationIdentities.size > 0) {
+              const durableChanges = {};
+              for (const identity of changedMutationIdentities) {
+                const current = state.mutations.get(identity);
+                if (current) durableChanges['bison:mutation:' + identity] = current;
+              }
+              if (Object.keys(durableChanges).length > 0) await this.ctx.storage.put(durableChanges);
           }
-          await this.persist(false, false);
+          await this.persist(stream, false, false);
         }
         multipart = [];
       }
-      if (stream === 'kv78') this.pruneRows();
+      if (stream === 'kv78') this.pruneRows(stream);
       console.log("[OVLIVE_NDOV_COLLECT_LOOP_EXIT]", JSON.stringify({
         stream,
-        stopRequested: this.stopRequested,
+        stopRequested: state.stopRequested,
         deadlineReached: Date.now() >= deadline,
-        latestMessageAt: this.snapshot.latestMessageAt,
-        messageCount: this.snapshot.messageCount,
+        latestMessageAt: state.snapshot.latestMessageAt,
+        messageCount: state.snapshot.messageCount,
       }));
-      this.snapshot = { ...this.snapshot, state: this.stopRequested ? 'stopped' : 'complete', finishedAt: new Date().toISOString(), ok: true, error: null };
-      await this.persist(true, true);
+      state.snapshot = { ...state.snapshot, state: state.stopRequested ? 'stopped' : 'complete', finishedAt: new Date().toISOString(), ok: true, error: null };
+      await this.persist(stream, true, true);
     } catch (error) {
       const expectedEnd = Date.now() >= deadline;
-      const wasStopped = this.stopRequested;
-      if (stream === 'kv78') this.pruneRows();
-      this.snapshot = {
-        ...this.snapshot,
+      const wasStopped = state.stopRequested;
+      if (stream === 'kv78') this.pruneRows(stream);
+      state.snapshot = {
+        ...state.snapshot,
         state: wasStopped ? 'stopped' : expectedEnd ? 'complete' : 'error',
         ok: expectedEnd || wasStopped,
         finishedAt: new Date().toISOString(),
         error: expectedEnd || wasStopped ? null : (error instanceof Error ? error.message : String(error)),
       };
-      await this.persist(true, true);
+      await this.persist(stream, true, true);
     } finally {
       // Start beide opruimacties voordat we op een van beide wachten.
       const cleanup = [];
@@ -839,7 +871,7 @@ export class NdovFeedHub extends DurableObject {
 }
 
 async function callHub(env, stream, action, seconds, waitForCompletion = false) {
-  const id = env.NDOV_FEEDS.idFromName(stream);
+  const id = env.NDOV_FEEDS.idFromName("ndov-shared-collector-v1");
   const stub = env.NDOV_FEEDS.get(id);
   const url = new URL(`https://ndov-hub.local/${action}`);
   url.searchParams.set('stream', stream);
