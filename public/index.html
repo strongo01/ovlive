@@ -542,11 +542,23 @@ function realtimeHtml(leg) {
     const toTime = leg.to?.scheduledArrival || leg.to?.arrival ||
       leg.scheduledEndTime || leg.endTime;
 
+    const departureDeviationKnown =
+      typeof ns.departure?.delaySeconds === "number" &&
+      Number.isFinite(ns.departure.delaySeconds);
+    const arrivalDeviationKnown =
+      typeof ns.arrival?.delaySeconds === "number" &&
+      Number.isFinite(ns.arrival.delaySeconds);
+    const deviationSummaryClass =
+      departureDeviationKnown && arrivalDeviationKnown
+        ? "rt-details"
+        : "rt-details rt-unknown";
+
     return `<div class="rt-status">
-      <strong class="rt-ok">NS · treininformatie gekoppeld</strong>
+      <strong>NS · trein en stations gekoppeld</strong>
       <div class="rt-details">Trein ${train}${leg.headsign ? ` · richting ${esc(leg.headsign)}` : ""}</div>
       ${ns.departure ? renderNsEvent("Vertrek", ns.departure, fromTime) : '<div class="rt-details rt-unknown">Geen unieke NS-vertrekregel gevonden.</div>'}
       ${ns.arrival ? renderNsEvent("Aankomst", ns.arrival, toTime) : '<div class="rt-details rt-unknown">Geen unieke NS-aankomstregel gevonden.</div>'}
+      <div class="${deviationSummaryClass}">Actuele afwijking: vertrek ${departureDeviationKnown ? "bekend" : "onbekend"} · aankomst ${arrivalDeviationKnown ? "bekend" : "onbekend"}. Een ritmatch bevestigt niet automatisch de punctualiteit.</div>
       <div class="rt-details">Bron: NS Reisinformatie API · match op treinnummer, station en geplande tijd.</div>
     </div>`;
   }
@@ -1304,11 +1316,12 @@ q.set('pedestrianSpeed', '1.5');
       ? ' · NS-status niet ontvangen.'
       : nsMeta.status === 'not_applicable'
         ? ' · NS: geen exact gekoppelde treinen om te controleren.'
-        : ` · NS: ${nsMeta.matchedLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0} gekoppeld; ` +
-          `vertrek ${nsMeta.departureMatchedLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}, ` +
-          `aankomst ${nsMeta.arrivalMatchedLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}; ` +
+        : ` · NS: ritmatch ${nsMeta.matchedLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}; ` +
+          `afwijking bekend: vertrek ${nsMeta.departureDeviationKnownLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}, ` +
+          `aankomst ${nsMeta.arrivalDeviationKnownLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}; ` +
+          `${nsMeta.partlyUnknownDeviationLegCount ?? nsMeta.unknownLegCount ?? 0} met (deels) onbekende afwijking; ` +
           `${nsMeta.cancelledLegCount ?? 0} geannuleerd, ` +
-          `${nsMeta.unknownLegCount ?? 0} onbekend.`;
+          `${nsMeta.unknownLegCount ?? 0} niet gekoppeld.`;
     if (meta?.status === 'enrichment_failed') {
       $('planStatus').textContent =
         `Reisplanner klaar · realtimeverwerking mislukt. ` +

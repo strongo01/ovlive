@@ -18,7 +18,7 @@ const moduleUrl =
   "data:text/javascript;base64," +
   Buffer.from(compiled).toString("base64");
 
-const { eventFrom } = await import(moduleUrl);
+const { eventFrom, hasKnownPunctualityDeviation } = await import(moduleUrl);
 
 const planned = "2026-10-14T11:10:00.000Z";
 const actual = "2026-10-14T11:10:00.000Z";
@@ -35,6 +35,7 @@ assert.equal(unknownEcho.time, null);
 assert.equal(unknownEcho.actualTime, null);
 assert.equal(unknownEcho.delaySeconds, null);
 assert.equal(unknownEcho.plannedTime, planned);
+assert.equal(hasKnownPunctualityDeviation(unknownEcho), false);
 console.log("PASS: UNKNOWN met gelijke tijden blijft onbevestigd");
 
 // Een ontbrekende status mag evenmin vanzelf als op tijd gelden.
@@ -46,6 +47,7 @@ const missingStatus = eventFrom({
 
 assert.equal(missingStatus.time, null);
 assert.equal(missingStatus.delaySeconds, null);
+assert.equal(hasKnownPunctualityDeviation(missingStatus), false);
 console.log("PASS: ontbrekende NS-status blijft onbekend");
 
 // INCOMING beschrijft de treinstatus, niet automatisch de punctualiteit.
@@ -58,6 +60,7 @@ const incomingWithoutDelay = eventFrom({
 
 assert.equal(incomingWithoutDelay.time, planned);
 assert.equal(incomingWithoutDelay.delaySeconds, null);
+assert.equal(hasKnownPunctualityDeviation(incomingWithoutDelay), false);
 console.log("PASS: INCOMING zonder expliciete vertraging blijft punctualiteit onbekend");
 
 // Nulvertraging is wel geldig als NS die expliciet als 0 doorgeeft.
@@ -71,6 +74,7 @@ const confirmedZero = eventFrom({
 
 assert.equal(confirmedZero.time, planned);
 assert.equal(confirmedZero.delaySeconds, 0);
+assert.equal(hasKnownPunctualityDeviation(confirmedZero), true);
 console.log("PASS: expliciete nulvertraging van NS blijft geldig");
 
 // Een werkelijke afwijking mag niet worden weggefilterd.
@@ -83,6 +87,7 @@ const delayed = eventFrom({
 
 assert.equal(delayed.time, "2026-10-14T11:12:00.000Z");
 assert.equal(delayed.delaySeconds, 120);
+assert.equal(hasKnownPunctualityDeviation(delayed), true);
 console.log("PASS: echte afwijking van 120 seconden blijft zichtbaar");
 
 // Een expliciet door NS gemelde vertraging blijft behouden.
@@ -95,6 +100,7 @@ const reportedDelay = eventFrom({
 }, "departure");
 
 assert.equal(reportedDelay.delaySeconds, 150);
+assert.equal(hasKnownPunctualityDeviation(reportedDelay), true);
 console.log("PASS: expliciet gemelde NS-vertraging blijft behouden");
 
 console.log("Alle NS-regressietests geslaagd.");

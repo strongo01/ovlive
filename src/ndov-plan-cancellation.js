@@ -990,48 +990,16 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     return plan;
   }
 
-  let snapshot;
-  try {
-    snapshot = await getBisonSnapshot(env);
-  } catch (error) {
-    plan.ndovRealtimeMeta = { ...baseMeta, status: "unavailable", message: error instanceof Error ? error.message : "BISON-status niet beschikbaar." };
-    return plan;
-  }
-
-  const latestMessageAt = valueOf(snapshot, "latestMessageAt");
-  const feedTimeMs = timestampMs(latestMessageAt);
-  const feedAgeMs = feedTimeMs === null ? null : Date.now() - feedTimeMs;
-  if (snapshot.state === "error" || feedAgeMs === null || feedAgeMs < -30_000 || feedAgeMs > MAX_BISON_AGE_MS) {
-    console.log("[OVLIVE_BISON_STALE_DIAG]", JSON.stringify({
-      state: snapshot.state ?? null,
-      latestMessageAt: latestMessageAt ?? null,
-      feedAgeSeconds: feedAgeMs === null ? null : Math.round(feedAgeMs / 1000),
-      startedAt: snapshot.startedAt ?? null,
-      finishedAt: snapshot.finishedAt ?? null,
-      sessionSeconds: snapshot.sessionSeconds ?? null,
-      messageCount: snapshot.messageCount ?? null,
-      rawBytes: snapshot.rawBytes ?? null,
-      envelopeCounts: snapshot.envelopeCounts ?? null,
-      continuousEnabled: snapshot.continuousEnabled ?? null,
-      nextAlarmAt: snapshot.nextAlarmAt ?? null,
-      storedKv6TripCount: snapshot.storedKv6TripCount ?? null,
-      error: snapshot.error ?? null,
-      warnings: Array.isArray(snapshot.warnings) ? snapshot.warnings.slice(-5) : [],
-    }));
-    plan.ndovRealtimeMeta = {
-      ...baseMeta,
-      status: "stale",
-      feedState: snapshot.state ?? "unknown",
-      feedAgeSeconds: feedAgeMs === null ? null : Math.round(feedAgeMs / 1000),
-      message: "BISON-feed is niet recent genoeg; er wordt geen NDOV-status toegepast.",
-    };
-    return plan;
-  }
-
   let routeCrosswalkMatchedLegCount = 0;
   let routeCrosswalkGeneratedAt = null;
   let routeCrosswalkError = null;
   const routeCrosswalkOutcomes = [];
+  const routeCrosswalkMeta = () => ({
+    openovRouteCrosswalkGeneratedAt: routeCrosswalkGeneratedAt,
+    routeCrosswalkMatchedLegCount,
+    routeCrosswalkError,
+    routeCrosswalkOutcomes: routeCrosswalkOutcomes.slice(0, 12),
+  });
   try {
     for (const item of candidates) {
       const resolution = await resolveRealtimeTripForLeg(env, item);
@@ -1068,14 +1036,61 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       if (resolution.source === "openov-route-crossmatch") routeCrosswalkMatchedLegCount += 1;
     }
   } catch (error) {
+    routeCrosswalkError = error instanceof Error
+      ? error.message
+      : "onbekende fout";
     plan.ndovRealtimeMeta = {
       ...baseMeta,
+      ...routeCrosswalkMeta(),
       status: "crosswalk_unavailable",
-      feedAgeSeconds: Math.round(feedAgeMs / 1000),
-      message: `GTFS-crosswalk niet beschikbaar: ${error instanceof Error ? error.message : "onbekende fout"}`,
+      message: `GTFS-crosswalk niet beschikbaar: ${routeCrosswalkError}`,
     };
     return plan;
   }
+  let snapshot;
+  try {
+    snapshot = await getBisonSnapshot(env);
+  } catch (error) {
+    plan.ndovRealtimeMeta = {
+      ...baseMeta,
+      ...routeCrosswalkMeta(),
+      status: "unavailable",
+      message: error instanceof Error ? error.message : "BISON-status niet beschikbaar.",
+    };
+    return plan;
+  }
+
+  const latestMessageAt = valueOf(snapshot, "latestMessageAt");
+  const feedTimeMs = timestampMs(latestMessageAt);
+  const feedAgeMs = feedTimeMs === null ? null : Date.now() - feedTimeMs;
+  if (snapshot.state === "error" || feedAgeMs === null || feedAgeMs < -30_000 || feedAgeMs > MAX_BISON_AGE_MS) {
+    console.log("[OVLIVE_BISON_STALE_DIAG]", JSON.stringify({
+      state: snapshot.state ?? null,
+      latestMessageAt: latestMessageAt ?? null,
+      feedAgeSeconds: feedAgeMs === null ? null : Math.round(feedAgeMs / 1000),
+      startedAt: snapshot.startedAt ?? null,
+      finishedAt: snapshot.finishedAt ?? null,
+      sessionSeconds: snapshot.sessionSeconds ?? null,
+      messageCount: snapshot.messageCount ?? null,
+      rawBytes: snapshot.rawBytes ?? null,
+      envelopeCounts: snapshot.envelopeCounts ?? null,
+      continuousEnabled: snapshot.continuousEnabled ?? null,
+      nextAlarmAt: snapshot.nextAlarmAt ?? null,
+      storedKv6TripCount: snapshot.storedKv6TripCount ?? null,
+      error: snapshot.error ?? null,
+      warnings: Array.isArray(snapshot.warnings) ? snapshot.warnings.slice(-5) : [],
+    }));
+    plan.ndovRealtimeMeta = {
+      ...baseMeta,
+      ...routeCrosswalkMeta(),
+      status: "stale",
+      feedState: snapshot.state ?? "unknown",
+      feedAgeSeconds: feedAgeMs === null ? null : Math.round(feedAgeMs / 1000),
+      message: "BISON-feed is niet recent genoeg; er wordt geen NDOV-status toegepast.",
+    };
+    return plan;
+  }
+
 
   let mutations = [];
   try {

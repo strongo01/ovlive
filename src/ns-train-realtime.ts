@@ -422,6 +422,15 @@ export function eventFrom(row: any, kind: "departure" | "arrival"): any {
   };
 }
 
+export function hasKnownPunctualityDeviation(event: any): boolean {
+  return Boolean(
+    event &&
+    event.cancelled !== true &&
+    typeof event.delaySeconds === "number" &&
+    Number.isFinite(event.delaySeconds)
+  );
+}
+
 function scheduledMs(leg: any, kind: "departure" | "arrival"): number | null {
   const place = kind === "departure" ? leg?.from : leg?.to;
   const value = kind === "departure"
@@ -461,6 +470,9 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
     matchedLegCount: 0,
     departureMatchedLegCount: 0,
     arrivalMatchedLegCount: 0,
+    departureDeviationKnownLegCount: 0,
+    arrivalDeviationKnownLegCount: 0,
+    partlyUnknownDeviationLegCount: candidates.length,
     cancelledLegCount: 0,
     unknownLegCount: candidates.length,
     message: candidates.length
@@ -506,7 +518,7 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
     if (!fromCode || !toCode || departMs === null || arriveMs === null) {
       markUnknown(leg, number,
         "NS-match niet mogelijk: stationcode of geplande tijd ontbreekt.");
-      return { matched: false, dep: false, arr: false, cancelled: false };
+      return { matched: false, dep: false, arr: false, cancelled: false, depDeviationKnown: false, arrDeviationKnown: false };
     }
 
     try {
@@ -557,12 +569,14 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
         matched,
         dep: Boolean(depRow),
         arr: Boolean(arrRow),
-        cancelled
+        cancelled,
+        depDeviationKnown: hasKnownPunctualityDeviation(departure),
+        arrDeviationKnown: hasKnownPunctualityDeviation(arrival)
       };
     } catch {
       markUnknown(leg, number,
         "De NS-vertrek- of aankomstgegevens konden niet worden opgehaald.");
-      return { matched: false, dep: false, arr: false, cancelled: false };
+      return { matched: false, dep: false, arr: false, cancelled: false, depDeviationKnown: false, arrDeviationKnown: false };
     }
   }));
 
@@ -573,6 +587,14 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
   meta.arrivalMatchedLegCount = results.filter((r: any) => r.arr).length;
   meta.cancelledLegCount = results.filter((r: any) => r.cancelled).length;
   meta.unknownLegCount = results.filter((r: any) => !r.matched).length;
+  meta.departureDeviationKnownLegCount =
+    results.filter((r: any) => r.depDeviationKnown).length;
+  meta.arrivalDeviationKnownLegCount =
+    results.filter((r: any) => r.arrDeviationKnown).length;
+  meta.partlyUnknownDeviationLegCount = results.filter(
+    (r: any) => !r.cancelled &&
+      (!r.depDeviationKnown || !r.arrDeviationKnown)
+  ).length;
   meta.status = meta.matchedLegCount ? "ok" : "unknown";
   meta.message = meta.matchedLegCount
     ? `NS leverde unieke bordmatches voor ${meta.matchedLegCount} van ${candidates.length} treinreisdelen.`

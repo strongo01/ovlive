@@ -13,6 +13,23 @@ function createEnv({ latestMessageAt = now(), latestMutations = [], state = 'com
       '382969674': 'EBS:1314:1037',
       '382969676': 'EBS:1314:1039',
     }],
+    ['/ndov-openov-route-crosswalk/manifest.json', {
+      schemaVersion: 1,
+      generatedAt: now(),
+      serviceCalendarDateCount: 0,
+      routes: { '146888': ['route-146888.json'] },
+    }],
+    ['/ndov-openov-route-crosswalk/routes/route-146888.json', [{
+      routeId: '146888',
+      realtimeTripId: 'IFF:1000:661',
+      openovTripId: '123456789',
+      stops: [
+        { stopId: 'start-stop', departureTime: '11:20:00' },
+        { stopId: 'mid-from', departureTime: '11:30:00' },
+        { stopId: 'mid-to', arrivalTime: '11:50:00' },
+        { stopId: 'end-stop', arrivalTime: '12:00:00' },
+      ],
+    }]],
   ]);
   return {
     ASSETS: {
@@ -103,7 +120,7 @@ const cancellation = {
   console.log('PASS: newer RECOVER supersedes older CANCEL');
 }
 
-console.log('All NDOV plan-cancellation selftests passed.');
+
 
 
 {
@@ -116,3 +133,52 @@ console.log('All NDOV plan-cancellation selftests passed.');
   assert.equal(plan.ndovRealtimeMeta.cancelledLegCount, 0);
   console.log("PASS: stop-specific KV17 mutation is not applied as a trip-wide cancellation");
 }
+
+// De statische treinritkoppeling moet beschikbaar blijven als BISON stale is.
+{
+  const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const plan = { itineraries: [{ legs: [{
+    mode: 'RAIL',
+    routeId: 'nl-OpenOV_146888',
+    tripId: '20261014_11:20_nl-OpenOV_123456789',
+    tripFrom: {
+      stopId: 'start-stop',
+      scheduledDeparture: '11:20:00',
+    },
+    tripTo: {
+      stopId: 'end-stop',
+      scheduledArrival: '12:00:00',
+    },
+    from: {
+      stopId: 'mid-from',
+      scheduledDeparture: '11:30:00',
+    },
+    to: {
+      stopId: 'mid-to',
+      scheduledArrival: '11:50:00',
+    },
+  }] }] };
+
+  await applyNdovCancellationsToPlan(
+    plan,
+    createEnv({ latestMessageAt: stale })
+  );
+
+  assert.equal(plan.ndovRealtimeMeta.status, 'stale');
+  assert.equal(plan.itineraries[0].legs[0].cancelled, undefined);
+
+  const outcome = plan.ndovRealtimeMeta.routeCrosswalkOutcomes
+    ?.find((item) => item.tripId === plan.itineraries[0].legs[0].tripId);
+
+  assert.ok(outcome, 'crosswalk-uitkomst moet behouden blijven bij stale BISON');
+  assert.equal(outcome.reason, 'exact_openov_trip_id_match');
+  assert.deepEqual(outcome.parsedIdentity, {
+    owner: 'IFF',
+    line: '1000',
+    journey: '661',
+  });
+  assert.equal(plan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 1);
+  console.log('PASS: NS-ritidentiteit blijft beschikbaar bij verouderde BISON-feed');
+}
+
+console.log('All NDOV plan-cancellation selftests passed.');
