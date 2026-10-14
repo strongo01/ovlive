@@ -413,12 +413,20 @@ function stopEventHtml(label, event, scheduledValue) {
 
   const missingTripTimestamp =
     /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ""));
-  const hasExplicitStopPrediction =
-    Boolean(rt.departure?.time || rt.arrival?.time);
+  const hasExplicitStopPrediction = Boolean(
+    rt.departure?.time ||
+    (rt.departure?.delaySeconds != null &&
+      Number.isFinite(Number(rt.departure.delaySeconds))) ||
+    rt.arrival?.time ||
+    (rt.arrival?.delaySeconds != null &&
+      Number.isFinite(Number(rt.arrival.delaySeconds)))
+  );
 
-  const reliability = missingTripTimestamp || !hasExplicitStopPrediction
-    ? "uitvoering niet bevestigd"
-    : "halteprognoses beschikbaar";
+  const reliability = !hasExplicitStopPrediction
+    ? "geen bruikbare halteprognose; uitvoering niet bevestigd"
+    : missingTripTimestamp
+      ? "prognose beschikbaar, maar timestamp per rit ontbreekt"
+      : "halteprognoses beschikbaar";
 
   return `${events.length ? events.join(" · ") : "geen bruikbare halteprognose"} · ${reliability}`;
 }
@@ -478,21 +486,27 @@ function realtimeHtml(leg) {
 
       // Normalize common zero-delay labels if the underlying helper emits one.
       // If it already says "Op tijd", preserve its existing markup unchanged.
-      const normalized = html
-        .replace(/\b0\s*min(?:uut|uten)?\s*0\s*(?:sec(?:onden)?|s)\s*(?:vertraging|te laat|achterstand)\b/gi, 'Op tijd')
-        .replace(/\b0\s*(?:sec(?:onden)?|s)\s*(?:vertraging|te laat|achterstand)\b/gi, 'Op tijd')
-        .replace(/\b(?:vertraging|te laat|achterstand)\s*(?:van\s*)?0\s*(?:sec(?:onden)?|s)\b/gi, 'Op tijd');
-      // An explicit zero is real data. Replace the old conservative fallback
-      // wording; do not confuse it with a missing delay (null), which never
-      // enters this wrapper.
-      const explicitZeroNormalized = normalized.replace(
-        /geen vertraging opgegeven;\s*op tijd niet bevestigd/gi,
-        'Op tijd volgens de actuele haltegegevens'
-      );
-      if (/\bop tijd\b(?!\s+niet bevestigd)/i.test(explicitZeroNormalized)) {
-        return explicitZeroNormalized;
+      const normalized = delaySeconds === 0
+        ? html.replace(
+          /\b(?:vertraging|te laat|achterstand)\s*(?:van\s*)?0\s*(?:sec(?:onden)?|s)\b/gi,
+          'Op tijd'
+        )
+        : html;
+
+      // Alleen een expliciete nulvertraging mag als op tijd worden gelabeld.
+      if (delaySeconds === 0) {
+        const explicitZeroNormalized = normalized.replace(
+          /geen vertraging opgegeven;\s*op tijd niet bevestigd/gi,
+          'Op tijd volgens de actuele haltegegevens'
+        );
+        if (/\bop tijd\b(?!\s+niet bevestigd)/i.test(explicitZeroNormalized)) {
+          return explicitZeroNormalized;
+        }
+        return `${explicitZeroNormalized}<div class="rt-details">Op tijd volgens de actuele haltegegevens</div>`;
       }
-      return `${explicitZeroNormalized}<div class="rt-details">Op tijd volgens de actuele haltegegevens</div>`;
+
+      // Een positieve, negatieve of ontbrekende vertraging krijgt geen op-tijd-fallback.
+      return html;
     };
     const departure = stopEventHtmlWithZeroOnTime(
       departureLabel, kv78.departure, leg.from?.scheduledDeparture || leg.scheduledStartTime || leg.from?.departure || leg.startTime
@@ -500,6 +514,32 @@ function realtimeHtml(leg) {
     const arrival = stopEventHtmlWithZeroOnTime(
       arrivalLabel, kv78.arrival, leg.to?.scheduledArrival || leg.scheduledEndTime || leg.to?.arrival || leg.endTime
     );
+
+    // Toon zowel de leeftijd van de geselecteerde haltegegevens als
+    // de leeftijd van het algemene KV78-stroombericht.
+    const kv78RowReceivedAgeSeconds = (event) => {
+      const receivedMs = event?.receivedAt
+        ? Date.parse(event.receivedAt)
+        : NaN;
+      return Number.isFinite(receivedMs)
+        ? Math.max(0, Math.round((Date.now() - receivedMs) / 1000))
+        : null;
+    };
+
+    const departureRowAgeSeconds =
+      kv78RowReceivedAgeSeconds(kv78.departure);
+    const arrivalRowAgeSeconds =
+      kv78RowReceivedAgeSeconds(kv78.arrival);
+
+    const kv78RowAgeParts = [
+      departureRowAgeSeconds == null
+        ? null
+        : `vertrekrij ontvangen ${departureRowAgeSeconds} sec geleden`,
+      arrivalRowAgeSeconds == null
+        ? null
+        : `aankomstrij ontvangen ${arrivalRowAgeSeconds} sec geleden`
+    ].filter(Boolean);
+
     const kv6Seconds = kv6?.punctualitySeconds == null ? null : Math.trunc(Number(kv6.punctualitySeconds));
     const kv6Abs = Math.abs(kv6Seconds ?? 0);
     const kv6DelayLabel = kv6Seconds == null || !Number.isFinite(kv6Seconds)
@@ -509,15 +549,85 @@ function realtimeHtml(leg) {
         : kv6Seconds < 0
           ? `${Math.floor(kv6Abs / 60)} min ${kv6Abs % 60} sec te vroeg volgens voertuigupdate`
           : 'Voertuigupdate meldt op tijd';
+    // Toon een waarschuwing bij een duidelijk verschil tussen
+    // haltevertragingen van OpenOV en KV78Turbo. Verander geen bronwaarden.
+    const formatDelayDuration = (value) => {
+      const seconds = Math.abs(Math.trunc(value));
+      return seconds >= 60
+        ? `${Math.floor(seconds / 60)} min ${seconds % 60} sec`
+        : `${seconds} sec`;
+    };
+
+    const formatDelayValue = (value) => {
+      const seconds = Math.trunc(value);
+      if (seconds === 0) return "op tijd";
+      const duration = formatDelayDuration(seconds);
+      return seconds > 0
+        ? `${duration} vertraging`
+        : `${duration} te vroeg`;
+    };
+
+    const sourceDisagreements = [];
+
+    for (const [kind, label] of [
+      ["departure", "Vertrek"],
+      ["arrival", "Aankomst"]
+    ]) {
+      const openovEvent = rt?.[kind];
+      const kv78Event = kv78?.[kind];
+
+      const openovSeconds = openovEvent?.delaySeconds == null
+        ? null
+        : Number(openovEvent.delaySeconds);
+
+      const kv78Seconds = kv78Event?.delaySeconds == null
+        ? null
+        : Number(kv78Event.delaySeconds);
+
+      if (
+        openovSeconds !== null &&
+        kv78Seconds !== null &&
+        Number.isFinite(openovSeconds) &&
+        Number.isFinite(kv78Seconds) &&
+        Math.abs(openovSeconds - kv78Seconds) >= 90
+      ) {
+        sourceDisagreements.push(
+          `${label}: OpenOV meldt ${formatDelayValue(openovSeconds)}; ` +
+          `KV78Turbo meldt ${formatDelayValue(kv78Seconds)} ` +
+          `(verschil ${formatDelayDuration(openovSeconds - kv78Seconds)}).`
+        );
+      }
+    }
+
+    const conflictNotes = [
+      String(rt?.freshnessNote || "").toLowerCase()
+        .includes("timestamp per rit ontbreekt")
+        ? "De timestamp per OpenOV-rit ontbreekt."
+        : "",
+      [kv78?.departure, kv78?.arrival].some(
+        event => event && !event.stopSideCode
+      )
+        ? "De exacte KV78-haltezijde is niet bevestigd."
+        : "",
+      "OVLive berekent geen gemiddelde van deze bronnen."
+    ].filter(Boolean).join(" ");
+
+    const sourceConflictHtml = sourceDisagreements.length
+      ? `<div class="rt-details rt-unknown"><strong>⚠️ Realtimebronnen spreken elkaar tegen.</strong> ${esc(sourceDisagreements.join(" "))} ${esc(conflictNotes)}</div>`
+      : "";
+
     return `<div class="rt-status">
       <strong class="rt-ok">NDOV · actuele haltegegevens (KV78Turbo)</strong>
+      ${sourceConflictHtml}
       ${kv6DelayLabel ? `<div class="rt-details">${esc(kv6DelayLabel)}${kv6?.vehicleNumber ? ` · voertuig ${esc(kv6.vehicleNumber)}` : ''}</div>` : ''}
       ${kv78.freshnessNote ? `<div class="rt-details">${esc(kv78.freshnessNote)}</div>` : ''}
       ${departure}
       ${arrival}
       ${!kv78.arrival ? '<div class="rt-details rt-unknown">Geen bevestigde KV78-aankomstprognose. De geplande aankomsttijd in het reisschema is niet realtime bevestigd.</div>' : ''}
       <div class="rt-details">OpenOV-status: ${esc(openovStatusSummary(rt))}.</div>
-      <div class="rt-details">Matchmethode: ${esc(kv78.matchMethod || 'onbekend')} · Feedleeftijd: ${esc(kv78.feedAgeSeconds ?? '?')} sec.</div>
+      <div class="rt-details">Matchmethode: ${esc(kv78.matchMethod || 'onbekend')}</div>
+      ${kv78RowAgeParts.length ? `<div class="rt-details">Leeftijd opgeslagen KV78-haltegegevens: ${esc(kv78RowAgeParts.join(' · '))}.</div>` : ''}
+      <div class="rt-details">Leeftijd laatste algemene KV78-stroombericht: ${esc(kv78.feedAgeSeconds ?? '?')} sec.</div>
     </div>`;
   }
 
@@ -559,6 +669,35 @@ function realtimeHtml(leg) {
     return `<div class="rt-status rt-unknown">
       <strong>${rt?.reason === 'no_matching_realtime_trip' ? 'OpenOV · geen betrouwbare ritmatch' : 'OpenOV · realtime onbekend'}</strong>
       <div class="rt-details">${esc(reason)} Dit betekent niet automatisch dat de rit op tijd rijdt of uitvalt.</div>
+    </div>`;
+  }
+
+  // Een gevonden rit is niet automatisch een bruikbare haltevoorspelling.
+  // Toon een expliciete melding als beide voorspellingen ontbreken.
+  const hasOpenovStopPrediction = [rt.departure, rt.arrival].some((event) => {
+    if (!event || typeof event !== 'object') return false;
+
+    const hasTime = typeof event.time === 'string' &&
+      Number.isFinite(Date.parse(event.time));
+
+    const hasDelay = typeof event.delaySeconds === 'number' &&
+      Number.isFinite(event.delaySeconds);
+
+    return hasTime || hasDelay;
+  });
+
+  if (rt.status === 'matched' && !hasOpenovStopPrediction) {
+    const age = Number(rt.updateAgeSeconds);
+    const ageLabel = Number.isFinite(age) && age >= 0
+      ? `Updateleeftijd: ${age} sec.`
+      : null;
+
+    return `<div class="rt-status rt-unknown">
+      <strong>OpenOV · rit gekoppeld, voorspelling ontbreekt</strong>
+      <div class="rt-details">De rit is gevonden, maar er is geen bruikbare vertrek- of aankomstvoorspelling voor dit traject. De geplande tijden zijn hiermee niet realtime bevestigd. Dit betekent niet dat de bus op tijd rijdt.</div>
+      ${rt.matchMethod ? `<div class="rt-details">Matchmethode: ${esc(rt.matchMethod)}.</div>` : ''}
+      ${rt.freshnessNote ? `<div class="rt-details">${esc(rt.freshnessNote)}</div>` : ''}
+      ${ageLabel ? `<div class="rt-details">${esc(ageLabel)}</div>` : ''}
     </div>`;
   }
 
@@ -1029,8 +1168,10 @@ q.set('pedestrianSpeed', '1.5');
         'Er wordt geen realtime-status als bevestigd getoond.';
     } else if (meta) {
       $('planStatus').textContent =
-        `Reisplanner klaar · OpenOV: ${meta.matchedLegCount ?? 0} ritten gekoppeld, ` +
-        `${meta.unknownLegCount ?? 0} zonder bevestigde halteprognose. ` +
+        `Reisplanner klaar · OpenOV: ${meta.matchedLegCount ?? 0} ritten gekoppeld; ` +
+        `${meta.freshPredictionLegCount ?? 0} met verse halteprognose, ` +
+        `${meta.unconfirmedPredictionLegCount ?? 0} met prognose maar zonder rit-timestamp, ` +
+        `${meta.noPredictionLegCount ?? meta.unknownLegCount ?? 0} zonder bruikbare halteprognose. ` +
         `Storingsmeldingen: ${(data.openovAlerts || []).length}.` +
         (data.ndovRealtimeMeta
           ? ` NDOV KV6: ${data.ndovRealtimeMeta.kv6MatchedLegCount ?? 0} live ritmatches (${data.ndovRealtimeMeta.kv6DelayLegCount ?? 0} met vertraging); KV78: ${data.ndovRealtimeMeta.kv78DataLegCount ?? 0} reisdelen met haltegegevens (${data.ndovRealtimeMeta.kv78DelayLegCount ?? 0} met vertraging); KV17: ${data.ndovRealtimeMeta.cancelledLegCount ?? 0} exacte annuleringen.`
@@ -1398,9 +1539,12 @@ $('ovapiTransitousMatchButton').onclick = async () => {
     }
     output.innerHTML = data.comparisons.map(item => {
       const candidate = item.match || (item.status === 'ambiguous' ? item.candidates?.[0] : null);
+      const candidateHtml = item.status === 'ambiguous'
+        ? (item.candidates ?? []).map(renderCandidate).join('')
+        : renderCandidate(candidate);
       const statusTitle = item.status === 'unique_schedule_candidate' ? 'Unieke dienstregelingskandidaat' : item.status === 'ambiguous' ? 'Ambigue koppeling — niet automatisch gekozen' : item.status === 'no_candidate' ? 'Geen passende OVAPI-kandidaat' : 'Niet vergelijkbaar';
       const cls = item.status === 'unique_schedule_candidate' && candidate?.reliableDelayAtBothStops ? 'rt-ok' : 'rt-unknown';
-      return `<article class="journey"><strong>Reis ${esc(item.itinerary)} · bus ${esc(item.line)} · ${esc(item.fromName || '')} → ${esc(item.toName || '')}</strong><div class="muted">Transitous routeId: ${esc(item.routeId || 'onbekend')} · tripId: ${esc(item.tripId || 'onbekend')}</div><div class="muted">Gepland in Transitous: ${esc(clock(item.departure))} → ${esc(clock(item.arrival))}</div><div class="rt-status ${cls}"><strong>${esc(statusTitle)}</strong><div class="rt-details">${esc(item.note || '')}</div></div>${candidate ? renderCandidate(candidate) : ''}${item.status === 'ambiguous' && item.candidates?.length > 1 ? `<div class="muted">Er zijn ${item.candidates.length} kandidaten. Er wordt geen automatische ritkeuze gemaakt.</div>` : ''}</article>`;
+      return `<article class="journey"><strong>Reis ${esc(item.itinerary)} · bus ${esc(item.line)} · ${esc(item.fromName || '')} → ${esc(item.toName || '')}</strong><div class="muted">Transitous routeId: ${esc(item.routeId || 'onbekend')} · tripId: ${esc(item.tripId || 'onbekend')}</div><div class="muted">Gepland in Transitous: ${esc(clock(item.departure))} → ${esc(clock(item.arrival))}</div><div class="rt-status ${cls}"><strong>${esc(statusTitle)}</strong><div class="rt-details">${esc(item.note || '')}</div></div>${candidateHtml}${item.status === 'ambiguous' && item.candidates?.length > 1 ? `<div class="muted">Er zijn ${item.candidates.length} kandidaten. Er wordt geen automatische ritkeuze gemaakt.</div>` : ''}</article>`;
     }).join('');
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : 'Transitous-OVAPI-koppelingstest mislukt.';

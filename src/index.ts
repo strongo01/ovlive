@@ -1,3 +1,4 @@
+import { summarizeRealtimeEvent } from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
@@ -723,26 +724,6 @@ function matchOpenovRealtime(leg: any, records: any[]) {
     }
   );
 
-  console.log("[OVLIVE_MATCH_DIAG]", JSON.stringify({
-    routeId: rawRouteId,
-    tripId: leg.tripId ?? null,
-    parsedTripId: identity.tripId,
-    parsedDate: identity.startDate ?? null,
-    parsedStartTime: identity.startTime ?? null,
-    fromStopId: fromId,
-    toStopId: toId,
-    plannedStart: diagnosticPlannedValue ?? null,
-    plannedTimestamp: diagnosticPlannedTimestamp ?? null,
-    recordsChecked: records.length,
-    exactTripIdCount: exact.length,
-    sameRouteCount: diagnosticRouteRecords.length,
-    sameRouteAndDateCount: diagnosticDateRecords.length,
-    sameRouteDateAndDirectionCount: diagnosticDirectionRecords.length,
-    boardingStopCount: diagnosticFromStopRecords.length,
-    orderedStopsCount: diagnosticOrderedStopRecords.length,
-    timeWithinToleranceCount: diagnosticTimeRecords.length,
-    samples: diagnosticSamples
-  }));
 
   if (exact.length === 1) {
     return { record: exact[0], method: "exact_trip_id" };
@@ -892,59 +873,6 @@ function findRealtimeStop(record: any, stopId: string) {
   );
 }
 
-function summarizeRealtimeEvent(
-  stop: any,
-  kind: "arrival" | "departure",
-  scheduledValue?: unknown
-) {
-  if (!stop) return null;
-
-  const timestamp = stop[`${kind}Time`];
-  const capitalizedKind = kind[0].toUpperCase() + kind.slice(1);
-  const reportedDelay =
-    stop[`effective${capitalizedKind}DelaySeconds`] ??
-    stop[`${kind}DelaySeconds`];
-
-  let scheduledMs = Number.NaN;
-  if (typeof scheduledValue === "string") {
-    scheduledMs = Date.parse(scheduledValue);
-  } else if (typeof scheduledValue === "number") {
-    scheduledMs = scheduledValue > 1e12
-      ? scheduledValue
-      : scheduledValue > 1e9
-        ? scheduledValue * 1000
-        : Number.NaN;
-  }
-  const scheduledSeconds = Number.isFinite(scheduledMs) ? scheduledMs / 1000 : undefined;
-  const validTimestamp =
-    typeof timestamp === "number" && Number.isFinite(timestamp)
-      ? timestamp
-      : undefined;
-
-  const hasReportedDelay =
-    typeof reportedDelay === "number" && Number.isFinite(reportedDelay);
-  const hasAbsolutePrediction =
-    validTimestamp !== undefined && scheduledSeconds !== undefined;
-
-  // GTFS-Realtime: absolute event time takes precedence over delay.
-  const delaySeconds = hasAbsolutePrediction
-    ? Math.round(validTimestamp - scheduledSeconds)
-    : hasReportedDelay
-      ? reportedDelay
-      : null;
-
-  return {
-    time: validTimestamp !== undefined
-      ? new Date(validTimestamp * 1000).toISOString()
-      : null,
-    delaySeconds,
-    delayBasis: hasAbsolutePrediction
-      ? "absolute_prediction_minus_scheduled_time"
-      : hasReportedDelay
-        ? "source_or_gtfs_propagated_delay"
-        : "unknown"
-  };
-}
 function alertIsActive(alert: any, nowSeconds: number): boolean {
   // Nieuwe GTFS-RT-velden hebben voorrang op de oudere active_period.
   const periods = alert.communicationPeriods?.length
@@ -981,30 +909,6 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
   ]);
 
   // TIJDELIJKE DIAGNOSE: controleer de daadwerkelijke invoer van de matcher.
-  console.log("[OVLIVE_FEED_DIAG]", JSON.stringify({
-    tripUpdates: {
-      ok: tripFeed.ok ?? null,
-      freshness: tripFeed.freshness ?? null,
-      ageSeconds: tripFeed.ageSeconds ?? null,
-      entityCount: tripFeed.entityCount ?? null,
-      entitiesLength: Array.isArray(tripFeed.entities)
-        ? tripFeed.entities.length : null,
-      recordsWithTripId: Array.isArray(tripFeed.entities)
-        ? tripFeed.entities.filter((item: any) => item?.tripId).length : null,
-      error: tripFeed.error ?? null
-    },
-    trainUpdates: {
-      ok: trainFeed.ok ?? null,
-      freshness: trainFeed.freshness ?? null,
-      ageSeconds: trainFeed.ageSeconds ?? null,
-      entityCount: trainFeed.entityCount ?? null,
-      entitiesLength: Array.isArray(trainFeed.entities)
-        ? trainFeed.entities.length : null,
-      recordsWithTripId: Array.isArray(trainFeed.entities)
-        ? trainFeed.entities.filter((item: any) => item?.tripId).length : null,
-      error: trainFeed.error ?? null
-    }
-  }));
 
   const usableFeeds = [
     tripFeed,
@@ -1075,26 +979,11 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
   // TIJDELIJKE DIAGNOSE: aantallen binnen dezelfde routeaanvraag.
   const records = [...byIdentity.values()];
-  console.log("[OVLIVE_RECORDS_DIAG]", JSON.stringify({
-    usableFeedCount: usableFeeds.length,
-    usableFeeds: usableFeeds.map((feed: any) => ({
-      freshness: feed.freshness ?? null,
-      entitiesLength: Array.isArray(feed.entities) ? feed.entities.length : null
-    })),
-    uniqueRecordCount: byIdentity.size,
-    recordsLength: records.length,
-    sample: records.slice(0, 3).map((record: any) => ({
-      routeId: record.routeId ?? null,
-      tripId: record.tripId ?? null,
-      startDate: record.startDate ?? null,
-      startTime: record.startTime ?? null,
-      timestamp: record.timestamp ?? null,
-      stopUpdateCount: Array.isArray(record.stopUpdates)
-        ? record.stopUpdates.length : null
-    }))
-  }));
   let matchedCount = 0;
   let unknownCount = 0;
+  let freshPredictionCount = 0;
+  let unconfirmedPredictionCount = 0;
+  let noPredictionCount = 0;
 
   const relevantRoutes = new Set<string>();
   const relevantStops = new Set<string>();
@@ -1114,30 +1003,10 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
     const result = matchOpenovRealtime(leg, records);
 
-    console.log("[OVLIVE_MATCH_RESULT]", JSON.stringify({
-      routeId: leg.routeId ?? leg.route?.id ?? null,
-      transitousTripId: leg.tripId ?? null,
-      fromStopId: fromId,
-      toStopId: toId,
-      plannedStart: leg.scheduledStartTime ?? leg.startTime ?? null,
-      method: result.method ?? null,
-      reason: result.reason ?? null,
-      candidate: result.record ? {
-        tripId: result.record.tripId ?? null,
-        routeId: result.record.routeId ?? null,
-        startDate: result.record.startDate ?? null,
-        startTime: result.record.startTime ?? null,
-        directionId: result.record.directionId ?? null,
-        scheduleRelationship: result.record.scheduleRelationship ?? null,
-        timestamp: result.record.timestamp ?? null,
-        feedAgeSeconds: result.record.feedAgeSeconds ?? null,
-        stopUpdateCount: Array.isArray(result.record.stopUpdates)
-          ? result.record.stopUpdates.length : null
-      } : null
-    }));
 
     if (!result.record) {
       unknownCount++;
+      noPredictionCount++;
 
       const anyFeedReachable = tripFeed.ok || trainFeed.ok;
       const anyFreshFeed = usableFeeds.length > 0;
@@ -1193,6 +1062,7 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
     if (!tripUpdateIsFresh) {
       unknownCount++;
+      noPredictionCount++;
       leg.openovRealtime = {
         source: "OpenOV GTFS-Realtime",
         status: "unknown",
@@ -1216,38 +1086,6 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     const fromUpdate = findRealtimeStop(record, fromId);
     const toUpdate = findRealtimeStop(record, toId);
 
-    console.log("[OVLIVE_STOP_DIAG]", JSON.stringify({
-      tripId: record.tripId ?? null,
-      routeId: record.routeId ?? null,
-      fromId,
-      toId,
-      fromStopFound: Boolean(fromUpdate),
-      toStopFound: Boolean(toUpdate),
-      fromUpdate: fromUpdate ? {
-        stopId: fromUpdate.stopId ?? null,
-        scheduleRelationship: fromUpdate.scheduleRelationship ?? null,
-        arrivalTime: fromUpdate.arrivalTime ?? null,
-        departureTime: fromUpdate.departureTime ?? null,
-        arrivalDelaySeconds: fromUpdate.arrivalDelaySeconds ?? null,
-        departureDelaySeconds: fromUpdate.departureDelaySeconds ?? null,
-        effectiveArrivalDelaySeconds:
-          fromUpdate.effectiveArrivalDelaySeconds ?? null,
-        effectiveDepartureDelaySeconds:
-          fromUpdate.effectiveDepartureDelaySeconds ?? null
-      } : null,
-      toUpdate: toUpdate ? {
-        stopId: toUpdate.stopId ?? null,
-        scheduleRelationship: toUpdate.scheduleRelationship ?? null,
-        arrivalTime: toUpdate.arrivalTime ?? null,
-        departureTime: toUpdate.departureTime ?? null,
-        arrivalDelaySeconds: toUpdate.arrivalDelaySeconds ?? null,
-        departureDelaySeconds: toUpdate.departureDelaySeconds ?? null,
-        effectiveArrivalDelaySeconds:
-          toUpdate.effectiveArrivalDelaySeconds ?? null,
-        effectiveDepartureDelaySeconds:
-          toUpdate.effectiveDepartureDelaySeconds ?? null
-      } : null
-    }));
 
     const relationship = String(
       record.scheduleRelationship ?? ""
@@ -1270,17 +1108,28 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     );
 
     const hasExplicitStopPrediction = Boolean(
-      departurePrediction?.time || arrivalPrediction?.time
+      departurePrediction?.time ||
+      (departurePrediction?.delaySeconds != null &&
+        Number.isFinite(Number(departurePrediction.delaySeconds))) ||
+      arrivalPrediction?.time ||
+      (arrivalPrediction?.delaySeconds != null &&
+        Number.isFinite(Number(arrivalPrediction.delaySeconds)))
     );
     const hasPerTripTimestamp = recordTimestamp !== null;
 
     // Een exacte ritmatch is niet automatisch een bevestigde halteprognose.
     matchedCount++;
-    if (
-      !cancelled &&
-      (!hasExplicitStopPrediction || !hasPerTripTimestamp)
-    ) {
-      unknownCount++;
+
+    if (!cancelled) {
+      if (!hasExplicitStopPrediction) {
+        unknownCount++;
+        noPredictionCount++;
+      } else if (!hasPerTripTimestamp) {
+        unknownCount++;
+        unconfirmedPredictionCount++;
+      } else {
+        freshPredictionCount++;
+      }
     }
 
     leg.openovRealtime = {
@@ -1343,6 +1192,9 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     checkedAt: new Date().toISOString(),
     matchedLegCount: matchedCount,
     unknownLegCount: unknownCount,
+    freshPredictionLegCount: freshPredictionCount,
+    unconfirmedPredictionLegCount: unconfirmedPredictionCount,
+    noPredictionLegCount: noPredictionCount,
     alertCount: relevantAlerts.length,
     feeds: {
       tripUpdates: {
@@ -1537,6 +1389,26 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
     ]);
     return json({ ok: feeds.every((feed) => feed.ok === true && feed.enabled === false), enabled: false, feeds,
       note: "Automatische collector uitgeschakeld." });
+  }
+
+  if (url.pathname === "/api/ndov/rows") {
+    const identity = String(url.searchParams.get("identity") ?? "").trim();
+    if (!/^[A-Za-z0-9_-]+\\|(?:\\d{8}|\\d{4}-\\d{2}-\\d{2})\\|[^|]+\\|[^|]+\\|[^|]+$/.test(identity)) {
+      return json({
+        ok: false,
+        error: "Gebruik identity=owner|YYYY-MM-DD|line|journey|reinforcement."
+      }, 400);
+    }
+
+    const id = env.NDOV_FEEDS.idFromName("kv78");
+    const stub = env.NDOV_FEEDS.get(id);
+    const target = new URL("https://ndov-hub.local/rows");
+    target.searchParams.set("stream", "kv78");
+    target.searchParams.set("identity", identity);
+
+    const response = await stub.fetch(target.toString());
+    const data = await response.json().catch(() => ({})) as Record<string, any>;
+    return json({ ...data, requestedIdentity: identity }, response.ok ? 200 : 502);
   }
 
   if (url.pathname === "/api/ndov/events") {

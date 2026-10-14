@@ -32,6 +32,8 @@ const FRESH_ROW_MS = 180 * 1000;
 const AUTO_SESSION_SECONDS = 600;
 const AUTO_REST_MS = 5 * 1000;
 const AUTO_CYCLE_MS = AUTO_SESSION_SECONDS * 1000 + AUTO_REST_MS;
+const CONTINUOUS_FULL_CHECKPOINT_MS = 60 * 1000;
+const AUTO_DATA_IDLE_RECONNECT_MS = 120 * 1000;
 const AUTO_RETRY_BASE_MS = 30 * 1000;
 const AUTO_RETRY_MAX_MS = 5 * 60 * 1000;
 const CONTINUOUS_PERSIST_INTERVAL_MS = 30 * 1000;
@@ -124,6 +126,7 @@ export class NdovFeedHub extends DurableObject {
     this.stopRequested = false;
     this.socket = null;
     this.lastPersistAt = 0;
+    this.lastFullPersistAt = 0;
     this.ready = ctx.blockConcurrencyWhile(async () => {
       const saved = await ctx.storage.get('snapshot');
       if (saved) this.snapshot = saved;
@@ -203,6 +206,82 @@ export class NdovFeedHub extends DurableObject {
     if (url.pathname === '/status') {
       if (stream === 'bison') this.pruneEvents();
       const base = this.snapshot.state === 'idle' ? initialSnapshot(stream) : this.snapshot;
+      const kv78IdentityDiagnostics =
+        stream === "kv78" && url.searchParams.get("identityDiagnostics") === "1"
+          ? (() => {
+              const currentDate = normalizeOperatingDate(currentOperatingDateAmsterdam());
+              const groups = new Map();
+              let matchingRowCount = 0;
+
+              for (const row of this.rows.values()) {
+                const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
+                const date = normalizeOperatingDate(row?.operationDate);
+                const line = String(row?.linePlanningNumber ?? "").trim().toUpperCase();
+
+                if (
+                  owner !== "CXX" ||
+                  date !== currentDate ||
+                  !["U005", "U011", "U073"].includes(line)
+                ) continue;
+
+                const journey = String(row?.journeyNumber ?? "").trim();
+                const reinforcement = String(row?.fortifyOrderNumber ?? "0").trim() || "0";
+                if (!journey) continue;
+
+                matchingRowCount += 1;
+                const identity = [owner, date, line, journey, reinforcement].join("|");
+
+                if (!groups.has(identity)) {
+                  groups.set(identity, {
+                    identity,
+                    rowCount: 0,
+                    stopCodes: new Set(),
+                    latestReceivedAt: null,
+                    latestSourceUpdatedAt: null,
+                  });
+                }
+
+                const group = groups.get(identity);
+                group.rowCount += 1;
+
+                if (row?.userStopCode != null) {
+                  group.stopCodes.add(String(row.userStopCode));
+                }
+
+                const receivedAt = String(row?.receivedAt ?? "");
+                if (receivedAt && (
+                  !group.latestReceivedAt || receivedAt > group.latestReceivedAt
+                )) group.latestReceivedAt = receivedAt;
+
+                const sourceUpdatedAt = String(row?.lastUpdateTimeStamp ?? "");
+                if (sourceUpdatedAt && (
+                  !group.latestSourceUpdatedAt ||
+                  sourceUpdatedAt > group.latestSourceUpdatedAt
+                )) group.latestSourceUpdatedAt = sourceUpdatedAt;
+              }
+
+              const trips = [...groups.values()]
+                .map(({ stopCodes, ...group }) => ({
+                  ...group,
+                  uniqueStopCount: stopCodes.size,
+                  sampleStopCodes: [...stopCodes].slice(0, 10),
+                }))
+                .sort((a, b) =>
+                  String(b.latestReceivedAt ?? "").localeCompare(
+                    String(a.latestReceivedAt ?? "")
+                  )
+                );
+
+              return {
+                currentDate,
+                cacheSize: this.rows.size,
+                cacheLimit: KV78_ROW_LIMIT,
+                matchingRowCount,
+                identityCount: trips.length,
+                trips: trips.slice(0, 80),
+              };
+            })()
+          : null;
       const currentMutations = flattenCurrentMutations(this.mutations, 300);
       return Response.json({
         ...base,
@@ -213,6 +292,7 @@ export class NdovFeedHub extends DurableObject {
         storedKv6TripCount: this.events.size,
         latestMutations: currentMutations,
         storedKv78RowCount: this.rows.size,
+        kv78IdentityDiagnostics,
         storedMutationIdentityCount: this.mutations.size,
         continuousEnabled: this.continuousEnabled,
         nextAlarmAt: await this.ctx.storage.getAlarm(),
@@ -401,6 +481,19 @@ export class NdovFeedHub extends DurableObject {
   async persist(force = false, bulk = false) {
     const minInterval = this.continuousMode ? CONTINUOUS_PERSIST_INTERVAL_MS : 5000;
     if (!force && Date.now() - this.lastPersistAt < minInterval) return;
+
+    const persistStartedAt = Date.now();
+    const persistDiagnostic = this.continuousMode;
+    if (persistDiagnostic) {
+      console.log("[OVLIVE_NDOV_PERSIST_START]", JSON.stringify({
+        stream: this.snapshot.stream,
+        force, bulk,
+        rows: this.rows.size,
+        events: this.events.size,
+        mutations: this.mutations.size,
+        messageCount: this.snapshot.messageCount,
+      }));
+    }
     this.lastPersistAt = Date.now();
     this.snapshot.latestRows = [...this.rows.values()].slice(-30);
     this.snapshot.latestEvents = [...this.events.values()].slice(-20);
@@ -408,14 +501,40 @@ export class NdovFeedHub extends DurableObject {
     this.snapshot.storedKv78RowCount = this.rows.size;
     this.snapshot.storedMutationIdentityCount = this.mutations.size;
     this.snapshot.continuousEnabled = this.continuousEnabled;
-    if (bulk) {
+
+    const now = Date.now();
+    const hasCollectedData = this.snapshot.stream === 'kv78'
+      ? this.rows.size > 0
+      : this.events.size > 0 || this.mutations.size > 0;
+    const checkpointDue = this.continuousMode
+      && hasCollectedData
+      && now - this.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
+    if (bulk || checkpointDue) {
+      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "kv78-start"}));
       await this.persistFullKv78Rows(true);
+      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "kv78-done"}));
+
+      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "bison-events-start"}));
       await this.persistFullBisonEvents(true);
+      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "bison-events-done"}));
+
+      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "mutations-start"}));
       await this.persistFullMutations(true);
+      if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_PHASE]", JSON.stringify({stream: this.snapshot.stream, phase: "mutations-done"}));
+
+      this.lastFullPersistAt = Date.now();
     }
     // Small legacy-compatible sample for quick cold-start diagnostics; full
     // rows/mutation state are stored in compressed chunks only at session end.
     await this.ctx.storage.put({ snapshot: this.snapshot, rows: [...this.rows.entries()].slice(-100), events: [...this.events.entries()].slice(-100), mutations: [...this.mutations.entries()].slice(-50) });
+
+    if (persistDiagnostic) {
+      console.log("[OVLIVE_NDOV_PERSIST_DONE]", JSON.stringify({
+        stream: this.snapshot.stream,
+        elapsedMs: Date.now() - persistStartedAt,
+        messageCount: this.snapshot.messageCount,
+      }));
+    }
   }
 
   async alarm() {
@@ -491,8 +610,72 @@ export class NdovFeedHub extends DurableObject {
       await this.persist(true);
 
       while (Date.now() < deadline && !this.stopRequested) {
-        const frame = await this.withReadTimeout(buffered.readFrame(), Math.max(1, deadline - Date.now()), 'stream frame', true);
-        if (!frame) break;
+        const lastMessageTimeMs = Date.parse(
+          this.snapshot.latestMessageAt ?? this.snapshot.startedAt ?? ""
+        );
+        const lastPayloadMs = Number.isFinite(lastMessageTimeMs)
+          ? lastMessageTimeMs
+          : Date.now();
+        const idleAgeMs = Math.max(0, Date.now() - lastPayloadMs);
+
+        if (idleAgeMs >= AUTO_DATA_IDLE_RECONNECT_MS) {
+          console.log("[OVLIVE_NDOV_IDLE_TIMEOUT]", JSON.stringify({
+            stream, stage: "loop-top",
+            idleAgeSeconds: Math.floor(idleAgeMs / 1000),
+            messageCount: this.snapshot.messageCount,
+            latestMessageAt: this.snapshot.latestMessageAt,
+          }));
+          this.snapshot.warnings.push(
+            `Geen NDOV-data ontvangen gedurende ${Math.floor(idleAgeMs / 1000)} seconden; verbinding wordt vernieuwd.`
+          );
+          break;
+        }
+
+        const sessionRemainingMs = Math.max(1, deadline - Date.now());
+        const idleRemainingMs = Math.max(1, AUTO_DATA_IDLE_RECONNECT_MS - idleAgeMs);
+        const frame = await this.withReadTimeout(
+          buffered.readFrame(),
+          Math.min(sessionRemainingMs, idleRemainingMs),
+          'stream frame',
+          true,
+          () => {
+            // Promise.race annuleert de onderliggende socketlezing niet.
+            // Stop daarom de reader en socket direct bij een lees-time-out.
+            try {
+              if (reader) {
+                void reader.cancel('NDOV stream read timeout').catch(() => {});
+              }
+            } catch {}
+            try {
+              if (socket) void socket.close().catch(() => {});
+            } catch {}
+          }
+        );
+
+        if (!frame) {
+          const timeoutMessageTimeMs = Date.parse(
+            this.snapshot.latestMessageAt ?? this.snapshot.startedAt ?? ""
+          );
+          const timeoutBaseMs = Number.isFinite(timeoutMessageTimeMs)
+            ? timeoutMessageTimeMs
+            : Date.now();
+          const timeoutIdleMs = Math.max(0, Date.now() - timeoutBaseMs);
+
+          console.log("[OVLIVE_NDOV_READ_TIMEOUT]", JSON.stringify({
+            stream,
+            idleAgeSeconds: Math.floor(timeoutIdleMs / 1000),
+            sessionElapsedSeconds: Math.floor((Date.now() - Date.parse(this.snapshot.startedAt)) / 1000),
+            messageCount: this.snapshot.messageCount,
+            latestMessageAt: this.snapshot.latestMessageAt,
+          }));
+
+          if (timeoutIdleMs >= AUTO_DATA_IDLE_RECONNECT_MS) {
+            this.snapshot.warnings.push(
+              `Geen NDOV-data ontvangen gedurende ${Math.floor(timeoutIdleMs / 1000)} seconden; verbinding wordt vernieuwd.`
+            );
+          }
+          break;
+        }
         if (frame.command) {
           const command = parseCommandBody(frame.body, greeting.negotiatedMinor);
           if (command.name === 'PING') {
@@ -565,6 +748,13 @@ export class NdovFeedHub extends DurableObject {
         multipart = [];
       }
       if (stream === 'kv78') this.pruneRows();
+      console.log("[OVLIVE_NDOV_COLLECT_LOOP_EXIT]", JSON.stringify({
+        stream,
+        stopRequested: this.stopRequested,
+        deadlineReached: Date.now() >= deadline,
+        latestMessageAt: this.snapshot.latestMessageAt,
+        messageCount: this.snapshot.messageCount,
+      }));
       this.snapshot = { ...this.snapshot, state: this.stopRequested ? 'stopped' : 'complete', finishedAt: new Date().toISOString(), ok: true, error: null };
       await this.persist(true, true);
     } catch (error) {
@@ -580,19 +770,49 @@ export class NdovFeedHub extends DurableObject {
       };
       await this.persist(true, true);
     } finally {
-      if (socket) { try { await socket.close(); } catch {} }
-      if (reader) { try { await reader.cancel(); } catch {} }
+      // Start beide opruimacties voordat we op een van beide wachten.
+      const cleanup = [];
+      try {
+        if (reader) {
+          cleanup.push(Promise.resolve(reader.cancel()).catch(() => {}));
+        }
+      } catch {}
+      try {
+        if (socket) {
+          cleanup.push(Promise.resolve(socket.close()).catch(() => {}));
+        }
+      } catch {}
+
+      // Laat een geblokkeerde opruimactie de collector niet onbeperkt vasthouden.
+      let cleanupTimer;
+      await Promise.race([
+        Promise.all(cleanup),
+        new Promise((resolve) => {
+          cleanupTimer = setTimeout(resolve, 2000);
+        }),
+      ]);
+      if (cleanupTimer) clearTimeout(cleanupTimer);
+
       if (writer) { try { writer.releaseLock(); } catch {} }
     }
   }
 
-  async withReadTimeout(promise, ms, label, returnNull = false) {
+  async withReadTimeout(promise, ms, label, returnNull = false, onTimeout = null) {
     let timer;
     try {
       return await Promise.race([
         promise,
         new Promise((resolve, reject) => {
-          timer = setTimeout(() => returnNull ? resolve(null) : reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+          timer = setTimeout(() => {
+            if (returnNull) {
+              try {
+                if (typeof onTimeout === 'function') onTimeout();
+              } catch {}
+              resolve(null);
+              return;
+            }
+            reject(new Error(`${label} timed out after ${ms} ms`));
+          }, ms);
         }),
       ]);
     } finally { if (timer) clearTimeout(timer); }

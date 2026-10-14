@@ -1,0 +1,65 @@
+node_modules/
+.wrangler/
+.dev.vars
+.DS_Store
+
+# OVLive-safe-git-excludes
+node_modules/
+.wrangler/
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.log
+.DS_Store
+__pycache__/
+.venv/
+openov-env/
+coverage/
+dist/
+backups/
+*.bak
+
+# Lokale OVLive-backups en configuratie
+.backup-*/
+.patch-backups/
+backups/
+node_modules/
+.wrangler/
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.log
+.DS_Store
+__pycache__/
+.venv/
+openov-env/
+coverage/
+
+# OVLive generated backup exclusions
+*.bak
+*.bak-*
+*.before-*
+*.backup-*
+
+# OVLive audit: generated route data stays local; regenerate when needed.
+/public/ndov-openov-route-crosswalk/routes/
+
+# Local and historical backup files
+.backup-*/
+.patch-backups/
+*.bak
+*.bak-*
+*.before-*
+*.backup-*

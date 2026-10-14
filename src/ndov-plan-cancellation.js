@@ -84,6 +84,26 @@ function routeNumericId(leg) {
   return match?.[1] ?? null;
 }
 
+let openovServiceCalendarPromise = null;
+
+async function getOpenovServiceCalendar(env) {
+  if (!openovServiceCalendarPromise) {
+    openovServiceCalendarPromise = readAssetJson(
+      env,
+      `${OPENOV_ROUTE_CROSSWALK_ROOT}/service-calendar.json`
+    ).catch((error) => {
+      openovServiceCalendarPromise = null;
+      throw error;
+    });
+  }
+
+  const calendar = await openovServiceCalendarPromise;
+  if (!calendar || typeof calendar !== "object" || Array.isArray(calendar)) {
+    throw new Error("OpenOV-servicekalender heeft een ongeldig formaat.");
+  }
+  return calendar;
+}
+
 async function getOpenovRouteCrosswalk(env, routeId) {
   let manifest;
   try {
@@ -110,7 +130,24 @@ async function getOpenovRouteCrosswalk(env, routeId) {
         if (!name || name.includes("..") || name.includes("/")) throw new Error("Ongeldige route-shardnaam in OpenOV-manifest.");
         const rows = await readAssetJson(env, `${OPENOV_ROUTE_CROSSWALK_ROOT}/routes/${name}`);
         if (!Array.isArray(rows)) throw new Error(`OpenOV-route-shard ${name} is geen JSON-array.`);
-        all.push(...rows);
+        if (Number(manifest?.serviceCalendarDateCount ?? 0) > 0 && manifest?.serviceIdsEmbedded !== true) {
+          const servicesName = name.replace(/\.json$/i, "-services.json");
+          const serviceRows = await readAssetJson(
+            env,
+            `${OPENOV_ROUTE_CROSSWALK_ROOT}/routes/${servicesName}`
+          );
+          if (!Array.isArray(serviceRows) || serviceRows.length !== rows.length) {
+            throw new Error(`OpenOV-service-sidecar ${servicesName} ontbreekt of is niet uitgelijnd.`);
+          }
+          all.push(...rows.map((row, index) => ({
+            ...row,
+            serviceIds: Array.isArray(serviceRows[index])
+              ? serviceRows[index].map(String)
+              : []
+          })));
+        } else {
+          all.push(...rows);
+        }
       }
       return all;
     })().catch((error) => {
@@ -122,7 +159,13 @@ async function getOpenovRouteCrosswalk(env, routeId) {
   }
   try {
     const patterns = await promise;
-    return { indexedRoute: true, patterns, generatedAt: manifest?.generatedAt ?? null, error: null };
+    return {
+      indexedRoute: true,
+      patterns,
+      generatedAt: manifest?.generatedAt ?? null,
+      serviceCalendarDateCount: Number(manifest?.serviceCalendarDateCount ?? 0),
+      error: null
+    };
   } catch (error) {
     // A route listed in the manifest but missing a shard is not safe to resolve via an old numeric ID.
     return { indexedRoute: true, patterns: [], generatedAt: manifest?.generatedAt ?? null, error: error instanceof Error ? error.message : "OpenOV-route-shard niet beschikbaar." };
@@ -158,7 +201,7 @@ function findPatternStop(pattern, stopId, afterIndex = -1) {
  * It returns a realtimeTripId only if every available anchor agrees and all best
  * candidates point to one unique realtime_trip_id.
  */
-export function matchOpenovRoutePattern(leg, patterns) {
+export function matchOpenovRoutePattern(leg, patterns, activeServiceIds = null) {
   const wantedRoute = routeNumericId(leg);
   const from = leg?.tripFrom ?? null;
   const to = leg?.tripTo ?? null;
@@ -177,9 +220,19 @@ export function matchOpenovRoutePattern(leg, patterns) {
   const legDeparture = valueOf(leg?.from, "scheduledDeparture", "departure") ?? valueOf(leg, "scheduledStartTime", "startTime");
   const legArrival = valueOf(leg?.to, "scheduledArrival", "arrival") ?? valueOf(leg, "scheduledEndTime", "endTime");
   const intermediates = Array.isArray(leg?.intermediateStops) ? leg.intermediateStops : [];
+  // Selecteer actieve diensten vóór de route- en haltevergelijkingen.
+  // Zonder kalenderinformatie blijft legacygedrag behouden.
+  const allPatterns = Array.isArray(patterns) ? patterns : [];
+  const patternsForMatching = activeServiceIds instanceof Set
+    ? allPatterns.filter((pattern) =>
+        Array.isArray(pattern?.serviceIds) &&
+        pattern.serviceIds.some((id) => activeServiceIds.has(String(id)))
+      )
+    : allPatterns;
+
   const matches = [];
 
-  for (const pattern of Array.isArray(patterns) ? patterns : []) {
+  for (const pattern of patternsForMatching) {
     if (String(pattern?.routeId ?? "") !== wantedRoute) continue;
     if (!Array.isArray(pattern?.stops) || pattern.stops.length < 2 || !pattern?.realtimeTripId) continue;
     if (headsign && String(pattern.headsign ?? "").trim().toLocaleLowerCase("nl-NL") !== headsign) continue;
@@ -218,6 +271,31 @@ export function matchOpenovRoutePattern(leg, patterns) {
       cursor = alight.index;
     }
     matches.push(pattern);
+  }
+
+  // Prefer the original OpenOV GTFS trip ID when it uniquely identifies
+  // one of the candidates already matching route, times and stop sequence.
+  const sourceTripId = String(leg?.tripId ?? leg?.trip?.id ?? "")
+    .match(/(?:^|_)nl-OpenOV_(\d+)$/i)?.[1] ?? null;
+
+  if (sourceTripId) {
+    const exactMatches = matches.filter(
+      (pattern) => String(pattern?.openovTripId ?? "").trim() === sourceTripId
+    );
+    const exactIds = [...new Set(
+      exactMatches
+        .map((pattern) => String(pattern?.realtimeTripId ?? "").trim())
+        .filter(Boolean)
+    )];
+
+    if (exactMatches.length > 0 && exactIds.length === 1) {
+      return {
+        realtimeTripId: exactIds[0],
+        reason: "exact_openov_trip_id_match",
+        candidateCount: exactMatches.length,
+        pattern: exactMatches[0],
+      };
+    }
   }
 
   const ids = [...new Set(matches.map((pattern) => String(pattern.realtimeTripId).trim()).filter(Boolean))];
@@ -274,7 +352,104 @@ async function resolveRealtimeTripForLeg(env, item) {
     const crosswalk = await getOpenovRouteCrosswalk(env, routeId);
     if (crosswalk.indexedRoute) {
       if (crosswalk.error) return { parsed: null, source: "openov-route-crosswalk", generatedAt: crosswalk.generatedAt, error: crosswalk.error, indexedRoute: true };
-      const match = matchOpenovRoutePattern(item.leg, crosswalk.patterns);
+      let activeServiceIds = null;
+
+      if (Number(crosswalk.serviceCalendarDateCount ?? 0) > 0) {
+        const serviceDate = String(item?.identity?.serviceDate ?? "")
+          .replace(/\D/g, "")
+          .slice(0, 8);
+
+        if (!/^\d{8}$/.test(serviceDate)) {
+          return {
+            parsed: null,
+            realtimeTripId: null,
+            source: "openov-route-crossmatch",
+            reason: "missing_service_date_for_calendar_filter",
+            generatedAt: crosswalk.generatedAt,
+            indexedRoute: true
+          };
+        }
+
+        let serviceCalendar;
+        try {
+          serviceCalendar = await getOpenovServiceCalendar(env);
+        } catch (error) {
+          return {
+            parsed: null,
+            realtimeTripId: null,
+            source: "openov-route-crossmatch",
+            reason: "service_calendar_unavailable",
+            error: error instanceof Error ? error.message : String(error),
+            generatedAt: crosswalk.generatedAt,
+            indexedRoute: true
+          };
+        }
+
+        const activeForDate = serviceCalendar[serviceDate];
+        if (!Array.isArray(activeForDate) || activeForDate.length === 0) {
+          return {
+            parsed: null,
+            realtimeTripId: null,
+            source: "openov-route-crossmatch",
+            reason: "service_date_not_in_calendar",
+            generatedAt: crosswalk.generatedAt,
+            indexedRoute: true
+          };
+        }
+
+        activeServiceIds = new Set(activeForDate.map((id) => String(id)));
+      }
+
+      const match = matchOpenovRoutePattern(
+        item.leg,
+        crosswalk.patterns,
+        activeServiceIds
+      );
+
+      // If the full route pattern is ambiguous, use the exact original
+      // Transitous/OpenOV trip-ID crosswalk only as a validated tie-breaker.
+      // The mapped realtime ID must already be one of the route matcher candidates.
+      if (
+        !match.realtimeTripId &&
+        match.reason === "ambiguous_route_time_stop_match" &&
+        item?.identity?.tripId
+      ) {
+        try {
+          const numericEntry = await getCrosswalkEntry(env, item.identity.tripId);
+          const numericRealtimeTripId = String(
+            numericEntry?.realtimeTripId ?? ""
+          ).trim();
+          const candidateIds = match.candidateRealtimeTripIds ?? [];
+
+          if (
+            numericRealtimeTripId &&
+            candidateIds.includes(numericRealtimeTripId)
+          ) {
+            const parsed = parseRealtimeTripId(numericRealtimeTripId);
+
+            if (parsed) {
+              return {
+                parsed,
+                realtimeTripId: numericRealtimeTripId,
+                source: "openov-route-crossmatch",
+                method: "exact route + full-trip times + stops + validated original trip-ID crosswalk",
+                generatedAt:
+                  crosswalk.generatedAt ??
+                  numericEntry?.manifest?.generatedAt ??
+                  null,
+                indexedRoute: true,
+                reason: "resolved_by_exact_trip_id_crosswalk",
+                candidateCount: match.candidateCount,
+                candidateRealtimeTripIds: candidateIds,
+                candidatePatternDetails: match.candidatePatternDetails ?? [],
+              };
+            }
+          }
+        } catch {
+          // An unavailable legacy crosswalk must never force a guess.
+        }
+      }
+
       return {
         parsed: parseRealtimeTripId(match.realtimeTripId),
         realtimeTripId: match.realtimeTripId,
@@ -383,7 +558,7 @@ async function getKv78Snapshot(env) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName("kv78");
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=kv78`);
+  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=kv78&identityDiagnostics=1`);
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `KV78-status gaf HTTP ${response.status}.`);
   return snapshot;
@@ -827,6 +1002,22 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   const feedTimeMs = timestampMs(latestMessageAt);
   const feedAgeMs = feedTimeMs === null ? null : Date.now() - feedTimeMs;
   if (snapshot.state === "error" || feedAgeMs === null || feedAgeMs < -30_000 || feedAgeMs > MAX_BISON_AGE_MS) {
+    console.log("[OVLIVE_BISON_STALE_DIAG]", JSON.stringify({
+      state: snapshot.state ?? null,
+      latestMessageAt: latestMessageAt ?? null,
+      feedAgeSeconds: feedAgeMs === null ? null : Math.round(feedAgeMs / 1000),
+      startedAt: snapshot.startedAt ?? null,
+      finishedAt: snapshot.finishedAt ?? null,
+      sessionSeconds: snapshot.sessionSeconds ?? null,
+      messageCount: snapshot.messageCount ?? null,
+      rawBytes: snapshot.rawBytes ?? null,
+      envelopeCounts: snapshot.envelopeCounts ?? null,
+      continuousEnabled: snapshot.continuousEnabled ?? null,
+      nextAlarmAt: snapshot.nextAlarmAt ?? null,
+      storedKv6TripCount: snapshot.storedKv6TripCount ?? null,
+      error: snapshot.error ?? null,
+      warnings: Array.isArray(snapshot.warnings) ? snapshot.warnings.slice(-5) : [],
+    }));
     plan.ndovRealtimeMeta = {
       ...baseMeta,
       status: "stale",
@@ -965,6 +1156,19 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           if (sourceAge < -30_000 || sourceAge > MAX_BISON_AGE_MS) continue;
         }
       }
+      console.log("[OVLIVE_KV6_MATCH_RESULT]", JSON.stringify({
+        transitousTripId: item.identity?.originalTripId ?? null,
+        ndovIdentity: item.identityKey ?? null,
+        punctualitySeconds: Math.trunc(punctualitySeconds),
+        vehicleNumber: valueOf(event, "vehicleNumber") ?? null,
+        currentStopCode: valueOf(event, "userStopCode") ?? null,
+        passageSequenceNumber: valueOf(event, "passageSequenceNumber") ?? null,
+        eventType: valueOf(event, "eventType") ?? null,
+        sourceTimestamp: sourceTime ?? null,
+        receivedAt: event.punctualityReceivedAt,
+        feedAgeSeconds: Math.round(ageMs / 1000),
+      }));
+
       const delaySeconds = Math.trunc(punctualitySeconds);
       const kv6Observation = {
         status: "kv6_live",
@@ -1004,6 +1208,15 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let openovStopPlaceIndex = null;
   try {
     const kv78Snapshot = await getKv78Snapshot(env);
+    const kv78CachedRows = Array.isArray(kv78Snapshot.latestRows)
+      ? kv78Snapshot.latestRows
+      : [];
+    const kv78WatchedRows = kv78CachedRows.filter((row) => {
+      const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
+      const line = String(row?.linePlanningNumber ?? "").trim().toUpperCase();
+      return owner === "CXX" && ["U005", "U011", "U073"].includes(line);
+    });
+
     kv78FeedState = kv78Snapshot.state ?? "unknown";
     const kv78LatestMs = timestampMs(valueOf(kv78Snapshot, "latestMessageAt"));
     const kv78AgeMs = kv78LatestMs === null ? null : Date.now() - kv78LatestMs;
@@ -1041,7 +1254,9 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       }
 
       for (const { item, rows } of rowResults) {
-        if (!rows.length) continue;
+        if (!rows.length) {
+          continue;
+        }
         const scheduledDeparture = valueOf(item.leg.from, "departure") ?? valueOf(item.leg, "startTime", "departureTime");
         const scheduledArrival = valueOf(item.leg.to, "arrival") ?? valueOf(item.leg, "endTime", "arrivalTime");
         const operationDate = item.identity?.serviceDate ?? item.realtimeIdentity?.operationDate ?? item.identity?.operationDate ?? null;

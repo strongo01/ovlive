@@ -97,6 +97,27 @@ assert.ok(ambiguous.candidateRealtimeTripIds.includes('CXX:U073:9999'), 'the con
 assert.equal(ambiguous.candidatePatternDetails.length, 2, 'ambiguous pattern summaries should be available');
 assert.ok(ambiguous.candidatePatternDetails.every((item) => Number.isInteger(item.stopCount)), 'each summary reports its stop count');
 assert.ok(ambiguous.candidatePatternDetails.every((item) => Array.isArray(item.segmentStops)), 'each summary reports the matched segment stops');
+
+const exactSourceTripId = "391225406";
+const exactSourceTripLeg = {
+  ...leg,
+  tripId: String(leg.tripId).replace(
+    /nl-OpenOV_\d+$/i,
+    `nl-OpenOV_${exactSourceTripId}`
+  ),
+};
+const exactSourceTripCandidates = [
+  { ...matched.pattern, realtimeTripId: "CXX:U073:44", openovTripId: exactSourceTripId },
+  { ...matched.pattern, realtimeTripId: "CXX:U073:6024", openovTripId: "999999999" },
+];
+const exactSourceTripMatch = matchOpenovRoutePattern(
+  exactSourceTripLeg,
+  exactSourceTripCandidates
+);
+assert.equal(exactSourceTripMatch.realtimeTripId, "CXX:U073:44");
+assert.equal(exactSourceTripMatch.reason, "exact_openov_trip_id_match");
+console.log("PASS: oorspronkelijke GTFS-rit-ID onderscheidt dubbele routepatronen");
+
 console.log('PASS: exact route + full-trip start/end + segment stop sequence resolves CXX:U073:7054');
 console.log('PASS: wrong start time is rejected');
 console.log('PASS: wrong route is rejected');

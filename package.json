@@ -14,7 +14,8 @@
     "ndov:kv78-delay-selftest": "node scripts/ndov-kv78-delay-selftest.mjs",
     "ndov:kv6-live-selftest": "node scripts/ndov-kv6-live-selftest.mjs",
     "ndov:build-openov-route-crosswalk": "python3 scripts/build-ndov-openov-route-crosswalk.py",
-    "ndov:openov-route-crossmatch-selftest": "node scripts/ndov-openov-route-crossmatch-selftest.mjs"
+    "ndov:openov-route-crossmatch-selftest": "node scripts/ndov-openov-route-crossmatch-selftest.mjs",
+    "openov:prediction-selftest": "node scripts/openov-realtime-prediction-selftest.mjs"
   },
   "dependencies": {
     "gtfs-realtime-bindings": "^1.1.1"

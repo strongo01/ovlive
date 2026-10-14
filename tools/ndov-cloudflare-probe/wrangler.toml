@@ -1,0 +1,5 @@
+name = "ovlive-ndov-cloudflare-probe-local-only"
+main = "src/index.js"
+compatibility_date = "2026-10-11"
+workers_dev = false
+preview_urls = false
