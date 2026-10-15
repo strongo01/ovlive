@@ -312,13 +312,16 @@ console.log("PASS: voertuigpositie ouder dan 180 seconden wordt geweigerd");
 
 
 const propagationFeedTime = Date.parse("2026-10-15T09:47:26.000Z") / 1000;
-const propagationEventTime = Date.parse("2026-10-15T09:46:00.000Z") / 1000;
+// Op halte 16: aankomst 30 seconden vertraagd, vertrek 40 seconden vertraagd.
+// De vertrekgebeurtenis is de meest recente geplande gebeurtenis vóór de doelhalte.
 const propagationRecord = {
   feedTimestampSeconds: propagationFeedTime,
   stopUpdates: [{
     stopId: "3923896", stopSequence: 16,
-    arrivalTime: propagationEventTime, arrivalDelaySeconds: 0,
-    departureTime: propagationEventTime, departureDelaySeconds: 0,
+    arrivalTime: Date.parse("2026-10-15T09:46:30.000Z") / 1000,
+    arrivalDelaySeconds: 30,
+    departureTime: Date.parse("2026-10-15T09:47:00.000Z") / 1000,
+    departureDelaySeconds: 40,
     scheduleRelationship: "SCHEDULED"
   }]
 };
@@ -328,9 +331,10 @@ const propagatedDeparture = findPropagatedRealtimeEvent(
   { nowSeconds: propagationFeedTime, targetStopId: "3923746" }
 );
 assert.ok(propagatedDeparture);
-assert.equal(propagatedDeparture.time, "2026-10-15T09:58:00.000Z");
-assert.equal(propagatedDeparture.delaySeconds, 0);
+assert.equal(propagatedDeparture.time, "2026-10-15T09:58:40.000Z");
+assert.equal(propagatedDeparture.delaySeconds, 40);
 assert.equal(propagatedDeparture.sourceStopId, "3923896");
+assert.equal(propagatedDeparture.sourceEventTime, "2026-10-15T09:47:00.000Z");
 console.log("PASS: vertraging wordt naar een volgende vertrekhalte doorgegeven");
 
 const propagatedArrival = findPropagatedRealtimeEvent(
@@ -338,7 +342,7 @@ const propagatedArrival = findPropagatedRealtimeEvent(
   { nowSeconds: propagationFeedTime, targetStopId: "3924104" }
 );
 assert.ok(propagatedArrival);
-assert.equal(propagatedArrival.time, "2026-10-15T10:11:00.000Z");
+assert.equal(propagatedArrival.time, "2026-10-15T10:11:40.000Z");
 console.log("PASS: vertraging wordt naar een latere aankomsthalte doorgegeven");
 
 assert.equal(
