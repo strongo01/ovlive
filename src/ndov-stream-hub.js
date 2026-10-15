@@ -778,6 +778,49 @@ export class NdovFeedHub extends DurableObject {
               };
             })()
           : null;
+      const bisonIdentityDiagnostics =
+        stream === "bison" && url.searchParams.get("identityDiagnostics") === "1"
+          ? (() => {
+              const currentDate = normalizeOperatingDate(currentOperatingDateAmsterdam());
+              const trips = [];
+
+              for (const event of state.events.values()) {
+                const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
+                const date = normalizeOperatingDate(event?.operationDate);
+                const line = String(event?.linePlanningNumber ?? "").trim().toUpperCase();
+                if (owner !== "CXX" || date !== currentDate || !["U005", "U011", "U073"].includes(line)) continue;
+
+                const journey = String(event?.journeyNumber ?? "").trim();
+                const reinforcement = String(event?.reinforcementNumber ?? "0").trim() || "0";
+                if (!journey) continue;
+
+                const receivedAt = String(event?.receivedAt ?? "");
+                const punctualityAt = String(event?.punctualityReceivedAt ?? "");
+                const punctualityMs = Date.parse(punctualityAt);
+                const ageMs = Number.isFinite(punctualityMs) ? Date.now() - punctualityMs : null;
+                trips.push({
+                  identity: [owner, date, line, journey, reinforcement].join("|"),
+                  eventType: String(event?.eventType ?? "").trim().toUpperCase() || null,
+                  receivedAt: receivedAt || null,
+                  punctualityPresent: event?.punctualitySeconds !== null && event?.punctualitySeconds !== undefined,
+                  punctualityReceivedAt: punctualityAt || null,
+                  punctualityAgeSeconds: ageMs === null ? null : Math.round(ageMs / 1000),
+                });
+              }
+
+              trips.sort((a, b) => String(b.receivedAt ?? "").localeCompare(String(a.receivedAt ?? "")));
+              return {
+                currentDate,
+                storedTripCount: state.events.size,
+                matchingTripCount: trips.length,
+                byLine: Object.fromEntries(["U005", "U011", "U073"].map((line) => [
+                  line,
+                  trips.filter((item) => item.identity.split("|")[2] === line).length,
+                ])),
+                trips: trips.slice(0, 80),
+              };
+            })()
+          : null;
       const currentMutations = flattenCurrentMutations(state.mutations, 300);
       return Response.json({
         ...base,
@@ -785,6 +828,7 @@ export class NdovFeedHub extends DurableObject {
           ? [...state.rows.values()]
           : [...state.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
         latestEvents: [...state.events.values()].slice(-100),
+        bisonIdentityDiagnostics,
         storedKv6TripCount: state.events.size,
         latestMutations: currentMutations,
         storedKv78RowCount: state.rows.size,
