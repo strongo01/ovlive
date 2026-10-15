@@ -17,7 +17,11 @@ function createEnv({ latestMessageAt = now(), latestMutations = [], state = 'com
       schemaVersion: 1,
       generatedAt: now(),
       serviceCalendarDateCount: 0,
-      routes: { '146888': ['route-146888.json'] },
+      routes: {
+        '146888': ['route-146888.json'],
+        // Deliberately missing shard: it must diagnose only this leg.
+        '146889': ['route-146889-missing.json'],
+      },
     }],
     ['/ndov-openov-route-crosswalk/routes/route-146888.json', [{
       routeId: '146888',
@@ -179,6 +183,42 @@ const cancellation = {
   });
   assert.equal(plan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 1);
   console.log('PASS: NS-ritidentiteit blijft beschikbaar bij verouderde BISON-feed');
+}
+
+// A missing route shard must be shown on that leg, not erase other successful matches.
+{
+  const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const plan = { itineraries: [{ legs: [
+    {
+      mode: 'BUS',
+      routeId: 'nl-OpenOV_146888',
+      tripId: '20261014_11:20_nl-OpenOV_123456789',
+      tripFrom: { stopId: 'start-stop', scheduledDeparture: '11:20:00' },
+      tripTo: { stopId: 'end-stop', scheduledArrival: '12:00:00' },
+      from: { stopId: 'mid-from', scheduledDeparture: '11:30:00' },
+      to: { stopId: 'mid-to', scheduledArrival: '11:50:00' },
+    },
+    {
+      mode: 'BUS',
+      routeId: 'nl-OpenOV_146889',
+      tripId: '20261014_12:20_nl-OpenOV_123456790',
+      tripFrom: { stopId: 'start-stop', scheduledDeparture: '12:20:00' },
+      tripTo: { stopId: 'end-stop', scheduledArrival: '13:00:00' },
+      from: { stopId: 'mid-from', scheduledDeparture: '12:30:00' },
+      to: { stopId: 'mid-to', scheduledArrival: '12:50:00' },
+    },
+  ] }] };
+
+  await applyNdovCancellationsToPlan(plan, createEnv({ latestMessageAt: stale }));
+  const [mappedLeg, missingShardLeg] = plan.itineraries[0].legs;
+
+  assert.equal(mappedLeg.ndovRealtimeMatch, undefined,
+    'a healthy route crosswalk must remain resolved when another shard is missing');
+  assert.equal(missingShardLeg.ndovRealtimeMatch?.status, 'unavailable');
+  assert.equal(missingShardLeg.ndovRealtimeMatch?.reason, 'crosswalk_asset_unavailable');
+  assert.match(missingShardLeg.ndovRealtimeMatch?.error ?? '', /HTTP 404/);
+  assert.equal(plan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 1);
+  console.log('PASS: a missing NDOV route shard is diagnosed on one leg without erasing another leg match');
 }
 
 console.log('All NDOV plan-cancellation selftests passed.');
