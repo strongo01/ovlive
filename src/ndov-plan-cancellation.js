@@ -1019,16 +1019,24 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         candidatePatternDetails: resolution.candidatePatternDetails ?? [],
       });
       if (!resolution.parsed) {
-        // Expose ambiguity as diagnostic-only leg metadata. Never choose one of
-        // several conflicting NDOV trip IDs just to make realtime appear.
-        if (resolution.reason === "ambiguous_route_time_stop_match") {
-          item.leg.ndovRealtimeMatch = {
-            status: "ambiguous",
-            source: resolution.source ?? "openov-route-crossmatch",
-            reason: resolution.reason,
-            candidateCount: resolution.candidateCount ?? 0,
-          };
-        }
+        // Keep the failure reason attached to the affected leg. A missing or
+        // stale mapping is not proof that NDOV has no live data for this trip.
+        const reason = resolution.reason ??
+          (resolution.error ? "crosswalk_asset_unavailable" : "no_exact_realtime_trip_match");
+        item.leg.ndovRealtimeMatch = {
+          status: reason === "ambiguous_route_time_stop_match"
+            ? "ambiguous"
+            : resolution.error
+              ? "unavailable"
+              : "unmatched",
+          source: resolution.source ?? "openov-route-crossmatch",
+          reason,
+          error: resolution.error ?? null,
+          serviceDate: item.identity.serviceDate ?? null,
+          originalTripId: item.identity.originalTripId ?? null,
+          candidateCount: resolution.candidateCount ?? 0,
+          candidateRealtimeTripIds: resolution.candidateRealtimeTripIds ?? [],
+        };
         continue;
       }
       item.realtimeIdentity = resolution.parsed;
