@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/validate-realtime-assets.mjs && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "ndov:selftest": "node scripts/ndov-stream-selftest.mjs",
     "ndov:build-crosswalk": "python3 scripts/build-ndov-trip-crosswalk.py",
@@ -18,7 +18,8 @@
     "openov:prediction-selftest": "node scripts/openov-realtime-prediction-selftest.mjs",
     "ns:realtime-selftest": "node scripts/ns-train-realtime-selftest.mjs",
     "api:rate-limit-selftest": "node scripts/api-rate-limit-selftest.mjs",
-    "ndov:autocollect-safety-selftest": "node scripts/ndov-autocollect-safety-selftest.mjs"
+    "ndov:autocollect-safety-selftest": "node scripts/ndov-autocollect-safety-selftest.mjs",
+    "ndov:validate-assets": "node scripts/validate-realtime-assets.mjs"
   },
   "dependencies": {
     "gtfs-realtime-bindings": "^1.1.1"
