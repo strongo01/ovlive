@@ -371,7 +371,9 @@ export function findPropagatedRealtimeEvent(record, kind, scheduledValue, option
   candidates.sort((a, b) =>
     b.sourceScheduled - a.sourceScheduled ||
     (Number.isFinite(b.sequence) ? b.sequence : -1) -
-      (Number.isFinite(a.sequence) ? a.sequence : -1)
+      (Number.isFinite(a.sequence) ? a.sequence : -1) ||
+    (b.eventKind === "departure" ? 1 : 0) -
+      (a.eventKind === "departure" ? 1 : 0)
   );
 
   const best = candidates[0];
