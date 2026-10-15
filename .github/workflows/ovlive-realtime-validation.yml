@@ -63,6 +63,9 @@ jobs:
       - name: API rate-limit regression tests
         run: npm run api:rate-limit-selftest
 
+      - name: Public UI JavaScript syntax
+        run: node scripts/public-ui-syntax-selftest.mjs
+
       - name: Validate Wrangler Worker bundle without deploying
         run: npx wrangler deploy --dry-run
 
