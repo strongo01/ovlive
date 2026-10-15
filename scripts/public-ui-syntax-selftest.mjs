@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
-const blocks = [...html.matchAll(/<script\\b[^>]*>([\\s\\S]*?)<\\/script\\s*>/gi)]
+const blocks = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)]
   .map((match, index) => ({ index: index + 1, source: match[1].trim() }))
   .filter((block) => block.source.length > 0);
 
