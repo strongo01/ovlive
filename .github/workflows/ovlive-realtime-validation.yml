@@ -1,0 +1,103 @@
+name: OVLive realtime validation
+
+on:
+  push:
+    branches:
+      - assistant/realtime-propagation-validation-20261015
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ovlive-realtime-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: OpenOV realtime prediction regression tests
+        run: npm run openov:prediction-selftest
+
+      - name: NDOV stream regression tests
+        run: npm run ndov:selftest
+
+      - name: NDOV plan cancellation regression tests
+        run: npm run ndov:plan-selftest
+
+      - name: NDOV continuous collector regression tests
+        run: npm run ndov:continuous-selftest
+
+      - name: NDOV KV78 delay regression tests
+        run: npm run ndov:kv78-delay-selftest
+
+      - name: NDOV KV6 live regression tests
+        run: npm run ndov:kv6-live-selftest
+
+      - name: NDOV OpenOV route cross-match regression tests
+        run: npm run ndov:openov-route-crossmatch-selftest
+
+      - name: NDOV auto-collector safety regression tests
+        run: npm run ndov:autocollect-safety-selftest
+
+      - name: NS realtime regression tests
+        run: npm run ns:realtime-selftest
+
+      - name: API rate-limit regression tests
+        run: npm run api:rate-limit-selftest
+
+      - name: Validate Wrangler Worker bundle without deploying
+        run: npx wrangler deploy --dry-run
+
+      - name: Live /api/plan and OpenOV source cross-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_FILE="$RUNNER_TEMP/ovlive-wrangler.log"
+          ./node_modules/.bin/wrangler dev --ip 127.0.0.1 --port 8787 >"$LOG_FILE" 2>&1 &
+          WRANGLER_PID=$!
+          cleanup() {
+            kill "$WRANGLER_PID" 2>/dev/null || true
+            wait "$WRANGLER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          READY=0
+          for attempt in $(seq 1 45); do
+            if ! kill -0 "$WRANGLER_PID" 2>/dev/null; then
+              echo "Wrangler stopte voordat de lokale Worker gereed was."
+              cat "$LOG_FILE"
+              exit 1
+            fi
+            HTTP_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8787/__ovlive_ci_ready || true)"
+            if [ "$HTTP_STATUS" != "000" ] && [ -n "$HTTP_STATUS" ]; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "Lokale Worker werd niet binnen 45 seconden bereikbaar."
+            cat "$LOG_FILE"
+            exit 1
+          fi
+
+          OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/openov-live-plan-validation.mjs
