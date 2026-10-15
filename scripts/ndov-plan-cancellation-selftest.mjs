@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { applyNdovCancellationsToPlan } from '../src/ndov-plan-cancellation.js';
+
+const planCancellationSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
+assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
+  'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
+assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 5,
+  'snapshot, mutation, event, KV78 snapshot, and KV78 row reads must all use the shared collector object');
+
 
 const now = () => new Date().toISOString();
 function createEnv({ latestMessageAt = now(), latestMutations = [], state = 'complete' } = {}) {
