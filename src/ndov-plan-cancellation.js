@@ -5,6 +5,7 @@ const ACTIVE_KV6_EVENT_TYPES = new Set(["ONROUTE", "ONSTOP", "DEPARTURE", "ARRIV
 const CROSSWALK_ROOT = "/ndov-trip-crosswalk";
 const OPENOV_ROUTE_CROSSWALK_ROOT = "/ndov-openov-route-crosswalk";
 const ASSET_ORIGIN = "https://ovlive-assets.local";
+const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
 
 let manifestPromise = null;
 const shardCache = new Map();
@@ -527,7 +528,7 @@ async function getCrosswalkEntry(env, numericTripId) {
 
 async function getBisonSnapshot(env) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
-  const id = env.NDOV_FEEDS.idFromName("bison");
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
   const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison`);
   const snapshot = await response.json().catch(() => ({}));
@@ -538,7 +539,7 @@ async function getBisonSnapshot(env) {
 async function getCurrentBisonMutations(env, identities) {
   const unique = [...new Set(identities.filter(Boolean))];
   if (!unique.length) return [];
-  const id = env.NDOV_FEEDS.idFromName("bison");
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
   const all = [];
   for (let offset = 0; offset < unique.length; offset += 20) {
@@ -557,7 +558,7 @@ async function getCurrentBisonMutations(env, identities) {
 
 async function getKv78Snapshot(env) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
-  const id = env.NDOV_FEEDS.idFromName("kv78");
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
   const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=kv78&identityDiagnostics=1`);
   const snapshot = await response.json().catch(() => ({}));
@@ -567,7 +568,7 @@ async function getKv78Snapshot(env) {
 
 async function getCurrentKv78Rows(env, identity) {
   if (!identity || !env?.NDOV_FEEDS) return [];
-  const id = env.NDOV_FEEDS.idFromName("kv78");
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
   const url = new URL(`${ASSET_ORIGIN}/rows`);
   url.searchParams.set("stream", "kv78");
@@ -910,7 +911,7 @@ function kv78StopEvent(row, delayField, match = null) {
 async function getCurrentBisonEvents(env, identities) {
   const unique = [...new Set(identities.filter(Boolean))];
   if (!unique.length) return [];
-  const id = env.NDOV_FEEDS.idFromName("bison");
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
   const all = [];
   for (let offset = 0; offset < unique.length; offset += 20) {
