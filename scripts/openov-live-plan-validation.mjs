@@ -112,11 +112,19 @@ async function main() {
     const status = String(leg.openovRealtime?.status ?? "missing");
     statusCounts[status] = (statusCounts[status] ?? 0) + 1;
   }
+  const ndovStatusCounts = {};
+  for (const leg of legs) {
+    const status = String(leg.ndovRealtime?.status ?? "no_ndov_match");
+    ndovStatusCounts[status] = (ndovStatusCounts[status] ?? 0) + 1;
+  }
+
   console.log(JSON.stringify({
     itineraries: Array.isArray(plan.itineraries) ? plan.itineraries.length : null,
     totalLegs: legs.length,
     openovLegs: openovLegs.length,
-    openovStatusCounts: statusCounts
+    openovStatusCounts: statusCounts,
+    ndovStatusCounts,
+    ndovRealtimeMeta: plan.ndovRealtimeMeta ?? null
   }, null, 2));
 
   for (const [index, leg] of openovLegs.entries()) {
@@ -134,7 +142,14 @@ async function main() {
       arrivalStopMatchMethod: realtime.arrivalStopMatchMethod ?? null,
       departure: realtime.departure ?? null,
       arrival: realtime.arrival ?? null,
-      freshnessNote: realtime.freshnessNote ?? null
+      freshnessNote: realtime.freshnessNote ?? null,
+      ndovStatus: leg.ndovRealtime?.status ?? null,
+      ndovSource: leg.ndovRealtime?.source ?? null,
+      ndovIdentity: leg.ndovRealtime?.identity ?? null,
+      ndovEventType: leg.ndovRealtime?.eventType ?? leg.ndovRealtime?.kv6?.eventType ?? null,
+      ndovPunctualitySeconds: leg.ndovRealtime?.punctualitySeconds ?? leg.ndovRealtime?.kv6?.punctualitySeconds ?? null,
+      ndovFeedAgeSeconds: leg.ndovRealtime?.feedAgeSeconds ?? leg.ndovRealtime?.kv6?.feedAgeSeconds ?? null,
+      ndovMatchReason: leg.ndovRealtimeMatch?.reason ?? null
     }, null, 2));
   }
 
