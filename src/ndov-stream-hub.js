@@ -23,6 +23,7 @@ const CONFIG = {
 const KV6_EVENT_LIMIT = 30000;
 const KV6_EVENT_RETENTION_MS = 10 * 60 * 1000;
 const KV6_EVENT_STATUS_FRESH_MS = 180 * 1000;
+const KV6_ACTIVE_EVENT_TYPES = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIVAL']);
 const KV78_ROW_LIMIT = 30000; // rolling, durable row cache; still bounded by design
 const KV78_STATUS_SAMPLE_LIMIT = 5000;
 const KV17_STATE_LIMIT = 5000;
@@ -918,10 +919,38 @@ export class NdovFeedHub extends DurableObject {
         return lookup ? [lookup.owner, lookup.date, lookup.line, lookup.journey, lookup.reinforcement].join('|') : null;
       }).filter(Boolean))].slice(0, 20);
       this.pruneEvents(stream);
+      const now = Date.now();
       const events = identities.map((identity) => state.events.get(identity)).filter((event) => {
         if (!event) return false;
-        const receivedMs = Date.parse(event.punctualityReceivedAt ?? '');
-        return Number.isFinite(receivedMs) && receivedMs <= Date.now() + 30000 && Date.now() - receivedMs <= KV6_EVENT_STATUS_FRESH_MS && event.punctualitySeconds !== null && event.punctualitySeconds !== undefined;
+        const receivedMs = Date.parse(event.receivedAt ?? '');
+        const punctualityReceivedMs = Date.parse(event.punctualityReceivedAt ?? '');
+        const eventType = String(event.eventType ?? '').toUpperCase();
+        const activeEventType = KV6_ACTIVE_EVENT_TYPES.has(eventType);
+        const freshActivity = Number.isFinite(receivedMs) &&
+          receivedMs <= now + 30000 &&
+          now - receivedMs <= KV6_EVENT_STATUS_FRESH_MS &&
+          activeEventType;
+        const freshPunctuality = Number.isFinite(punctualityReceivedMs) &&
+          punctualityReceivedMs <= now + 30000 &&
+          now - punctualityReceivedMs <= KV6_EVENT_STATUS_FRESH_MS &&
+          event.punctualitySeconds !== null &&
+          event.punctualitySeconds !== undefined;
+        return freshActivity || freshPunctuality;
+      }).map((event) => {
+        const punctualityReceivedMs = Date.parse(event.punctualityReceivedAt ?? '');
+        const freshPunctuality = Number.isFinite(punctualityReceivedMs) &&
+          punctualityReceivedMs <= now + 30000 &&
+          now - punctualityReceivedMs <= KV6_EVENT_STATUS_FRESH_MS &&
+          event.punctualitySeconds !== null &&
+          event.punctualitySeconds !== undefined;
+        // A newer ONROUTE/ONSTOP message can refresh activity without refreshing
+        // the previous punctuality value. Never present that old value as current.
+        return freshPunctuality ? event : {
+          ...event,
+          punctualitySeconds: null,
+          punctualityTimestamp: null,
+          punctualityReceivedAt: null,
+        };
       });
       return Response.json({ ok: true, state: state.snapshot.state, latestMessageAt: state.snapshot.latestMessageAt, returnedCount: events.length, events }, { headers: { 'cache-control': 'no-store' } });
     }
@@ -1062,7 +1091,22 @@ export class NdovFeedHub extends DurableObject {
     for (const [key, event] of state.events.entries()) {
       const received = Date.parse(event?.receivedAt ?? '');
       const punctualityReceived = Date.parse(event?.punctualityReceivedAt ?? '');
-      if (!Number.isFinite(received) || received < cutoff || (Number.isFinite(punctualityReceived) && punctualityReceived < now - KV6_EVENT_STATUS_FRESH_MS)) state.events.delete(key);
+      const eventType = String(event?.eventType ?? '').toUpperCase();
+      const activeEventType = KV6_ACTIVE_EVENT_TYPES.has(eventType);
+      const freshActivity = Number.isFinite(received) &&
+        received <= now + 30000 &&
+        now - received <= KV6_EVENT_STATUS_FRESH_MS &&
+        activeEventType;
+      const freshPunctuality = Number.isFinite(punctualityReceived) &&
+        punctualityReceived <= now + 30000 &&
+        now - punctualityReceived <= KV6_EVENT_STATUS_FRESH_MS &&
+        event?.punctualitySeconds !== null &&
+        event?.punctualitySeconds !== undefined;
+      if (
+        !Number.isFinite(received) ||
+        received < cutoff ||
+        (!freshActivity && !freshPunctuality)
+      ) state.events.delete(key);
     }
     while (state.events.size > KV6_EVENT_LIMIT) state.events.delete(state.events.keys().next().value);
   }
