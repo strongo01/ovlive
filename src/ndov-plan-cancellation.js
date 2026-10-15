@@ -1364,15 +1364,15 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         rows: await getCurrentKv78Rows(env, item.identityKey),
       })));
 
+      const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
       try {
-        const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
-      const kv6RouteStopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
-        item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
-      ));
-      const plannedStopIds = [
-        ...rowResults.flatMap(({ item }) => [item?.leg?.from?.stopId, item?.leg?.to?.stopId]),
-        ...kv6RouteStopIds,
-      ];
+        const kv6RouteStopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
+          item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
+        ));
+        const plannedStopIds = [
+          ...rowResults.flatMap(({ item }) => [item?.leg?.from?.stopId, item?.leg?.to?.stopId]),
+          ...kv6RouteStopIds,
+        ];
         openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, plannedStopIds);
       } catch (error) {
         kv78Error = [
