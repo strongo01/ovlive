@@ -66,6 +66,9 @@ jobs:
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
 
+      - name: Deployment asset preflight syntax
+        run: node --check scripts/validate-realtime-assets.mjs
+
       - name: Validate Wrangler Worker bundle without deploying
         run: npx wrangler deploy --dry-run
 
