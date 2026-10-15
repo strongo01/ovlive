@@ -543,6 +543,43 @@ function realtimeHtml(leg) {
     return `<div class="rt-details">${details ? `${prefix}${esc(details)}` : 'Loopverbinding'}</div>`;
   }
 
+  const ndovMatch = leg.ndovRealtimeMatch;
+  const ndovMatchNoticeHtml = (() => {
+    if (!ndovMatch) return "";
+
+    const status = String(ndovMatch.status ?? "unmatched");
+    const candidateCount = Number(ndovMatch.candidateCount);
+    const reason = String(ndovMatch.reason ?? "");
+
+    let title = "NDOV · geen exacte ritkoppeling";
+    let detail = "De NDOV-gegevens konden niet met voldoende zekerheid aan dit reistraject worden gekoppeld.";
+    if (status === "ambiguous" || reason === "ambiguous_route_time_stop_match") {
+      title = "NDOV · meerdere mogelijke ritten";
+      detail = Number.isFinite(candidateCount) && candidateCount > 0
+        ? candidateCount + " mogelijke ritten passen gedeeltelijk. Er is bewust geen willekeurige keuze gemaakt."
+        : "Meerdere ritten passen gedeeltelijk. Er is bewust geen willekeurige keuze gemaakt.";
+    } else if (status === "unavailable" || ndovMatch.error) {
+      title = "NDOV · routekoppeling niet beschikbaar";
+      detail = "De statische routekoppeling kon niet worden geladen. Daardoor kunnen gevonden NDOV-waarden niet veilig aan deze rit worden gekoppeld.";
+    } else if (reason === "no_exact_route_time_stop_match") {
+      detail = "Route, geplande tijden en haltevolgorde leverden geen exacte match op.";
+    } else if (reason === "missing_trip_anchors") {
+      detail = "De route, haltes of geplande tijden bevatten onvoldoende gegevens voor een veilige match.";
+    } else if (reason === "service_calendar_unavailable" || reason === "service_date_not_in_calendar") {
+      detail = "De dienstkalender kon niet bevestigen dat deze rit op de geplande datum rijdt.";
+    }
+
+    const technical = ndovMatch.error
+      ? String(ndovMatch.error).replace(/^Crosswalk asset [^:]+: HTTP (\d+)$/, "routebestand niet gevonden (HTTP $1)")
+      : "";
+    return `<div class="rt-details rt-unknown">
+      <strong>${esc(title)}</strong>
+      <div>${esc(detail)}</div>
+      <div>Dit betekent niet dat de bus, tram of trein niet rijdt of dat NDOV geen gegevens heeft; alleen de koppeling met dit traject is niet bevestigd.</div>
+      ${technical ? `<div class="muted">Diagnose: ${esc(technical)}</div>` : ""}
+    </div>`;
+  })();
+
   // Een gekoppelde NS-uitkomst blijft leidend. Alleen als NS geen bruikbare
   // match heeft, mag een afzonderlijk exact gematchte NDOV-waarneming alsnog worden getoond.
   const hasVerifiedNdovRealtime = [
@@ -567,7 +604,8 @@ function realtimeHtml(leg) {
       return `<div class="rt-status rt-unknown">
         <strong>NS · realtime onbekend</strong>
         <div class="rt-details">${esc(ns.message || "Geen betrouwbare NS-bordmatch gevonden.")}</div>
-        <div class="rt-details">De tijden in het reisschema blijven geplande tijden; OpenOV wordt voor deze NS-trein niet als stille terugval gebruikt.</div>
+        ${ndovMatchNoticeHtml}
+        <div class="rt-details">De tijden in het reisschema blijven geplande tijden; een ontbrekende NDOV-koppeling betekent niet automatisch dat er geen voertuig rijdt.</div>
       </div>`;
     }
 
@@ -651,13 +689,10 @@ function realtimeHtml(leg) {
   }
 
   if (leg.ndovRealtimeMatch?.status === 'ambiguous') {
-    const candidateCount = Number(leg.ndovRealtimeMatch.candidateCount);
-    const candidateText = Number.isFinite(candidateCount) && candidateCount > 0
-      ? `${candidateCount} mogelijke NDOV-ritten gevonden.`
-      : 'Meerdere mogelijke NDOV-ritten gevonden.';
-    return `<div class="rt-status">
-      <strong class="rt-warning">NDOV · geen eenduidige ritmatch</strong>
-      <div class="rt-details">${esc(candidateText)} Realtimegegevens zijn bewust niet gekoppeld om een verkeerde rit te voorkomen.</div>
+    return `<div class="rt-status rt-unknown">
+      ${ndovMatchNoticeHtml}
+      <div class="rt-details">OpenOV-status: ${esc(openovStatusSummary(rt))}.</div>
+      ${vehiclePositionHtml}
     </div>`;
   }
 
@@ -884,6 +919,7 @@ function realtimeHtml(leg) {
     return `<div class="rt-status rt-unknown">
       <strong>${rt?.reason === 'no_matching_realtime_trip' ? 'OpenOV · geen betrouwbare ritmatch' : 'OpenOV · realtime onbekend'}</strong>
       <div class="rt-details">${esc(reason)} Dit betekent niet automatisch dat de rit op tijd rijdt of uitvalt.</div>
+      ${ndovMatchNoticeHtml}
       ${vehiclePositionHtml}
     </div>`;
   }
@@ -911,6 +947,7 @@ function realtimeHtml(leg) {
     return `<div class="rt-status rt-unknown">
       <strong>OpenOV · rit gekoppeld, voorspelling ontbreekt</strong>
       <div class="rt-details">De rit is gevonden, maar er is geen bruikbare vertrek- of aankomstvoorspelling voor dit traject. De geplande tijden zijn hiermee niet realtime bevestigd. Dit betekent niet dat de bus op tijd rijdt.</div>
+      ${ndovMatchNoticeHtml}
       ${rt.matchMethod ? `<div class="rt-details">Matchmethode: ${esc(rt.matchMethod)}.</div>` : ''}
       ${rt.freshnessNote ? `<div class="rt-details">${esc(rt.freshnessNote)}</div>` : ''}
       ${vehiclePositionHtml}
