@@ -369,7 +369,7 @@ assert.equal(
       feedTimestampSeconds: propagationFeedTime,
       stopUpdates: [{
         stopId: "3923896", stopSequence: 16,
-        departureTime: propagationEventTime
+        departureTime: Date.parse("2026-10-15T09:46:00.000Z") / 1000
       }]
     },
     "departure", "2026-10-15T09:58:00.000Z",
