@@ -531,10 +531,20 @@ async function getBisonSnapshot(env) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison&identityDiagnostics=1`);
+  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison`);
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `BISON-status gaf HTTP ${response.status}.`);
   return snapshot;
+}
+
+async function getBisonIdentityDiagnostics(env) {
+  if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
+  const stub = env.NDOV_FEEDS.get(id);
+  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison&identityDiagnostics=1`);
+  const snapshot = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(snapshot?.error ?? `BISON-identiteitsdiagnose gaf HTTP ${response.status}.`);
+  return snapshot.bisonIdentityDiagnostics ?? null;
 }
 
 async function getCurrentBisonMutations(env, identities) {
@@ -1288,6 +1298,9 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000
   ) {
     lastKv6NoExactMatchDiagnosticAt = Date.now();
+    const bisonIdentityDiagnostics = await getBisonIdentityDiagnostics(env).catch((error) => ({
+      error: error instanceof Error ? error.message : String(error),
+    }));
     const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
     const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
       identity: toIdentity(
@@ -1307,7 +1320,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       rawBytes: snapshot.rawBytes ?? null,
       envelopeCounts: snapshot.envelopeCounts ?? {},
       storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
-      bisonIdentityDiagnostics: snapshot.bisonIdentityDiagnostics ?? null,
+      bisonIdentityDiagnostics,
       storedEventSampleCount: storedEventIdentitySamples.length,
       requestedIdentityKeys: kv6RequestedIdentityKeys.slice(0, 8),
       returnedExactEventCount: kv6ReturnedEventCount,
