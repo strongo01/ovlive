@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { summarizeRealtimeEvent } from "../src/openov-realtime-prediction.js";
+import {
+  summarizeRealtimeEvent,
+  findPropagatedRealtimeEvent,
+} from "../src/openov-realtime-prediction.js";
+import { findExactVehiclePositionForLeg, findRealtimeStopByScheduledEvent } from "../src/openov-realtime-prediction.js";
 
 const scheduled = "2026-10-13T19:57:00.000Z";
 
@@ -103,10 +107,22 @@ assert.equal(timestampedDayShift?.delaySeconds, 86400);
 console.log("PASS: verschuiving wordt niet blind weggefilterd bij een rit-timestamp");
 
 
-// Een tijd die de dienstregeling exact herhaalt zonder rit-timestamp
-// bewijst niet dat de trein realtime is gevolgd.
+// Een dienstregeling-echo zonder expliciete vertraging blijft onbekend.
 const scheduledEpochSeconds = Date.parse(scheduled) / 1000;
 const scheduleEcho = summarizeRealtimeEvent(
+  { departureTime: scheduledEpochSeconds },
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: false },
+);
+assert.equal(scheduleEcho?.time, null);
+assert.equal(scheduleEcho?.delaySeconds, null);
+assert.equal(scheduleEcho?.delayBasis, "unconfirmed_schedule_echo");
+console.log("PASS: onbevestigde dienstregeling-echo blijft onbekend");
+
+// Een expliciete vertraging van nul die overeenkomt met de absolute
+// voorspelling mag ook zonder timestamp per rit worden getoond.
+const explicitOnTime = summarizeRealtimeEvent(
   {
     departureTime: scheduledEpochSeconds,
     departureDelaySeconds: 0,
@@ -115,10 +131,28 @@ const scheduleEcho = summarizeRealtimeEvent(
   scheduled,
   { hasPerTripTimestamp: false },
 );
-assert.equal(scheduleEcho?.time, null);
-assert.equal(scheduleEcho?.delaySeconds, null);
-assert.equal(scheduleEcho?.delayBasis, "unconfirmed_schedule_echo");
-console.log("PASS: dienstregeling-echo zonder rit-timestamp blijft onbekend");
+assert.equal(explicitOnTime?.time, scheduled);
+assert.equal(explicitOnTime?.delaySeconds, 0);
+assert.equal(
+  explicitOnTime?.delayBasis,
+  "absolute_prediction_minus_scheduled_time",
+);
+console.log("PASS: expliciet gemelde nulvertraging blijft zichtbaar");
+
+// Tegenstrijdige brongegevens mogen de beveiliging niet omzeilen.
+const inconsistentDelay = summarizeRealtimeEvent(
+  {
+    departureTime: scheduledEpochSeconds,
+    departureDelaySeconds: 47,
+  },
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: false },
+);
+assert.equal(inconsistentDelay?.time, null);
+assert.equal(inconsistentDelay?.delaySeconds, null);
+assert.equal(inconsistentDelay?.delayBasis, "unconfirmed_schedule_echo");
+console.log("PASS: tegenstrijdige vertraging blijft onbekend");
 
 // Een echte afwijking wordt niet verborgen alleen omdat de rit-timestamp ontbreekt.
 const smallRealDeviation = summarizeRealtimeEvent(
@@ -133,5 +167,237 @@ const smallRealDeviation = summarizeRealtimeEvent(
 assert.equal(smallRealDeviation?.delaySeconds, 2);
 assert.ok(smallRealDeviation?.time);
 console.log("PASS: echte afwijking van 2 seconden blijft zichtbaar");
+
+
+// Een exact gekoppelde rit met een afwijkende halte-ID mag alleen via
+// een unieke, tijdgecorreleerde gebeurtenis een vertrekprognose leveren.
+const fallbackBaseSeconds = Date.parse(scheduled) / 1000;
+const fallbackRecord = {
+  stopUpdates: [
+    {
+      stopId: "4118548",
+      stopSequence: 1,
+      departureTime: fallbackBaseSeconds + 12,
+      departureDelaySeconds: 12,
+    },
+    {
+      stopId: "3923974",
+      stopSequence: 2,
+      departureTime: fallbackBaseSeconds + 144,
+      departureDelaySeconds: 24,
+    },
+    {
+      stopId: "3924098",
+      stopSequence: 3,
+      arrivalTime: fallbackBaseSeconds + 420,
+      arrivalDelaySeconds: 0,
+    },
+  ],
+};
+
+const correlatedDeparture = findRealtimeStopByScheduledEvent(
+  fallbackRecord,
+  "departure",
+  scheduled,
+);
+assert.equal(correlatedDeparture?.method, "scheduled_time_correlated");
+assert.equal(correlatedDeparture?.stop.stopId, "4118548");
+assert.equal(correlatedDeparture?.deltaSeconds, 0);
+
+const correlatedPrediction = summarizeRealtimeEvent(
+  correlatedDeparture.stop,
+  "departure",
+  scheduled,
+  { hasPerTripTimestamp: false },
+);
+assert.equal(correlatedPrediction?.delaySeconds, 12);
+assert.equal(
+  correlatedPrediction?.time,
+  new Date((fallbackBaseSeconds + 12) * 1000).toISOString(),
+);
+console.log("PASS: alternatieve halte-ID met overeenkomende tijd geeft 12 sec vertraging");
+
+// Een update voor een eerdere halte mag niet als aankomst bij UMC worden gebruikt.
+const missingDestination = findRealtimeStopByScheduledEvent(
+  fallbackRecord,
+  "arrival",
+  "2026-10-13T20:10:00.000Z",
+);
+assert.equal(missingDestination, null);
+console.log("PASS: ontbrekende aankomstupdate wordt niet verzonnen");
+
+
+
+// Een verse voertuigpositie van exact dezelfde route, rit en dienstinstantie
+// wordt herkend, maar levert op zichzelf geen haltevertraging op.
+const vehicleNow = Date.parse("2026-10-15T09:04:30.000Z") / 1000;
+const vehicleLeg = {
+  tripId: "20261015_11:03_nl-OpenOV_391215411",
+  routeId: "nl-OpenOV_159450",
+  from: {
+    scheduledDeparture: "2026-10-15T09:03:00.000Z",
+  },
+};
+const vehiclePosition = {
+  tripId: "391215411",
+  routeId: "159450",
+  startDate: "20261015",
+  startTime: "11:03:00",
+  timestamp: Date.parse("2026-10-15T09:04:22.000Z") / 1000,
+  latitude: 52.0804,
+  longitude: 5.11916,
+  stopId: "4118548",
+};
+const observedVehicle = findExactVehiclePositionForLeg(
+  vehicleLeg,
+  [vehiclePosition],
+  vehicleNow,
+);
+assert.equal(observedVehicle?.matchMethod, "exact_trip_id_vehicle_position");
+assert.equal(observedVehicle?.ageSeconds, 8);
+assert.equal(observedVehicle?.tripId, "391215411");
+console.log("PASS: verse voertuigpositie gekoppeld aan exacte ritinstantie");
+
+// Een andere rit-ID mag nooit de positie van deze rit overnemen.
+assert.equal(
+  findExactVehiclePositionForLeg(
+    { ...vehicleLeg, tripId: "20261015_11:18_nl-OpenOV_391215419" },
+    [vehiclePosition],
+    vehicleNow,
+  ),
+  null,
+);
+console.log("PASS: voertuigpositie van een andere rit wordt niet gekoppeld");
+
+// Een andere exploitatiedatum mag niet worden gekoppeld.
+assert.equal(
+  findExactVehiclePositionForLeg(
+    vehicleLeg,
+    [{ ...vehiclePosition, startDate: "20261016" }],
+    vehicleNow,
+  ),
+  null,
+);
+console.log("PASS: voertuigpositie met afwijkende dienstdatum wordt geweigerd");
+
+// Zonder datum of starttijd kan het numerieke GTFS-trip-ID dubbel voorkomen.
+assert.equal(
+  findExactVehiclePositionForLeg(
+    vehicleLeg,
+    [{
+      ...vehiclePosition,
+      startDate: undefined,
+      startTime: undefined,
+    }],
+    vehicleNow,
+  ),
+  null,
+);
+console.log("PASS: ambigue voertuigpositie zonder dienstinstantie wordt geweigerd");
+
+// Een te oude positie mag geen actuele waarneming opleveren.
+assert.equal(
+  findExactVehiclePositionForLeg(
+    vehicleLeg,
+    [{
+      ...vehiclePosition,
+      timestamp: vehicleNow - 181,
+    }],
+    vehicleNow,
+  ),
+  null,
+);
+console.log("PASS: voertuigpositie ouder dan 180 seconden wordt geweigerd");
+
+
+
+const propagationFeedTime = Date.parse("2026-10-15T09:47:26.000Z") / 1000;
+const propagationEventTime = Date.parse("2026-10-15T09:46:00.000Z") / 1000;
+const propagationRecord = {
+  feedTimestampSeconds: propagationFeedTime,
+  stopUpdates: [{
+    stopId: "3923896", stopSequence: 16,
+    arrivalTime: propagationEventTime, arrivalDelaySeconds: 0,
+    departureTime: propagationEventTime, departureDelaySeconds: 0,
+    scheduleRelationship: "SCHEDULED"
+  }]
+};
+
+const propagatedDeparture = findPropagatedRealtimeEvent(
+  propagationRecord, "departure", "2026-10-15T09:58:00.000Z",
+  { nowSeconds: propagationFeedTime, targetStopId: "3923746" }
+);
+assert.ok(propagatedDeparture);
+assert.equal(propagatedDeparture.time, "2026-10-15T09:58:00.000Z");
+assert.equal(propagatedDeparture.delaySeconds, 0);
+assert.equal(propagatedDeparture.sourceStopId, "3923896");
+console.log("PASS: vertraging wordt naar een volgende vertrekhalte doorgegeven");
+
+const propagatedArrival = findPropagatedRealtimeEvent(
+  propagationRecord, "arrival", "2026-10-15T10:11:00.000Z",
+  { nowSeconds: propagationFeedTime, targetStopId: "3924104" }
+);
+assert.ok(propagatedArrival);
+assert.equal(propagatedArrival.time, "2026-10-15T10:11:00.000Z");
+console.log("PASS: vertraging wordt naar een latere aankomsthalte doorgegeven");
+
+assert.equal(
+  findPropagatedRealtimeEvent(
+    propagationRecord, "departure", "2026-10-15T09:58:00.000Z",
+    { nowSeconds: propagationFeedTime, targetStopId: "3923896" }
+  ),
+  null
+);
+console.log("PASS: bestaande doelhalte-update wordt niet overschreven");
+
+assert.equal(
+  findPropagatedRealtimeEvent(
+    propagationRecord, "departure", "2026-10-15T09:58:00.000Z",
+    { nowSeconds: propagationFeedTime + 181, targetStopId: "3923746" }
+  ),
+  null
+);
+console.log("PASS: verouderde feed wordt niet doorgetrokken");
+
+assert.equal(
+  findPropagatedRealtimeEvent(
+    {
+      feedTimestampSeconds: propagationFeedTime,
+      stopUpdates: [{
+        stopId: "3923896", stopSequence: 16,
+        departureTime: propagationEventTime
+      }]
+    },
+    "departure", "2026-10-15T09:58:00.000Z",
+    { nowSeconds: propagationFeedTime, targetStopId: "3923746" }
+  ),
+  null
+);
+console.log("PASS: zonder expliciete vertraging ontstaat geen afgeleide tijd");
+
+assert.equal(
+  findPropagatedRealtimeEvent(
+    {
+      ...propagationRecord,
+      stopUpdates: [
+        ...propagationRecord.stopUpdates,
+        { stopId: "later", stopSequence: 17, scheduleRelationship: "NO_DATA" }
+      ]
+    },
+    "departure", "2026-10-15T09:58:00.000Z",
+    { nowSeconds: propagationFeedTime, targetStopId: "3923746" }
+  ),
+  null
+);
+console.log("PASS: NO_DATA blokkeert onveilige vertragingpropagatie");
+
+assert.equal(
+  findPropagatedRealtimeEvent(
+    propagationRecord, "departure", "2026-10-15T10:40:00.000Z",
+    { nowSeconds: propagationFeedTime, targetStopId: "3923746" }
+  ),
+  null
+);
+console.log("PASS: te ver vooruit liggende haltes krijgen geen afgeleide voorspelling");
 
 console.log("Alle OpenOV-voorspellingsregressietests geslaagd.");

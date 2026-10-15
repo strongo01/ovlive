@@ -32,15 +32,45 @@ const FRESH_ROW_MS = 180 * 1000;
 const AUTO_SESSION_SECONDS = 600;
 const AUTO_REST_MS = 5 * 1000;
 const AUTO_CYCLE_MS = AUTO_SESSION_SECONDS * 1000 + AUTO_REST_MS;
-const CONTINUOUS_FULL_CHECKPOINT_MS = 10 * 60 * 1000;
+// Eén collectorobject: maximaal 20 uur per UTC-dag.
+const AUTO_ACTIVE_START_UTC_HOUR = 4;
+const CONTINUOUS_FULL_CHECKPOINT_MS = 5 * 60 * 1000;
 const AUTO_DATA_IDLE_RECONNECT_MS = 120 * 1000;
 const AUTO_RETRY_BASE_MS = 30 * 1000;
 const AUTO_RETRY_MAX_MS = 5 * 60 * 1000;
 const CONTINUOUS_PERSIST_INTERVAL_MS = 60 * 1000;
 const ROW_CHUNK_SIZE = 1000;
 const MUTATION_CHUNK_SIZE = 1000;
+const NDOV_SHARED_OBJECT_NAME = 'ndov-shared-collector-v1';
 
 function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function ndovCollectionWindow(nowMs = Date.now()) {
+  const now = new Date(nowMs);
+  const dayStart = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate()
+  );
+  const openAt = dayStart + AUTO_ACTIVE_START_UTC_HOUR * 60 * 60 * 1000;
+  const closeAt = dayStart + 24 * 60 * 60 * 1000;
+
+  if (nowMs < openAt) {
+    return {
+      active: false,
+      nextAlarmAt: openAt,
+      closeAt,
+      secondsRemaining: 0,
+    };
+  }
+
+  return {
+    active: true,
+    nextAlarmAt: null,
+    closeAt,
+    secondsRemaining: Math.max(0.001, (closeAt - nowMs) / 1000),
+  };
+}
 function currentOperatingDateAmsterdam() {
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -52,6 +82,60 @@ function b64(bytes) {
   let out = '';
   for (const b of bytes) out += String.fromCharCode(b);
   return btoa(out);
+}
+
+function unb64(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function isLegacyFeedStorageKey(key, stream) {
+  if (typeof key !== 'string') return false;
+
+  // Individuele KV17-statussen hebben al een streamprefix.
+  if (stream === 'bison' && key.startsWith('bison:mutation:')) {
+    return true;
+  }
+
+  const logicalKey = key.startsWith(stream + ':')
+    ? key.slice(stream.length + 1)
+    : key;
+
+  if ([
+    'snapshot',
+    'rows',
+    'rowsGzipChunkCount',
+    'rowsChunkCount',
+    'events',
+    'eventsGzipChunkCount',
+    'mutations',
+    'mutationsGzipChunkCount',
+    'mutationsChunkCount',
+  ].includes(logicalKey)) {
+    return true;
+  }
+
+  return /^(?:rows|events|mutations):(?:gzip:)?\d+$/.test(logicalKey);
+}
+
+function isLegacyFeedChunkKey(key, stream) {
+  if (stream === 'bison' && key.startsWith('bison:mutation:')) {
+    return false;
+  }
+
+  const logicalKey = key.startsWith(stream + ':')
+    ? key.slice(stream.length + 1)
+    : key;
+
+  return /^(?:rows|events|mutations):(?:gzip:)?\d+$/.test(logicalKey);
+}
+
+function legacyDestinationKey(key, stream) {
+  return key.startsWith(stream + ':') ? key : stream + ':' + key;
 }
 async function gunzip(bytes, maxExpandedBytes = 5_000_000) {
   if (bytes.length < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) return bytes;
@@ -115,6 +199,7 @@ export class NdovFeedHub extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.ctx = ctx;
+    this.env = env;
     // Eén fysieke DO-instantie beheert beide feeds; de streamtoestand blijft gescheiden.
     this.streamStates = new Map(Object.keys(CONFIG).map((stream) => [stream, {
       snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
@@ -122,92 +207,329 @@ export class NdovFeedHub extends DurableObject {
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0,
     }]));
     this.ready = ctx.blockConcurrencyWhile(async () => {
+      // Eerst de oude opslag veiligstellen, pas daarna state laden.
+      if (ctx.id?.name === NDOV_SHARED_OBJECT_NAME) {
+        for (const stream of Object.keys(CONFIG)) {
+          await this.migrateLegacyStorage(stream);
+        }
+      }
+
       for (const stream of Object.keys(CONFIG)) {
-        const state = this.stateFor(stream);
-        const key = (suffix) => stream + ':' + suffix;
-        const saved = await ctx.storage.get(key('snapshot'));
-        if (saved) state.snapshot = saved;
-        state.continuousEnabled = (await ctx.storage.get(key('continuousEnabled'))) === true;
-        const savedRows = await ctx.storage.get(key('rows'));
-        const compressedRowCount = Number(await ctx.storage.get(key('rowsGzipChunkCount'))) || 0;
-        const savedRowChunkCount = Number(await ctx.storage.get(key('rowsChunkCount'))) || 0;
-        const savedEvents = await ctx.storage.get(key('events'));
-        const compressedEventCount = Number(await ctx.storage.get(key('eventsGzipChunkCount'))) || 0;
-        const savedMutations = await ctx.storage.get(key('mutations'));
-
-        if (compressedRowCount > 0) {
-          const chunks = await Promise.all(Array.from({ length: compressedRowCount }, (_, i) => ctx.storage.get(key('rows:gzip:' + i))));
-          const entries = [];
-          for (const chunk of chunks) if (chunk) entries.push(...await gunzipJson(chunk));
-          state.rows = new Map(entries);
-        } else if (savedRowChunkCount > 0) {
-          const chunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(key('rows:' + i))));
-          state.rows = new Map(chunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
-        } else state.rows = new Map(savedRows ?? []);
-
-        state.events = new Map();
-        if (compressedEventCount > 0) {
-          const chunks = await Promise.all(Array.from({ length: compressedEventCount }, (_, i) => ctx.storage.get(key('events:gzip:' + i))));
-          for (const chunk of chunks) if (chunk) {
-            for (const [savedKey, event] of await gunzipJson(chunk)) {
-              const identity = canonicalBisonTripIdentity(event) ?? savedKey;
-              state.events.set(identity, { ...event, identity });
-            }
-          }
-        } else {
-          for (const [savedKey, event] of (savedEvents ?? [])) {
-            const identity = canonicalBisonTripIdentity(event) ?? savedKey;
-            state.events.set(identity, { ...event, identity });
-          }
-        }
-
-        const compressedMutationCount = Number(await ctx.storage.get(key('mutationsGzipChunkCount'))) || 0;
-        const legacyMutationChunkCount = Number(await ctx.storage.get(key('mutationsChunkCount'))) || 0;
-        if (compressedMutationCount > 0) {
-          const chunks = await Promise.all(Array.from({ length: compressedMutationCount }, (_, i) => ctx.storage.get(key('mutations:gzip:' + i))));
-          for (const chunk of chunks) if (chunk) {
-            for (const [identity, mutationState] of await gunzipJson(chunk)) state.mutations.set(identity, mutationState);
-          }
-        } else if (legacyMutationChunkCount > 0) {
-          const chunks = await Promise.all(Array.from({ length: legacyMutationChunkCount }, (_, i) => ctx.storage.get(key('mutations:' + i))));
-          for (const chunk of chunks) for (const [identity, mutation] of (Array.isArray(chunk) ? chunk : [])) {
-            if (mutation?.events && mutation?.identity) state.mutations.set(identity, mutation);
-            else upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT);
-          }
-        } else {
-          for (const item of new Map(savedMutations ?? []).values()) {
-            if (item?.events && item?.identity) state.mutations.set(item.identity, item);
-            else upsertCurrentMutationState(state.mutations, item, KV17_STATE_LIMIT);
-          }
-        }
-
-        // KV17-mutaties worden ook per exacte identiteit opgeslagen; checkpoints zijn minder frequent.
-        if (stream === 'bison') {
-          const prefix = key('mutation:');
-          let startAfter;
-          while (true) {
-            const options = { prefix, limit: 1000 };
-            if (startAfter) options.startAfter = startAfter;
-            const entries = await ctx.storage.list(options);
-            if (entries.size === 0) break;
-            for (const [storageKey, mutationState] of entries) {
-              const identity = storageKey.slice(prefix.length);
-              const current = state.mutations.get(identity);
-              if (mutationState?.identity && (!current || Number(mutationState.timestampMs) >= Number(current.timestampMs))) state.mutations.set(identity, mutationState);
-            }
-            const lastKey = [...entries.keys()].at(-1);
-            if (entries.size < 1000 || !lastKey) break;
-            startAfter = lastKey;
-          }
-          while (state.mutations.size > KV17_STATE_LIMIT) state.mutations.delete(state.mutations.keys().next().value);
-        }
-
-        this.pruneRows(stream);
-        this.pruneEvents(stream);
-        await this.pruneMutationDates(stream);
-        state.lastFullPersistAt = Date.now();
+        await this.loadStreamState(stream);
       }
     });
+  }
+
+  async loadStreamState(stream) {
+    const ctx = this.ctx;
+    const state = this.stateFor(stream);
+    const key = (suffix) => stream + ':' + suffix;
+    const saved = await ctx.storage.get(key('snapshot'));
+    if (saved) state.snapshot = saved;
+    state.continuousEnabled = (await ctx.storage.get(key('continuousEnabled'))) === true;
+    const savedRows = await ctx.storage.get(key('rows'));
+    const compressedRowCount = Number(await ctx.storage.get(key('rowsGzipChunkCount'))) || 0;
+    const savedRowChunkCount = Number(await ctx.storage.get(key('rowsChunkCount'))) || 0;
+    const savedEvents = await ctx.storage.get(key('events'));
+    const compressedEventCount = Number(await ctx.storage.get(key('eventsGzipChunkCount'))) || 0;
+    const savedMutations = await ctx.storage.get(key('mutations'));
+
+    if (compressedRowCount > 0) {
+      const chunks = await Promise.all(Array.from({ length: compressedRowCount }, (_, i) => ctx.storage.get(key('rows:gzip:' + i))));
+      const entries = [];
+      for (const chunk of chunks) if (chunk) entries.push(...await gunzipJson(chunk));
+      state.rows = new Map(entries);
+    } else if (savedRowChunkCount > 0) {
+      const chunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(key('rows:' + i))));
+      state.rows = new Map(chunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
+    } else state.rows = new Map(savedRows ?? []);
+
+    state.events = new Map();
+    if (compressedEventCount > 0) {
+      const chunks = await Promise.all(Array.from({ length: compressedEventCount }, (_, i) => ctx.storage.get(key('events:gzip:' + i))));
+      for (const chunk of chunks) if (chunk) {
+        for (const [savedKey, event] of await gunzipJson(chunk)) {
+          const identity = canonicalBisonTripIdentity(event) ?? savedKey;
+          state.events.set(identity, { ...event, identity });
+        }
+      }
+    } else {
+      for (const [savedKey, event] of (savedEvents ?? [])) {
+        const identity = canonicalBisonTripIdentity(event) ?? savedKey;
+        state.events.set(identity, { ...event, identity });
+      }
+    }
+
+    const compressedMutationCount = Number(await ctx.storage.get(key('mutationsGzipChunkCount'))) || 0;
+    const legacyMutationChunkCount = Number(await ctx.storage.get(key('mutationsChunkCount'))) || 0;
+    if (compressedMutationCount > 0) {
+      const chunks = await Promise.all(Array.from({ length: compressedMutationCount }, (_, i) => ctx.storage.get(key('mutations:gzip:' + i))));
+      for (const chunk of chunks) if (chunk) {
+        for (const [identity, mutationState] of await gunzipJson(chunk)) state.mutations.set(identity, mutationState);
+      }
+    } else if (legacyMutationChunkCount > 0) {
+      const chunks = await Promise.all(Array.from({ length: legacyMutationChunkCount }, (_, i) => ctx.storage.get(key('mutations:' + i))));
+      for (const chunk of chunks) for (const [identity, mutation] of (Array.isArray(chunk) ? chunk : [])) {
+        if (mutation?.events && mutation?.identity) state.mutations.set(identity, mutation);
+        else upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT);
+      }
+    } else {
+      for (const item of new Map(savedMutations ?? []).values()) {
+        if (item?.events && item?.identity) state.mutations.set(item.identity, item);
+        else upsertCurrentMutationState(state.mutations, item, KV17_STATE_LIMIT);
+      }
+    }
+
+    // KV17-mutaties worden ook per exacte identiteit opgeslagen; checkpoints zijn minder frequent.
+    if (stream === 'bison') {
+      const prefix = key('mutation:');
+      let startAfter;
+      while (true) {
+        const options = { prefix, limit: 1000 };
+        if (startAfter) options.startAfter = startAfter;
+        const entries = await ctx.storage.list(options);
+        if (entries.size === 0) break;
+        for (const [storageKey, mutationState] of entries) {
+          const identity = storageKey.slice(prefix.length);
+          const current = state.mutations.get(identity);
+          if (mutationState?.identity && (!current || Number(mutationState.timestampMs) >= Number(current.timestampMs))) state.mutations.set(identity, mutationState);
+        }
+        const lastKey = [...entries.keys()].at(-1);
+        if (entries.size < 1000 || !lastKey) break;
+        startAfter = lastKey;
+      }
+      while (state.mutations.size > KV17_STATE_LIMIT) state.mutations.delete(state.mutations.keys().next().value);
+    }
+
+    this.pruneRows(stream);
+    this.pruneEvents(stream);
+    await this.pruneMutationDates(stream);
+    state.lastFullPersistAt = Date.now();
+  }
+
+  async migrateLegacyStorage(stream) {
+    const migrationKey = stream + ':legacyStorageMigrationV1';
+
+    if ((await this.ctx.storage.get(migrationKey)) === true) {
+      return;
+    }
+
+    if (stream !== 'kv78' && stream !== 'bison') {
+      throw new Error('Onbekende legacy NDOV-stream: ' + stream);
+    }
+
+    const startedKey = stream + ':legacyStorageMigrationV1:started';
+    const migrationStarted = (await this.ctx.storage.get(startedKey)) === true;
+
+    // Weiger een eerste migratie als de bestemming al relevante data bevat.
+    // Een eerder gestarte migratie mag na een onderbreking worden hervat.
+    if (!migrationStarted) {
+      let cursor = null;
+      const existingRelevantKeys = [];
+
+      while (true) {
+        const options = { prefix: stream + ':', limit: 500 };
+        if (cursor) options.startAfter = cursor;
+
+        const existing = await this.ctx.storage.list(options);
+
+        for (const rawKey of existing.keys()) {
+          const key = String(rawKey);
+          if (isLegacyFeedStorageKey(key, stream)) {
+            existingRelevantKeys.push(key);
+          }
+        }
+
+        const lastKey = [...existing.keys()].at(-1);
+        if (existing.size < 500 || !lastKey) break;
+        if (lastKey === cursor) {
+          throw new Error('Ongeldige opslagcontrolecursor.');
+        }
+
+        cursor = lastKey;
+      }
+
+      if (existingRelevantKeys.length > 0) {
+        throw new Error(
+          'Refusing to migrate ' + stream + ': gedeelde opslag bevat al ' +
+          existingRelevantKeys.length +
+          ' relevante sleutels. Geen gegevens overschreven. Voorbeeld: ' +
+          existingRelevantKeys.slice(0, 5).join(', ')
+        );
+      }
+
+      await this.ctx.storage.put(startedKey, true);
+    }
+
+    const legacyStub = this.env.NDOV_FEEDS.get(
+      this.env.NDOV_FEEDS.idFromName(stream)
+    );
+
+    let startAfter = null;
+    const sourceKeys = [];
+
+    // Lees eerst de volledige lijst met sleutels. Zo kunnen bestaande
+    // stream-geprefixte gegevens bij duplicaten voorrang krijgen.
+    while (true) {
+      const manifestUrl = new URL(
+        'https://ndov-hub.local/migration/manifest'
+      );
+
+      manifestUrl.searchParams.set('stream', stream);
+
+      if (startAfter) {
+        manifestUrl.searchParams.set('startAfter', startAfter);
+      }
+
+      const manifestResponse = await legacyStub.fetch(
+        manifestUrl.toString()
+      );
+
+      const manifest = await manifestResponse.json().catch(() => ({}));
+
+      if (
+        !manifestResponse.ok ||
+        manifest.ok !== true ||
+        manifest.sourceName !== stream ||
+        !Array.isArray(manifest.keys)
+      ) {
+        throw new Error(
+          'Legacy NDOV-manifest mislukt voor ' + stream +
+          ': HTTP ' + manifestResponse.status
+        );
+      }
+
+      sourceKeys.push(
+        ...manifest.keys.filter(
+          key => isLegacyFeedStorageKey(key, stream)
+        )
+      );
+
+      if (manifest.done === true) break;
+
+      if (!manifest.nextCursor || manifest.nextCursor === startAfter) {
+        throw new Error(
+          'Ongeldige migratiecursor voor NDOV-stream ' + stream
+        );
+      }
+
+      startAfter = manifest.nextCursor;
+    }
+
+    // Legacy sleutels eerst, bestaande stream-geprefixt opgeslagen
+    // gegevens daarna. Zo overschrijven oudere duplicaten geen nieuwere.
+    const keys = [...new Set(sourceKeys)].sort((a, b) => {
+      const aPriority = a.startsWith(stream + ':') ? 1 : 0;
+      const bPriority = b.startsWith(stream + ':') ? 1 : 0;
+      return aPriority - bPriority || a.localeCompare(b);
+    });
+
+    const batches = [];
+    let normalKeys = [];
+
+    for (const key of keys) {
+      // Grote compressieblokken afzonderlijk transporteren.
+      if (isLegacyFeedChunkKey(key, stream)) {
+        if (normalKeys.length) batches.push(normalKeys);
+        normalKeys = [];
+        batches.push([key]);
+      } else {
+        normalKeys.push(key);
+
+        if (normalKeys.length >= 100) {
+          batches.push(normalKeys);
+          normalKeys = [];
+        }
+      }
+    }
+
+    if (normalKeys.length) batches.push(normalKeys);
+
+    let copiedKeys = 0;
+
+    for (const batch of batches) {
+      const exportUrl = new URL(
+        'https://ndov-hub.local/migration/export-batch'
+      );
+
+      exportUrl.searchParams.set('stream', stream);
+
+      const response = await legacyStub.fetch(
+        new Request(exportUrl.toString(), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ keys: batch }),
+        })
+      );
+
+      const payload = await response.json().catch(() => ({}));
+
+      if (
+        !response.ok ||
+        payload.ok !== true ||
+        !Array.isArray(payload.entries)
+      ) {
+        throw new Error(
+          'Legacy NDOV-opslagexport mislukt voor ' + stream +
+          ': HTTP ' + response.status
+        );
+      }
+
+      const writes = {};
+
+      for (const entry of payload.entries) {
+        if (
+          !entry ||
+          entry.exists !== true ||
+          typeof entry.key !== 'string' ||
+          !isLegacyFeedStorageKey(entry.key, stream)
+        ) {
+          if (entry?.exists === true) {
+            throw new Error('Ongeldige sleutel in legacy NDOV-export.');
+          }
+          continue;
+        }
+
+        const destinationKey = legacyDestinationKey(
+          entry.key,
+          stream
+        );
+
+        let value = entry.type === 'bytes'
+          ? unb64(entry.value)
+          : entry.value;
+
+        // Een oude collector mag na de migratie niet automatisch
+        // opnieuw worden ingeschakeld door een opgeslagen snapshot.
+        if (
+          destinationKey === stream + ':snapshot' &&
+          value &&
+          typeof value === 'object' &&
+          !Array.isArray(value)
+        ) {
+          value = { ...value, continuousEnabled: false };
+        }
+
+        writes[destinationKey] = value;
+        copiedKeys += 1;
+      }
+
+      if (Object.keys(writes).length > 0) {
+        await this.ctx.storage.put(writes);
+      }
+    }
+
+    // De collector blijft uit. De marker wordt pas geschreven nadat
+    // alle opslagpagina's en datablokken succesvol zijn gekopieerd.
+    await this.ctx.storage.put({
+      [stream + ':continuousEnabled']: false,
+      [migrationKey]: true,
+    });
+
+    console.log(
+      '[OVLIVE_NDOV_LEGACY_MIGRATION]',
+      JSON.stringify({ stream, copiedKeys, complete: true })
+    );
   }
 
   stateFor(stream) {
@@ -238,6 +560,144 @@ export class NdovFeedHub extends DurableObject {
     const stream = url.searchParams.get('stream') || 'kv78';
     if (!CONFIG[stream]) return Response.json({ ok: false, error: 'unknown stream' }, { status: 400 });
     const state = this.stateFor(stream);
+
+    if (url.pathname === '/migration/manifest') {
+      // Alleen de oude, expliciet benoemde objecten mogen exporteren.
+      if (
+        this.ctx.id?.name !== stream ||
+        (stream !== 'kv78' && stream !== 'bison')
+      ) {
+        return Response.json(
+          { ok: false, error: 'Legacy-export niet toegestaan.' },
+          { status: 403 }
+        );
+      }
+
+      // Zet de oude collector stil voordat de opslag wordt gelezen.
+      if (!url.searchParams.has('startAfter')) {
+        state.continuousEnabled = false;
+        state.stopRequested = true;
+
+        await this.ctx.storage.put({
+          continuousEnabled: false,
+          [stream + ':continuousEnabled']: false,
+        });
+
+        if (state.socket) {
+          try { await state.socket.close(); } catch {}
+        }
+
+        await this.ctx.storage.deleteAlarm();
+
+        const stopDeadline = Date.now() + 5000;
+
+        while (state.running && Date.now() < stopDeadline) {
+          await wait(50);
+        }
+
+        if (state.running) {
+          return Response.json(
+            {
+              ok: false,
+              error: 'Legacy-collector stopte niet binnen de veiligheidsgrens.',
+            },
+            { status: 503 }
+          );
+        }
+      }
+
+      const limit = 500;
+      const options = { limit };
+      const startAfter = url.searchParams.get('startAfter');
+
+      if (startAfter) options.startAfter = startAfter;
+
+      const listed = await this.ctx.storage.list(options);
+      const allKeys = [...listed.keys()].map(String);
+
+      return Response.json({
+        ok: true,
+        sourceName: this.ctx.id.name,
+        keys: allKeys.filter(
+          key => isLegacyFeedStorageKey(key, stream)
+        ),
+        nextCursor: allKeys.at(-1) ?? null,
+        done: listed.size < limit,
+      }, { headers: { 'cache-control': 'no-store' } });
+    }
+
+    if (url.pathname === '/migration/export-batch') {
+      if (
+        this.ctx.id?.name !== stream ||
+        (stream !== 'kv78' && stream !== 'bison')
+      ) {
+        return Response.json(
+          { ok: false, error: 'Legacy-export niet toegestaan.' },
+          { status: 403 }
+        );
+      }
+
+      if (request.method !== 'POST') {
+        return Response.json(
+          { ok: false, error: 'POST vereist.' },
+          { status: 405 }
+        );
+      }
+
+      const body = await request.json().catch(() => null);
+
+      if (
+        !Array.isArray(body?.keys) ||
+        body.keys.length < 1 ||
+        body.keys.length > 100
+      ) {
+        return Response.json(
+          { ok: false, error: 'Ongeldige batchgrootte.' },
+          { status: 400 }
+        );
+      }
+
+      const entries = [];
+
+      for (const rawKey of body.keys) {
+        const key = String(rawKey);
+
+        if (!isLegacyFeedStorageKey(key, stream)) {
+          return Response.json(
+            { ok: false, error: 'Opslagsleutel niet toegestaan.' },
+            { status: 400 }
+          );
+        }
+
+        const value = await this.ctx.storage.get(key);
+
+        if (value === undefined) {
+          entries.push({ key, exists: false });
+        } else if (value instanceof Uint8Array) {
+          entries.push({
+            key,
+            exists: true,
+            type: 'bytes',
+            value: b64(value),
+          });
+        } else if (value instanceof ArrayBuffer) {
+          entries.push({
+            key,
+            exists: true,
+            type: 'bytes',
+            value: b64(new Uint8Array(value)),
+          });
+        } else {
+          entries.push({ key, exists: true, type: 'json', value });
+        }
+      }
+
+      return Response.json(
+        { ok: true, entries },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
+
     if (url.pathname === '/status') {
       if (stream === 'bison') this.pruneEvents(stream);
       const base = state.snapshot.state === 'idle' ? initialSnapshot(stream) : state.snapshot;
@@ -335,39 +795,122 @@ export class NdovFeedHub extends DurableObject {
       }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/continuous/enable') {
+      if (this.ctx.id?.name !== NDOV_SHARED_OBJECT_NAME) {
+        return Response.json(
+          { ok: false, enabled: false, error: 'Alleen het gedeelde collectorobject mag starten.' },
+          { status: 403 }
+        );
+      }
+
+      const persistedEnabled =
+        (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
+      const window = ndovCollectionWindow();
+
+      // Idempotent: de crontrigger mag niet elke vijf minuten dezelfde
+      // collectorstatus opnieuw wegschrijven.
+      if (persistedEnabled && state.continuousEnabled) {
+        let alarmAt = await this.ctx.storage.getAlarm();
+        if (alarmAt === null) {
+          const targetAt = window.active ? Date.now() + 1000 : window.nextAlarmAt;
+          await this.ctx.storage.setAlarm(targetAt);
+          alarmAt = await this.ctx.storage.getAlarm();
+        }
+        return Response.json({
+          ok: true, enabled: true, alreadyEnabled: true, stream,
+          nextAlarmAt: alarmAt,
+          note: 'Collector was al ingeschakeld; bestaande status behouden.',
+        }, { headers: { 'cache-control': 'no-store' } });
+      }
+
       state.continuousEnabled = true;
       state.stopRequested = false;
       if (state.snapshot.stream !== stream) state.snapshot = initialSnapshot(stream);
-      await this.ctx.storage.put({ [stream + ':continuousEnabled']: true, [stream + ':snapshot']: state.snapshot });
-      const alarmAt = await this.ctx.storage.getAlarm();
-      if (alarmAt === null) await this.ctx.storage.setAlarm(Date.now() + 1000);
-      return Response.json({ ok: true, enabled: true, stream, nextAlarmAt: await this.ctx.storage.getAlarm(), note: 'Duurzame alarmgestuurde collector ingeschakeld; huidige verzameling start via alarm.' }, { headers: { 'cache-control': 'no-store' } });
-    }
-    if (url.pathname === '/continuous/disable') {
-      const persistedEnabled = (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
-      const existingAlarm = await this.ctx.storage.getAlarm();
-      const alreadyDisabled = !persistedEnabled &&
-        existingAlarm === null &&
-        !state.running &&
-        !state.socket;
 
+      await this.ctx.storage.put({
+        [stream + ':continuousEnabled']: true,
+        [stream + ':snapshot']: state.snapshot,
+      });
+
+      let alarmAt = await this.ctx.storage.getAlarm();
+      if (alarmAt === null) {
+        const targetAt = window.active ? Date.now() + 1000 : window.nextAlarmAt;
+        await this.ctx.storage.setAlarm(targetAt);
+        alarmAt = await this.ctx.storage.getAlarm();
+      }
+
+      return Response.json({
+        ok: true, enabled: true, stream, nextAlarmAt: alarmAt,
+        note: 'Collector ingeschakeld; het dagelijkse UTC-venster wordt gerespecteerd.',
+      }, { headers: { 'cache-control': 'no-store' } });
+    }
+
+    if (url.pathname === '/continuous/disable') {
+      // Stop altijd eerst de netwerkverbinding. Ook als een opslagbewerking
+      // mislukt, mag een bestaande NDOV-stream niet blijven doorlopen.
       state.continuousEnabled = false;
       state.stopRequested = true;
 
-      // Idempotent: als de collector al uit staat, voorkom onnodige writes.
-      if (alreadyDisabled) {
-        const anotherCollectorEnabled = [...this.streamStates.entries()].some(([otherStream, otherState]) => otherStream !== stream && otherState.continuousEnabled);
-        if (anotherCollectorEnabled && existingAlarm === null) await this.ctx.storage.setAlarm(Date.now() + 1000);
-        return Response.json({ ok: true, enabled: false, stream, anotherCollectorEnabled, alreadyDisabled: true, note: 'Collector stond al uit; er is geen opslag gewijzigd.' }, { headers: { 'cache-control': 'no-store' } });
+      if (state.socket) {
+        try { await state.socket.close(); } catch {}
+        state.socket = null;
       }
 
-      await this.ctx.storage.put(stream + ':continuousEnabled', false);
-      if (state.socket) { try { await state.socket.close(); } catch {} }
-      const anotherCollectorEnabled = [...this.streamStates.entries()].some(([otherStream, otherState]) => otherStream !== stream && otherState.continuousEnabled);
-      if (!anotherCollectorEnabled) await this.ctx.storage.deleteAlarm();
-      else if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 1000);
-      return Response.json({ ok: true, enabled: false, stream, anotherCollectorEnabled, note: 'Deze automatische collector is uitgeschakeld.' }, { headers: { 'cache-control': 'no-store' } });
+      const persistedEnabled =
+        (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
+      const existingAlarm = await this.ctx.storage.getAlarm();
+      const anotherCollectorEnabled = [...this.streamStates.entries()]
+        .some(([otherStream, otherState]) =>
+          otherStream !== stream && otherState.continuousEnabled
+        );
+      const alreadyDisabled = !persistedEnabled &&
+        existingAlarm === null && !state.running && !state.socket;
+
+      if (alreadyDisabled) {
+        if (anotherCollectorEnabled) {
+          const window = ndovCollectionWindow();
+          await this.ctx.storage.setAlarm(
+            window.active ? Date.now() + 1000 : window.nextAlarmAt
+          );
+        }
+        return Response.json({
+          ok: true, enabled: false, stream, anotherCollectorEnabled,
+          alreadyDisabled: true,
+          note: 'Collector stond al uit; geen onnodige statuswrite uitgevoerd.',
+        }, { headers: { 'cache-control': 'no-store' } });
+      }
+
+      try {
+        await this.ctx.storage.put(stream + ':continuousEnabled', false);
+
+        if (!anotherCollectorEnabled) {
+          await this.ctx.storage.deleteAlarm();
+        } else if (await this.ctx.storage.getAlarm() === null) {
+          const window = ndovCollectionWindow();
+          await this.ctx.storage.setAlarm(
+            window.active ? Date.now() + 1000 : window.nextAlarmAt
+          );
+        }
+      } catch (error) {
+        console.error('[NDOV_AUTOCOLLECT] Stopstatus niet volledig opgeslagen.', {
+          stream,
+          socketClosed: !state.socket,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return Response.json({
+          ok: false,
+          enabled: false,
+          stream,
+          socketClosed: !state.socket,
+          error: 'De socket is gestopt, maar de opslagstatus kon niet volledig worden bijgewerkt.',
+        }, { status: 503, headers: { 'cache-control': 'no-store' } });
+      }
+
+      return Response.json({
+        ok: true, enabled: false, stream, anotherCollectorEnabled,
+        note: 'Automatische collector uitgeschakeld.',
+      }, { headers: { 'cache-control': 'no-store' } });
     }
+
     if (url.pathname === '/events') {
       if (stream !== 'bison') return Response.json({ ok: false, error: 'KV6-events zijn alleen beschikbaar op de BISON-stream.' }, { status: 400 });
       const identities = [...new Set(url.searchParams.getAll('identity').map((value) => {
@@ -573,45 +1116,136 @@ export class NdovFeedHub extends DurableObject {
 
   async alarm() {
     await this.ready;
+
+    // Harde fencing: na de migratie verzamelt uitsluitend het gedeelde object.
+    // Oude object-ID's mogen niet opnieuw starten, zelfs niet als hun
+    // persistente enabled-vlag door een opslagfout nog true is.
+    if (this.ctx.id?.name !== NDOV_SHARED_OBJECT_NAME) {
+      for (const [stream, state] of this.streamStates.entries()) {
+        state.continuousEnabled = false;
+        state.stopRequested = true;
+        if (state.socket) {
+          try { await state.socket.close(); } catch {}
+          state.socket = null;
+        }
+      }
+      try {
+        await this.ctx.storage.put({
+          'kv78:continuousEnabled': false,
+          'bison:continuousEnabled': false,
+        });
+      } catch (error) {
+        console.error('[NDOV_AUTOCOLLECT] Oude objectstatus kon niet worden opgeslagen.', error);
+      }
+      try { await this.ctx.storage.deleteAlarm(); } catch (error) {
+        console.error('[NDOV_AUTOCOLLECT] Oude alarm kon niet worden verwijderd.', error);
+      }
+      console.warn('[NDOV_AUTOCOLLECT] Oude Durable Object-ID geblokkeerd.');
+      return;
+    }
+
     const streams = [];
     for (const stream of Object.keys(CONFIG)) {
       const state = this.stateFor(stream);
-      state.continuousEnabled = (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
+      state.continuousEnabled =
+        (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       if (state.continuousEnabled) streams.push(stream);
     }
-    if (streams.length === 0) return;
-    await this.ctx.storage.setAlarm(Date.now() + AUTO_CYCLE_MS);
+
+    if (streams.length === 0) {
+      try { await this.ctx.storage.deleteAlarm(); } catch {}
+      return;
+    }
+
+    const window = ndovCollectionWindow();
+    if (!window.active) {
+      for (const stream of streams) {
+        const state = this.stateFor(stream);
+        state.stopRequested = true;
+        if (state.socket) {
+          try { await state.socket.close(); } catch {}
+          state.socket = null;
+        }
+      }
+
+      try {
+        await this.ctx.storage.setAlarm(window.nextAlarmAt);
+        console.log('[NDOV_AUTOCOLLECT] Dagelijkse pauze; volgende start:', new Date(window.nextAlarmAt).toISOString());
+      } catch (error) {
+        console.error('[NDOV_AUTOCOLLECT] Kon volgende actieve periode niet inplannen.', error);
+      }
+      return;
+    }
+
+    // De laatste sessie van een UTC-dag wordt afgekapt bij middernacht.
+    const sessionSeconds = Math.max(
+      0.001,
+      Math.min(AUTO_SESSION_SECONDS, window.secondsRemaining)
+    );
+
     const nextDelays = await Promise.all(streams.map(async (stream) => {
       const state = this.stateFor(stream);
       if (state.running) return AUTO_REST_MS;
+
       state.running = true;
       state.continuousMode = true;
       state.stopRequested = false;
       try {
-        await this.collect(stream, AUTO_SESSION_SECONDS);
+        await this.collect(stream, sessionSeconds);
       } catch (error) {
-        state.snapshot = { ...state.snapshot, state: 'error', error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() };
-        await this.persist(stream, true, true);
+        state.snapshot = {
+          ...state.snapshot,
+          state: 'error',
+          error: error instanceof Error ? error.message : String(error),
+          finishedAt: new Date().toISOString(),
+        };
+        try { await this.persist(stream, true, true); } catch (persistError) {
+          console.error('[NDOV_AUTOCOLLECT] Foutstatus kon niet worden opgeslagen.', persistError);
+        }
       } finally {
         state.continuousMode = false;
         state.running = false;
         state.socket = null;
       }
-      const stillEnabled = (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
+
+      const stillEnabled =
+        (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       state.continuousEnabled = stillEnabled;
       if (!stillEnabled) return null;
+
       if (state.snapshot.state === 'complete' || state.snapshot.state === 'stopped') {
-        await this.ctx.storage.put(stream + ':continuousFailures', 0);
+        try { await this.ctx.storage.put(stream + ':continuousFailures', 0); } catch {}
         return AUTO_REST_MS;
       }
+
       const failureKey = stream + ':continuousFailures';
-      const failures = Math.min(10, (Number(await this.ctx.storage.get(failureKey)) || 0) + 1);
-      await this.ctx.storage.put(failureKey, failures);
+      let failures = 1;
+      try {
+        failures = Math.min(10, (Number(await this.ctx.storage.get(failureKey)) || 0) + 1);
+        await this.ctx.storage.put(failureKey, failures);
+      } catch (error) {
+        console.error('[NDOV_AUTOCOLLECT] Foutteller kon niet worden opgeslagen.', error);
+      }
       return Math.min(AUTO_RETRY_MAX_MS, AUTO_RETRY_BASE_MS * (2 ** Math.min(failures - 1, 4)));
     }));
+
     const delays = nextDelays.filter((value) => value !== null);
-    if (delays.length > 0) await this.ctx.storage.setAlarm(Date.now() + Math.min(...delays));
-    else await this.ctx.storage.deleteAlarm();
+    if (delays.length > 0) {
+      const delayMs = Math.max(1000, Math.min(...delays));
+      const candidateAt = Date.now() + delayMs;
+      const candidateWindow = ndovCollectionWindow(candidateAt);
+      const nextAlarmAt = candidateWindow.active
+        ? candidateAt
+        : candidateWindow.nextAlarmAt;
+
+      try {
+        await this.ctx.storage.setAlarm(nextAlarmAt);
+      } catch (error) {
+        console.error('[NDOV_AUTOCOLLECT] Volgend alarm kon niet worden ingepland.', error);
+      }
+    } else {
+      try { await this.ctx.storage.deleteAlarm(); } catch {}
+    }
   }
 
   async collect(stream, seconds) {
@@ -777,22 +1411,12 @@ export class NdovFeedHub extends DurableObject {
               state.lastEventPruneAt = Date.now();
             }
           } else if (stream === 'bison' && /KV17cvlinfo/i.test(envelope)) {
-            const changedMutationIdentities = new Set();
-            const oldestMutationIdentity = state.mutations.keys().next().value;
             for (const mutation of parseKv17Payload(text, envelope)) {
-              if (upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT)) {
-                const identity = canonicalBisonTripIdentity(mutation);
-                if (identity) changedMutationIdentities.add(identity);
-              }
+              // Coalesce mutaties in de begrensde geheugenstaat.
+              // Geen individuele Durable Object-write per KV17-update:
+              // de volledige staat wordt periodiek gecomprimeerd opgeslagen.
+              upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT);
             }
-            if (oldestMutationIdentity && !state.mutations.has(oldestMutationIdentity)) await this.ctx.storage.delete('bison:mutation:' + oldestMutationIdentity);
-            if (changedMutationIdentities.size > 0) {
-              const durableChanges = {};
-              for (const identity of changedMutationIdentities) {
-                const current = state.mutations.get(identity);
-                if (current) durableChanges['bison:mutation:' + identity] = current;
-              }
-              if (Object.keys(durableChanges).length > 0) await this.ctx.storage.put(durableChanges);
           }
           await this.persist(stream, false, false);
         }

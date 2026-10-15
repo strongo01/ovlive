@@ -7,8 +7,24 @@ const [worker, config, hub] = await Promise.all([
   readFile(new URL("../src/ndov-stream-hub.js", import.meta.url), "utf8")
 ]);
 
-assert.match(config, /NDOV_AUTOCOLLECT\s*=\s*"false"/);
-console.log("PASS: productieconfiguratie heeft automatische NDOV-verzameling uitgeschakeld");
+const autocollectMatch = config.match(/^\s*NDOV_AUTOCOLLECT\s*=\s*"(true|false)"/m);
+const autocollectValue = autocollectMatch?.[1] ?? null;
+const controlledSoakTest = /# TEMPORARY CONTROLLED NDOV SOAK TEST/.test(config);
+assert.ok(
+  autocollectValue === "false" || (autocollectValue === "true" && controlledSoakTest),
+  "NDOV_AUTOCOLLECT mag alleen true staan tijdens een expliciet gemarkeerde limiettest."
+);
+assert.match(hub, /AUTO_ACTIVE_START_UTC_HOUR = 4/);
+assert.match(hub, /CONTINUOUS_FULL_CHECKPOINT_MS = 5 \* 60 \* 1000/);
+assert.match(hub, /function ndovCollectionWindow\(nowMs = Date\.now\(\)\)/);
+assert.match(hub, /this\.ctx\.id\?\.name !== NDOV_SHARED_OBJECT_NAME/);
+assert.doesNotMatch(hub, /storage\.put\(durableChanges\)/);
+console.log("PASS: dagelijkse collectorpauze, oude-ID-blokkade en gebundelde KV17-checkpoints");
+console.log(
+  autocollectValue === "true"
+    ? "PASS: NDOV tijdelijk ingeschakeld voor gecontroleerde limiettest"
+    : "PASS: automatische NDOV-verzameling staat uit"
+);
 
 const scheduledStart = worker.indexOf("async scheduled(");
 const scheduledEnd = worker.indexOf("\n  async fetch(", scheduledStart);
@@ -35,7 +51,25 @@ const disableBlock = hub.slice(disableStart, eventsStart);
 assert.match(disableBlock, /alreadyDisabled/);
 assert.match(disableBlock, /Collector stond al uit/);
 assert.match(disableBlock, /deleteAlarm\(\)/);
-assert.match(disableBlock, /this\.socket\.close\(\)/);
+assert.match(disableBlock, /state\.socket\.close\(\)/);
+const socketCloseIndex = disableBlock.indexOf("state.socket.close()");
+const disableWriteIndex = disableBlock.indexOf(
+  "this.ctx.storage.put(stream + ':continuousEnabled', false)"
+);
+assert.ok(socketCloseIndex >= 0 && disableWriteIndex > socketCloseIndex,
+  "De socket moet vóór de opslagwrite worden gesloten.");
+console.log("PASS: socket wordt vóór opslag bijgewerkt of gesloten");
 console.log("PASS: herhaalde collectorpauzes vermijden onnodige opslagwrites");
 
+assert.match(hub, /async migrateLegacyStorage\(stream\)/);
+assert.match(hub, /url\.pathname === '\/migration\/manifest'/);
+assert.match(hub, /url\.pathname === '\/migration\/export-batch'/);
+assert.match(hub, /legacyStorageMigrationV1/);
+assert.match(hub, /isLegacyFeedStorageKey/);
+assert.match(hub, /ctx\.id\?\.name === NDOV_SHARED_OBJECT_NAME/);
+console.log("PASS: legacy-opslagmigratie is aanwezig en begrensd");
+
+assert.match(hub, /existingRelevantKeys/);
+assert.match(hub, /Refusing to migrate/);
+console.log("PASS: migratie weigert onverwacht bestaande gegevens te overschrijven");
 console.log("Alle NDOV-autocollect-safety-tests geslaagd.");

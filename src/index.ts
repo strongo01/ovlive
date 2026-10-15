@@ -1,4 +1,9 @@
-import { summarizeRealtimeEvent } from "./openov-realtime-prediction.js";
+import {
+  findExactVehiclePositionForLeg,
+  findRealtimeStopByScheduledEvent,
+  summarizeRealtimeEvent,
+  findPropagatedRealtimeEvent,
+} from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
@@ -787,6 +792,9 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
           vehicleId: e.vehicle?.vehicle?.id,
           tripId: e.vehicle?.trip?.tripId,
           routeId: e.vehicle?.trip?.routeId,
+          startDate: e.vehicle?.trip?.startDate,
+          startTime: e.vehicle?.trip?.startTime,
+          directionId: e.vehicle?.trip?.directionId,
           stopId: e.vehicle?.stopId,
           latitude: e.vehicle?.position?.latitude,
           longitude: e.vehicle?.position?.longitude,
@@ -1257,10 +1265,11 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
   // Haal de feeds parallel op. Alleen verse feeds worden gebruikt
   // voor actuele reisinformatie.
-  const [tripFeed, trainFeed, alertFeed] = await Promise.all([
+  const [tripFeed, trainFeed, alertFeed, vehicleFeed] = await Promise.all([
     safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates"),
     safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates"),
-    safeOpenovFeed(OPENOV.alerts, "alerts")
+    safeOpenovFeed(OPENOV.alerts, "alerts"),
+    safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")
   ]);
 
   // TIJDELIJKE DIAGNOSE: controleer de daadwerkelijke invoer van de matcher.
@@ -1334,6 +1343,12 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
   // TIJDELIJKE DIAGNOSE: aantallen binnen dezelfde routeaanvraag.
   const records = [...byIdentity.values()];
+  // Gebruik alleen posities uit een verse feedheader. De helper controleert
+  // daarnaast de individuele tijdstempel van iedere voertuigpositie.
+  const vehiclePositions =
+    vehicleFeed.ok === true && vehicleFeed.freshness === "fresh"
+      ? (vehicleFeed.entities ?? [])
+      : [];
   let matchedCount = 0;
   let unknownCount = 0;
   let freshPredictionCount = 0;
@@ -1357,7 +1372,37 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     if (identity.tripId) relevantTrips.add(identity.tripId);
 
     const result = matchOpenovRealtime(leg, records);
+    const vehicleObservation = findExactVehiclePositionForLeg(
+      leg,
+      vehiclePositions
+    );
 
+
+    if (!result.record && vehicleObservation) {
+      // We hebben bewijs dat het voertuig van exact deze rit recent is
+      // waargenomen, ook al is er geen bruikbare halteprognose.
+      matchedCount++;
+      unknownCount++;
+      noPredictionCount++;
+
+      leg.openovRealtime = {
+        source: "OpenOV GTFS-Realtime",
+        status: "vehicle_observed",
+        reason: "vehicle_observed_without_stop_prediction",
+        message: "Voertuig van deze exacte rit recent waargenomen; halteprognose ontbreekt.",
+        timestampBasis: "vehicle_position",
+        updateTimestamp: vehicleObservation.observedAt,
+        updateAgeSeconds: vehicleObservation.ageSeconds,
+        matchMethod: "exact_trip_id_vehicle_position",
+        tripId: vehicleObservation.tripId,
+        routeId: vehicleObservation.routeId,
+        departure: null,
+        arrival: null,
+        vehiclePosition: vehicleObservation
+      };
+
+      continue;
+    }
 
     if (!result.record) {
       unknownCount++;
@@ -1438,8 +1483,32 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
       continue;
     }
 
-    const fromUpdate = findRealtimeStop(record, fromId);
-    const toUpdate = findRealtimeStop(record, toId);
+    const scheduledDepartureValue =
+      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime;
+    const scheduledArrivalValue =
+      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime;
+
+    const exactFromUpdate = findRealtimeStop(record, fromId);
+    const exactToUpdate = findRealtimeStop(record, toId);
+
+    const fromStopMatch = exactFromUpdate
+      ? { stop: exactFromUpdate, method: "exact_stop_id", deltaSeconds: 0 }
+      : fromId
+        ? findRealtimeStopByScheduledEvent(
+            record, "departure", scheduledDepartureValue
+          )
+        : null;
+
+    const toStopMatch = exactToUpdate
+      ? { stop: exactToUpdate, method: "exact_stop_id", deltaSeconds: 0 }
+      : toId
+        ? findRealtimeStopByScheduledEvent(
+            record, "arrival", scheduledArrivalValue
+          )
+        : null;
+
+    const fromUpdate = fromStopMatch?.stop;
+    const toUpdate = toStopMatch?.stop;
 
 
     const relationship = String(
@@ -1451,18 +1520,80 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
       relationship.includes("CANCEL") ||
       relationship.includes("DELETED");
 
-    const departurePrediction = summarizeRealtimeEvent(
+    const propagationScheduledDeparture =
+      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime;
+    const propagationScheduledArrival =
+      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime;
+
+    let departurePrediction = summarizeRealtimeEvent(
       fromUpdate,
       "departure",
-      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime,
+      propagationScheduledDeparture,
       { hasPerTripTimestamp: recordTimestamp !== null }
     );
-    const arrivalPrediction = summarizeRealtimeEvent(
+    let arrivalPrediction = summarizeRealtimeEvent(
       toUpdate,
       "arrival",
-      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime,
+      propagationScheduledArrival,
       { hasPerTripTimestamp: recordTimestamp !== null }
     );
+
+    const usablePrediction = (p: any) =>
+      Boolean(p?.time ||
+        (p?.delaySeconds != null && Number.isFinite(Number(p.delaySeconds))));
+
+    if (!usablePrediction(departurePrediction)) {
+      const propagated = findPropagatedRealtimeEvent(
+        record, "departure", propagationScheduledDeparture,
+        {
+          nowSeconds: Date.now() / 1000,
+          targetStopId: fromId ?? "",
+          maxLookaheadSeconds: 2700,
+          maxSourceEventAgeSeconds: 900
+        }
+      );
+      if (propagated) departurePrediction = propagated;
+    }
+
+    if (!usablePrediction(arrivalPrediction)) {
+      const propagated = findPropagatedRealtimeEvent(
+        record, "arrival", propagationScheduledArrival,
+        {
+          nowSeconds: Date.now() / 1000,
+          targetStopId: toId ?? "",
+          maxLookaheadSeconds: 2700,
+          maxSourceEventAgeSeconds: 900
+        }
+      );
+      if (propagated) arrivalPrediction = propagated;
+    }
+
+    const propagatedNotes: string[] = [];
+    for (const [label, prediction] of [
+      ["vertrek", departurePrediction],
+      ["aankomst", arrivalPrediction]
+    ] as Array<[string, any]>) {
+      if (prediction?.predictionMethod !== "gtfsrt_delay_propagation") continue;
+      propagatedNotes.push(
+        `${label} doorgetrokken vanaf halte ${prediction.sourceStopId ?? "onbekend"}` +
+        (prediction.sourceEventTime ? ` (gebeurtenis ${prediction.sourceEventTime})` : "")
+      );
+    }
+
+    const realtimeFreshnessNotes: string[] = [];
+    if (recordTimestamp === null) {
+      realtimeFreshnessNotes.push(
+        "De timestamp per rit ontbreekt; de versheid is afgeleid van de feed-header."
+      );
+    }
+    if (propagatedNotes.length) {
+      realtimeFreshnessNotes.push(
+        "Vertraging doorgetrokken volgens GTFS-Realtime vanaf een eerdere halte: " +
+        propagatedNotes.join("; ") +
+        ". Dit is geen afzonderlijke voorspelling die de bron rechtstreeks voor de doelhalte meldde."
+      );
+    }
+    const realtimeFreshnessNote = realtimeFreshnessNotes.join(" ") || null;
 
     const hasExplicitStopPrediction = Boolean(
       departurePrediction?.time ||
@@ -1497,9 +1628,7 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
         ? null
         : new Date(effectiveTimestamp * 1000).toISOString(),
       updateAgeSeconds: tripUpdateAgeSeconds,
-      freshnessNote: recordTimestamp === null
-        ? "De timestamp per rit ontbreekt; de versheid is afgeleid van de feed-header."
-        : null,
+      freshnessNote: realtimeFreshnessNote,
       matchMethod: result.method,
       tripId: record.tripId,
       routeId: record.routeId ?? null,
@@ -1508,7 +1637,12 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
       directionId: record.directionId ?? null,
       scheduleRelationship: record.scheduleRelationship ?? null,
       departure: departurePrediction,
-      arrival: arrivalPrediction
+      arrival: arrivalPrediction,
+      vehiclePosition: vehicleObservation,
+      departureStopMatchMethod: fromStopMatch?.method ?? null,
+      departureStopMatchDeltaSeconds: fromStopMatch?.deltaSeconds ?? null,
+      arrivalStopMatchMethod: toStopMatch?.method ?? null,
+      arrivalStopMatchDeltaSeconds: toStopMatch?.deltaSeconds ?? null
     };
   }
 
@@ -1581,6 +1715,15 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
         cacheAgeSeconds: alertFeed.cacheAgeSeconds ?? null,
         error: alertFeed.error ?? alertFeed.refreshWarning ?? null
       },
+      vehiclePositions: {
+        ok: Boolean(vehicleFeed.ok),
+        status: vehicleFeed.httpStatus ?? vehicleFeed.status ?? null,
+        freshness: vehicleFeed.freshness ?? "unavailable",
+        ageSeconds: vehicleFeed.ageSeconds ?? null,
+        servedFromCache: vehicleFeed.servedFromCache ?? false,
+        cacheAgeSeconds: vehicleFeed.cacheAgeSeconds ?? null,
+        error: vehicleFeed.error ?? vehicleFeed.refreshWarning ?? null
+      }
     }
   };
 
@@ -2561,25 +2704,23 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
 export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (env.NDOV_AUTOCOLLECT !== "true") {
-      // Schakel ook reeds actieve Durable Object-alarmen/verbindingen uit.
-      // Alleen stoppen met nieuwe alarms inplannen laat bestaande collectors lopen.
-      // Stop ook de legacy Durable Objects die vóór de migratie naar het
-      // gedeelde object onder id's "kv78" en "bison" draaiden. Een nieuwe
-      // namespace-naam migreert bestaande alarms/verbindingen niet automatisch.
-      const disableLegacyCollector = async (stream: NdovStreamName): Promise<Record<string, any>> => {
-        const legacyId = env.NDOV_FEEDS.idFromName(stream);
-        const legacyStub = env.NDOV_FEEDS.get(legacyId);
-        const target = new URL("https://ndov-hub.local/continuous/disable");
-        target.searchParams.set("stream", stream);
-        const response = await legacyStub.fetch(target.toString());
-        const data = await response.json().catch(() => ({})) as Record<string, any>;
-        if (!response.ok || data.ok !== true || data.enabled !== false) {
-          throw new Error(`Legacy ${stream}-collector stop mislukt: HTTP ${response.status} ${JSON.stringify(data)}`);
-        }
-        return { stream, legacy: true, ...data };
-      };
+    const disableLegacyCollector = async (stream: NdovStreamName): Promise<Record<string, any>> => {
+      const legacyId = env.NDOV_FEEDS.idFromName(stream);
+      const legacyStub = env.NDOV_FEEDS.get(legacyId);
+      const target = new URL("https://ndov-hub.local/continuous/disable");
+      target.searchParams.set("stream", stream);
+      const response = await legacyStub.fetch(target.toString());
+      const data = await response.json().catch(() => ({})) as Record<string, any>;
 
+      if (!response.ok || data.ok !== true || data.enabled !== false) {
+        throw new Error(
+          `Legacy ${stream}-collector stop mislukt: HTTP ${response.status} ${JSON.stringify(data)}`
+        );
+      }
+      return { stream, legacy: true, ...data };
+    };
+
+    if (env.NDOV_AUTOCOLLECT !== "true") {
       ctx.waitUntil(Promise.all([
         callNdovHub(env, "kv78", "continuous/disable"),
         callNdovHub(env, "bison", "continuous/disable"),
@@ -2590,22 +2731,41 @@ export default {
         if (failed.length) {
           console.error("[NDOV_AUTOCOLLECT] Niet alle gedeelde/legacy collectors konden worden gepauzeerd.", failed);
         } else {
-          console.log("[NDOV_AUTOCOLLECT] Gedeelde én legacy KV78/BISON-collectors zijn gepauzeerd.", feeds);
+          console.log("[NDOV_AUTOCOLLECT] Gedeelde en legacy collectors zijn gepauzeerd.");
         }
       }).catch((error) => {
-        console.error("[NDOV_AUTOCOLLECT] Collectorpauze mislukt voor gedeelde of legacy collectors.", error);
+        console.error("[NDOV_AUTOCOLLECT] Collectorpauze mislukt.", error);
       }));
       return;
     }
 
+    // Nooit twee collectors tegelijk starten: oude object-ID's eerst stoppen.
     ctx.waitUntil(Promise.all([
-      callNdovHub(env, "kv78", "continuous/enable"),
-      callNdovHub(env, "bison", "continuous/enable"),
-    ]).then((feeds) => {
+      disableLegacyCollector("kv78"),
+      disableLegacyCollector("bison"),
+    ]).then(async (legacyFeeds) => {
+      const legacyFailures = legacyFeeds.filter(
+        (feed) => feed.ok !== true || feed.enabled !== false
+      );
+      if (legacyFailures.length) {
+        throw new Error(
+          "Gedeelde collector blijft uit totdat de oude object-ID's gestopt zijn: " +
+          JSON.stringify(legacyFailures)
+        );
+      }
+
+      const feeds = await Promise.all([
+        callNdovHub(env, "kv78", "continuous/enable"),
+        callNdovHub(env, "bison", "continuous/enable"),
+      ]);
       const failed = feeds.filter((feed) => feed.ok !== true || feed.enabled !== true);
-      if (failed.length) console.error("[NDOV_AUTOCOLLECT] Niet alle collectors konden worden ingeschakeld.", failed);
+      if (failed.length) {
+        console.error("[NDOV_AUTOCOLLECT] Niet alle gedeelde collectors konden worden ingeschakeld.", failed);
+      } else {
+        console.log("[NDOV_AUTOCOLLECT] Gedeelde collector ingeschakeld; oude object-ID's gestopt.", feeds);
+      }
     }).catch((error) => {
-      console.error("[NDOV_AUTOCOLLECT] Collectorinitialisatie mislukt.", error);
+      console.error("[NDOV_AUTOCOLLECT] Veilige collectorstart mislukt.", error);
     }));
   },
   async fetch(request: Request, env: Env): Promise<Response> {
