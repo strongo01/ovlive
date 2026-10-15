@@ -5,8 +5,8 @@ import { applyNdovCancellationsToPlan } from '../src/ndov-plan-cancellation.js';
 const planCancellationSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
-assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 5,
-  'snapshot, mutation, event, KV78 snapshot, and KV78 row reads must all use the shared collector object');
+assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 6,
+  'snapshot, mutation, event, KV78 snapshot/row, and on-demand identity diagnostic reads must all use the shared collector object');
 assert.match(planCancellationSource, /status\?stream=bison&identityDiagnostics=1/,
   'no-match diagnostics must include the targeted current CXX journey identities');
 
