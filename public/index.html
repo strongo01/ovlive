@@ -384,6 +384,33 @@ function stopEventHtml(label, event, scheduledValue) {
     <span class="muted">(${esc(timeType)})</span>
     <span class="${colorClass}">· ${esc(delayText)}</span></div>`;
 }function openovStatusSummary(rt) {
+  if (leg.ndovRealtime?.status === 'kv6_observed') {
+    const ndov = leg.ndovRealtime?.kv6 ?? leg.ndovRealtime;
+    const eventType = String(ndov.eventType ?? '').toUpperCase();
+    const activityLabel = ({
+      ONROUTE: 'onderweg',
+      ONSTOP: 'bij een halte',
+      DEPARTURE: 'vertrokken bij een halte',
+      ARRIVAL: 'aangekomen bij een halte'
+    })[eventType] || 'waargenomen';
+    const vehicle = ndov.vehicleNumber ? `Voertuig: ${esc(ndov.vehicleNumber)}` : '';
+    const block = ndov.blockCode ? `Blok: ${esc(ndov.blockCode)}` : '';
+    const stop = ndov.currentStopCode ? `Haltecode: ${esc(ndov.currentStopCode)}` : '';
+    const received = ndov.receivedAt && Number.isFinite(Date.parse(ndov.receivedAt))
+      ? new Date(ndov.receivedAt).toLocaleTimeString('nl-NL')
+      : null;
+    return `<div class="rt-status">
+      <strong>NDOV · actuele voertuigwaarneming (KV6)</strong>
+      <div class="rt-details">De bron meldt dat het voertuig ${esc(activityLabel)} is. De waarneming hoort bij deze exact gematchte rit.</div>
+      <div class="rt-details rt-unknown">Deze melding bevat geen actuele punctuality. Vertraging en verwachte aankomst blijven onbekend; dit betekent niet automatisch dat de rit op tijd rijdt.</div>
+      ${vehicle ? `<div class="rt-details">${vehicle}</div>` : ''}
+      ${block ? `<div class="rt-details">${block}</div>` : ''}
+      ${stop ? `<div class="rt-details">${stop}</div>` : ''}
+      <div class="rt-details">Gebeurtenis: ${esc(eventType || 'onbekend')} · ontvangen: ${esc(received || 'tijd onbekend')} · ${esc(ndov.matchMethod || 'exacte GTFS-NL-ritkoppeling')}</div>
+      <div class="rt-details">OpenOV-status: ${esc(openovStatusSummary(rt))}.</div>
+    </div>`;
+  }
+
   if (rt?.status === "vehicle_observed") {
     return "voertuig van deze rit waargenomen; halteprognose ontbreekt";
   }
@@ -516,9 +543,16 @@ function realtimeHtml(leg) {
     return `<div class="rt-details">${details ? `${prefix}${esc(details)}` : 'Loopverbinding'}</div>`;
   }
 
-  // NS is leidend voor gekoppelde NS-treinen. Bij een onbekende NS-status
-  // wordt de OpenOV-tijd niet alsnog als realtime gepresenteerd.
-  if (leg.nsRealtime) {
+  // Een gekoppelde NS-uitkomst blijft leidend. Alleen als NS geen bruikbare
+  // match heeft, mag een afzonderlijk exact gematchte NDOV-waarneming alsnog worden getoond.
+  const hasVerifiedNdovRealtime = [
+    'kv78_delay', 'kv6_live', 'kv6_observed'
+  ].includes(leg.ndovRealtime?.status);
+  if (leg.nsRealtime && (
+    leg.nsRealtime.status === "matched" ||
+    leg.nsRealtime.status === "cancelled" ||
+    !hasVerifiedNdovRealtime
+  )) {
     const ns = leg.nsRealtime;
     const train = esc(ns.trainNumber || leg.tripShortName || leg.routeShortName || "onbekend");
 
@@ -1024,14 +1058,20 @@ function renderAlerts(alerts) {
 function timelineRealtimePrediction(leg, kind, scheduledTime) {
   if (!leg || leg.mode === 'WALK') return null;
 
-  // NS is leidend voor treinreisdelen die de server aan een NS-rit heeft gekoppeld.
+  // NS blijft leidend waar een exacte NS-match is gevonden. Als NS niet matcht,
+  // mag een exact gematchte NDOV-KV78-prognose nog wel worden gebruikt.
   if (leg.nsRealtime) {
-    if (leg.nsRealtime.status !== 'matched') return null;
-    const nsEvent = leg.nsRealtime[kind];
-    if (nsEvent?.time && Number.isFinite(Date.parse(nsEvent.time))) {
-      return { time: nsEvent.time, source: 'NS Reisinformatie API' };
+    if (leg.nsRealtime.status === 'matched') {
+      const nsEvent = leg.nsRealtime[kind];
+      if (nsEvent?.time && Number.isFinite(Date.parse(nsEvent.time))) {
+        return { time: nsEvent.time, source: 'NS Reisinformatie API' };
+      }
+      return null;
     }
-    return null;
+    if (leg.nsRealtime.status === 'cancelled') return null;
+    if (!['kv78_delay', 'kv6_live', 'kv6_observed'].includes(leg.ndovRealtime?.status)) {
+      return null;
+    }
   }
 
   if (
