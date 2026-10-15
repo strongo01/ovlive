@@ -1,6 +1,7 @@
 // Conservative NDOV KV17 cancellation enrichment for Transitous/OpenOV legs.
 // This reads the existing collector snapshot; it never opens/starts a feed connection.
 const MAX_BISON_AGE_MS = 180_000;
+const ACTIVE_KV6_EVENT_TYPES = new Set(["ONROUTE", "ONSTOP", "DEPARTURE", "ARRIVAL"]);
 const CROSSWALK_ROOT = "/ndov-trip-crosswalk";
 const OPENOV_ROUTE_CROSSWALK_ROOT = "/ndov-openov-route-crosswalk";
 const ASSET_ORIGIN = "https://ovlive-assets.local";
@@ -1159,34 +1160,78 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     for (const item of liveItems) {
       const event = eventByIdentity.get(item.identityKey);
       if (!event) continue;
+      const nowMs = Date.now();
       const punctualitySeconds = numericDelay(event.punctualitySeconds);
-      const receivedMs = timestampMs(event.punctualityReceivedAt);
-      const ageMs = receivedMs === null ? null : Date.now() - receivedMs;
-      if (punctualitySeconds === null || ageMs === null || ageMs < -30_000 || ageMs > MAX_BISON_AGE_MS) continue;
-      const sourceTime = valueOf(event, "punctualityTimestamp", "timestamp");
-      if (sourceTime && /(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(sourceTime).trim())) {
-        const sourceMs = timestampMs(sourceTime);
+      const punctualityReceivedMs = timestampMs(event.punctualityReceivedAt);
+      const punctualityAgeMs = punctualityReceivedMs === null
+        ? null
+        : nowMs - punctualityReceivedMs;
+      let hasFreshPunctuality = punctualitySeconds !== null &&
+        punctualityAgeMs !== null &&
+        punctualityAgeMs >= -30_000 &&
+        punctualityAgeMs <= MAX_BISON_AGE_MS;
+
+      const eventType = String(valueOf(event, "eventType") ?? "").trim().toUpperCase();
+      const receivedMs = timestampMs(event.receivedAt);
+      const activityAgeMs = receivedMs === null ? null : nowMs - receivedMs;
+      let hasFreshActivity = ACTIVE_KV6_EVENT_TYPES.has(eventType) &&
+        activityAgeMs !== null &&
+        activityAgeMs >= -30_000 &&
+        activityAgeMs <= MAX_BISON_AGE_MS;
+
+      const punctualityTime = valueOf(event, "punctualityTimestamp");
+      if (hasFreshPunctuality && punctualityTime &&
+          /(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(punctualityTime).trim())) {
+        const sourceMs = timestampMs(punctualityTime);
         if (sourceMs !== null) {
-          const sourceAge = Date.now() - sourceMs;
-          if (sourceAge < -30_000 || sourceAge > MAX_BISON_AGE_MS) continue;
+          const sourceAge = nowMs - sourceMs;
+          if (sourceAge < -30_000 || sourceAge > MAX_BISON_AGE_MS) {
+            hasFreshPunctuality = false;
+          }
         }
       }
+
+      // Source event times can identify a delayed/replayed message even when
+      // the local collector received the envelope moments ago.
+      const eventTime = valueOf(event, "timestamp");
+      if (hasFreshActivity && eventTime &&
+          /(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(eventTime).trim())) {
+        const sourceMs = timestampMs(eventTime);
+        if (sourceMs !== null) {
+          const sourceAge = nowMs - sourceMs;
+          if (sourceAge < -30_000 || sourceAge > MAX_BISON_AGE_MS) {
+            hasFreshActivity = false;
+          }
+        }
+      }
+
+      if (!hasFreshPunctuality && !hasFreshActivity) continue;
+
+      const delaySeconds = hasFreshPunctuality
+        ? Math.trunc(punctualitySeconds)
+        : null;
+      const observedAt = hasFreshPunctuality
+        ? (punctualityTime || eventTime || event.punctualityReceivedAt)
+        : (eventTime || event.receivedAt);
+      const observationAgeMs = hasFreshPunctuality && !hasFreshActivity
+        ? punctualityAgeMs
+        : activityAgeMs ?? punctualityAgeMs;
+
       console.log("[OVLIVE_KV6_MATCH_RESULT]", JSON.stringify({
         transitousTripId: item.identity?.originalTripId ?? null,
         ndovIdentity: item.identityKey ?? null,
-        punctualitySeconds: Math.trunc(punctualitySeconds),
+        punctualitySeconds: delaySeconds,
         vehicleNumber: valueOf(event, "vehicleNumber") ?? null,
         currentStopCode: valueOf(event, "userStopCode") ?? null,
         passageSequenceNumber: valueOf(event, "passageSequenceNumber") ?? null,
-        eventType: valueOf(event, "eventType") ?? null,
-        sourceTimestamp: sourceTime ?? null,
-        receivedAt: event.punctualityReceivedAt,
-        feedAgeSeconds: Math.round(ageMs / 1000),
+        eventType: eventType || null,
+        sourceTimestamp: observedAt ?? null,
+        receivedAt: event.receivedAt ?? event.punctualityReceivedAt ?? null,
+        feedAgeSeconds: observationAgeMs === null ? null : Math.round(observationAgeMs / 1000),
       }));
 
-      const delaySeconds = Math.trunc(punctualitySeconds);
       const kv6Observation = {
-        status: "kv6_live",
+        status: delaySeconds === null ? "kv6_observed" : "kv6_live",
         source: "NDOV BISON KV6",
         identity: item.identityKey,
         matchMethod: item.crosswalkMatchMethod ?? "exact-trip-identity via GTFS-NL realtime_trip_id",
@@ -1198,11 +1243,13 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         distanceSinceLastStop: valueOf(event, "distanceSinceLastStop") ?? null,
         rdX: valueOf(event, "rdX") ?? null,
         rdY: valueOf(event, "rdY") ?? null,
-        eventType: valueOf(event, "eventType") ?? null,
-        timestamp: sourceTime ?? null,
-        receivedAt: event.punctualityReceivedAt,
-        feedAgeSeconds: Math.round(ageMs / 1000),
-        note: "Actuele punctualiteit van de vervoerder, gekoppeld via de exacte GTFS-NL realtime_trip_id. Een positieve waarde is vertraging in seconden; een negatieve waarde is te vroeg.",
+        eventType: eventType || null,
+        timestamp: observedAt ?? null,
+        receivedAt: event.receivedAt ?? event.punctualityReceivedAt ?? null,
+        feedAgeSeconds: observationAgeMs === null ? null : Math.round(observationAgeMs / 1000),
+        note: delaySeconds === null
+          ? "NDOV heeft een verse ONROUTE/ONSTOP/DEPARTURE/ARRIVAL-waarneming voor deze exact gematchte rit. Deze gebeurtenis bevat geen verse punctuality; vertraging en aankomsttijd blijven onbekend."
+          : "Actuele punctualiteit van de vervoerder, gekoppeld via de exacte GTFS-NL realtime_trip_id. Een positieve waarde is vertraging in seconden; een negatieve waarde is te vroeg.",
       };
       item.leg.ndovRealtime = {
         ...(item.leg.ndovRealtime ?? {}),
@@ -1210,7 +1257,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         ...kv6Observation,
       };
       kv6MatchedLegCount += 1;
-      if (delaySeconds > 0) kv6DelayLegCount += 1;
+      if (delaySeconds !== null && delaySeconds > 0) kv6DelayLegCount += 1;
     }
   } catch (error) {
     kv6Error = error instanceof Error ? error.message : "KV6-actuele ritgegevens niet beschikbaar.";
