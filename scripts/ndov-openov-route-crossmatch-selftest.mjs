@@ -148,9 +148,11 @@ const planEnv = {
   },
   NDOV_FEEDS: {
     idFromName(name) { return name; },
-    get(stream) {
+    get(objectName) {
+      assert.equal(objectName, 'ndov-shared-collector-v1', 'NDOV tests must use the shared collector object');
       return { async fetch(input) {
         const url = new URL(input);
+          const stream = url.searchParams.get('stream');
         if (url.pathname === '/status' && stream === 'bison') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/status' && stream === 'kv78') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/mutations' && stream === 'bison') return Response.json({ mutations: [] });
