@@ -120,7 +120,7 @@ assert.equal(observedLeg.ndovRealtime.punctualitySeconds, null, 'missing punctua
 assert.equal(observedLeg.ndovRealtime.eventType, 'ONROUTE');
 assert.equal(observedLeg.ndovRealtime.vehicleNumber, '9634');
 assert.equal(plan.ndovRealtimeMeta.kv6ObservedLegCount, 1);
-assert.equal(plan.ndovRealtimeMeta.kv6MatchedLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.kv6MatchedLegCount, 2, 'KV6 match count includes both live punctuality and fresh activity observations');
 assert.equal(plan.ndovRealtimeMeta.kv6DelayLegCount, 1);
 console.log('PASS: exact KV17 cancellation remains attached only to its trip');
 console.log('PASS: KV78 stop-specific delays remain separate from KV6 trip punctuality');
