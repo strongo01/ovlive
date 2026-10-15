@@ -531,7 +531,7 @@ async function getBisonSnapshot(env) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison`);
+  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison&identityDiagnostics=1`);
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `BISON-status gaf HTTP ${response.status}.`);
   return snapshot;
@@ -1307,6 +1307,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       rawBytes: snapshot.rawBytes ?? null,
       envelopeCounts: snapshot.envelopeCounts ?? {},
       storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
+      bisonIdentityDiagnostics: snapshot.bisonIdentityDiagnostics ?? null,
       storedEventSampleCount: storedEventIdentitySamples.length,
       requestedIdentityKeys: kv6RequestedIdentityKeys.slice(0, 8),
       returnedExactEventCount: kv6ReturnedEventCount,
