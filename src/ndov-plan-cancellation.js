@@ -1,5 +1,6 @@
 // Conservative NDOV KV17 cancellation enrichment for Transitous/OpenOV legs.
 // This reads the existing collector snapshot; it never opens/starts a feed connection.
+import { buildUnifiedRealtimePrediction, deriveNdovKv6Prediction, getNdovPredictionStopIds } from "./ndov-prediction.js";
 const MAX_BISON_AGE_MS = 180_000;
 const ACTIVE_KV6_EVENT_TYPES = new Set(["ONROUTE", "ONSTOP", "DEPARTURE", "ARRIVAL"]);
 const CROSSWALK_ROOT = "/ndov-trip-crosswalk";
@@ -464,6 +465,7 @@ async function resolveRealtimeTripForLeg(env, item) {
         candidateCount: match.candidateCount,
         candidateRealtimeTripIds: match.candidateRealtimeTripIds ?? [],
         candidatePatternDetails: match.candidatePatternDetails ?? [],
+        pattern: match.pattern ?? null,
       };
     }
     if (crosswalk.error) return { parsed: null, source: "openov-route-crosswalk", generatedAt: crosswalk.generatedAt, error: crosswalk.error, indexedRoute: false };
@@ -997,6 +999,8 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv6MatchedLegCount: 0,
     kv6DelayLegCount: 0,
     kv6ObservedLegCount: 0,
+    ndovPredictionLegCount: 0,
+    combinedPredictionLegCount: 0,
     message: "Geen bevestigde NDOV-koppeling toegepast.",
   };
   if (!candidates.length) {
@@ -1052,6 +1056,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         continue;
       }
       item.realtimeIdentity = resolution.parsed;
+      item.routePattern = resolution.pattern ?? null;
       item.crosswalkGeneratedAt = resolution.generatedAt ?? null;
       item.crosswalkMatchMethod = resolution.method ?? resolution.source;
       item.identityKey = toIdentity(resolution.parsed.owner, item.identity.serviceDate, resolution.parsed.line, resolution.parsed.journey, "0");
@@ -1242,6 +1247,9 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       const observationAgeMs = hasFreshPunctuality && !hasFreshActivity
         ? punctualityAgeMs
         : activityAgeMs ?? punctualityAgeMs;
+      if (hasFreshPunctuality && delaySeconds !== null && item.routePattern && valueOf(event, "userStopCode")) {
+        item.kv6PredictionContext = { event, delaySeconds, observedAt, observationAgeMs };
+      }
 
       console.log("[OVLIVE_KV6_MATCH_RESULT]", JSON.stringify({
         transitousTripId: item.identity?.originalTripId ?? null,
@@ -1357,10 +1365,14 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       })));
 
       try {
-        const plannedStopIds = rowResults.flatMap(({ item }) => [
-          item?.leg?.from?.stopId,
-          item?.leg?.to?.stopId,
-        ]);
+        const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
+      const kv6RouteStopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
+        item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
+      ));
+      const plannedStopIds = [
+        ...rowResults.flatMap(({ item }) => [item?.leg?.from?.stopId, item?.leg?.to?.stopId]),
+        ...kv6RouteStopIds,
+      ];
         openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, plannedStopIds);
       } catch (error) {
         kv78Error = [
@@ -1370,11 +1382,20 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           }`,
         ].filter(Boolean).join("; ");
       }
-      const assignmentKeys = [...new Set(rowResults.flatMap((entry) => entry.rows.map((row) => {
-        const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
-        const stopCode = String(row?.userStopCode ?? "").trim();
+      const kv6AssignmentKeys = kv6PredictionItems.map((item) => {
+        const event = item.kv6PredictionContext?.event;
+        const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
+        const stopCode = String(event?.userStopCode ?? "").trim();
         return owner && stopCode ? `${owner}|${stopCode}` : null;
-      }).filter(Boolean)))];
+      }).filter(Boolean);
+      const assignmentKeys = [...new Set([
+        ...rowResults.flatMap((entry) => entry.rows.map((row) => {
+          const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
+          const stopCode = String(row?.userStopCode ?? "").trim();
+          return owner && stopCode ? `${owner}|${stopCode}` : null;
+        }).filter(Boolean)),
+        ...kv6AssignmentKeys,
+      ])];
       try {
         stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
       } catch (error) {
@@ -1447,8 +1468,60 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv78Error = error instanceof Error ? error.message : "KV78-gegevens niet beschikbaar.";
   }
 
+  const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
+  if (kv6PredictionItems.length && (!stopAssignmentIndex || !openovStopPlaceIndex)) {
+    const stopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
+      item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
+    ));
+    try {
+      if (!openovStopPlaceIndex) openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, stopIds);
+    } catch (error) {
+      kv78Error = [kv78Error, "OpenOV/CHB-stopcrosswalk voor KV6-voorspelling niet beschikbaar: " +
+        (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+    }
+    const assignmentKeys = kv6PredictionItems.map((item) => {
+      const event = item.kv6PredictionContext?.event;
+      const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
+      const stopCode = String(event?.userStopCode ?? "").trim();
+      return owner && stopCode ? owner + "|" + stopCode : null;
+    }).filter(Boolean);
+    try {
+      if (!stopAssignmentIndex) stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
+    } catch (error) {
+      kv78Error = [kv78Error, "PSA/CHB-haltecrosswalk voor KV6-voorspelling niet beschikbaar: " +
+        (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+    }
+  }
+
+  let ndovPredictionLegCount = 0;
+  let combinedPredictionLegCount = 0;
+  for (const item of candidates) {
+    const context = item.kv6PredictionContext;
+    if (context && item.routePattern && stopAssignmentIndex && openovStopPlaceIndex) {
+      const prediction = deriveNdovKv6Prediction({
+        leg: item.leg,
+        pattern: item.routePattern,
+        event: context.event,
+        assignmentIndex: stopAssignmentIndex,
+        stopPlaceIndex: openovStopPlaceIndex,
+        operationDate: item.identity?.serviceDate ?? null,
+      });
+      if (prediction) {
+        item.leg.ndovRealtime = { ...(item.leg.ndovRealtime ?? {}), prediction };
+        ndovPredictionLegCount += 1;
+      }
+    }
+    const combined = buildUnifiedRealtimePrediction(item.leg);
+    if (combined) {
+      item.leg.realtimePrediction = combined;
+      combinedPredictionLegCount += 1;
+    }
+  }
+
   plan.ndovRealtimeMeta = {
     ...baseMeta,
+    ndovPredictionLegCount,
+    combinedPredictionLegCount,
     status: "ok",
     feedState: snapshot.state ?? "unknown",
     feedAgeSeconds: Math.round(feedAgeMs / 1000),

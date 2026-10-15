@@ -92,6 +92,8 @@ async function main() {
       ndovEventType: leg.ndovRealtime?.eventType ?? leg.ndovRealtime?.kv6?.eventType ?? null,
       ndovPunctualitySeconds: leg.ndovRealtime?.punctualitySeconds ?? leg.ndovRealtime?.kv6?.punctualitySeconds ?? null,
       ndovMatchReason: leg.ndovRealtimeMatch?.reason ?? null,
+      ndovPrediction: leg.ndovRealtime?.prediction ?? null,
+      realtimePrediction: leg.realtimePrediction ?? null,
     })),
   }, null, 2));
 

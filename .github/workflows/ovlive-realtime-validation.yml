@@ -51,6 +51,9 @@ jobs:
       - name: NDOV KV6 live regression tests
         run: npm run ndov:kv6-live-selftest
 
+      - name: NDOV prediction regression tests
+        run: npm run ndov:prediction-selftest
+
       - name: NDOV OpenOV route cross-match regression tests
         run: npm run ndov:openov-route-crossmatch-selftest
 
