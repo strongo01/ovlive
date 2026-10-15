@@ -11,6 +11,7 @@ let manifestPromise = null;
 const shardCache = new Map();
 let openovRouteManifestPromise = null;
 const openovRouteCache = new Map();
+let lastKv6NoExactMatchDiagnosticAt = 0;
 
 function jsonResponseError(message) {
   return { ok: false, status: "unavailable", message };
@@ -1161,9 +1162,13 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv6MatchedLegCount = 0;
   let kv6DelayLegCount = 0;
   let kv6ObservedLegCount = 0;
+  let kv6RequestedIdentityKeys = [];
+  let kv6ReturnedEventCount = null;
   try {
     const liveItems = candidates.filter((item) => item.identityKey && item.leg.ndovRealtime?.status !== "cancelled");
-    const events = await getCurrentBisonEvents(env, liveItems.map((item) => item.identityKey));
+    kv6RequestedIdentityKeys = [...new Set(liveItems.map((item) => item.identityKey))];
+    const events = await getCurrentBisonEvents(env, kv6RequestedIdentityKeys);
+    kv6ReturnedEventCount = events.length;
     const eventByIdentity = new Map(events.map((event) => [
       toIdentity(event.dataOwnerCode, event.operationDate, event.linePlanningNumber, event.journeyNumber, event.reinforcementNumber ?? "0"),
       event,
@@ -1273,6 +1278,41 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     }
   } catch (error) {
     kv6Error = error instanceof Error ? error.message : "KV6-actuele ritgegevens niet beschikbaar.";
+  }
+
+  // Log alleen een begrensde identiteitsdiagnose als geen enkele geplande rit
+  // een KV6-event matcht. Geen voertuigpositie, haltecode of voertuignummer loggen.
+  if (
+    kv6MatchedLegCount === 0 &&
+    kv6RequestedIdentityKeys.length > 0 &&
+    Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000
+  ) {
+    lastKv6NoExactMatchDiagnosticAt = Date.now();
+    const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
+    const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
+      identity: toIdentity(
+        valueOf(event, "dataOwnerCode", "DataOwnerCode"),
+        valueOf(event, "operationDate", "OperationDate"),
+        valueOf(event, "linePlanningNumber", "LinePlanningNumber"),
+        valueOf(event, "journeyNumber", "JourneyNumber"),
+        valueOf(event, "reinforcementNumber", "ReinforcementNumber") ?? "0"
+      ),
+      eventType: valueOf(event, "eventType", "EventType") ?? null,
+      receivedAt: valueOf(event, "receivedAt") ?? null,
+    }));
+    console.log("[OVLIVE_KV6_NO_EXACT_MATCH_DIAG]", JSON.stringify({
+      feedState: snapshot.state ?? null,
+      latestMessageAt: snapshot.latestMessageAt ?? null,
+      messageCount: snapshot.messageCount ?? null,
+      rawBytes: snapshot.rawBytes ?? null,
+      envelopeCounts: snapshot.envelopeCounts ?? {},
+      storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
+      storedEventSampleCount: storedEventIdentitySamples.length,
+      requestedIdentityKeys: kv6RequestedIdentityKeys.slice(0, 8),
+      returnedExactEventCount: kv6ReturnedEventCount,
+      storedEventIdentitySamples,
+      kv6Error,
+    }));
   }
 
   // Delay enrichment is independent of the KV17 state: it reads already-collected
