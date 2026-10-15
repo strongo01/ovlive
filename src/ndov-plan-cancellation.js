@@ -984,6 +984,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     recoveredLegCount: 0,
     kv6MatchedLegCount: 0,
     kv6DelayLegCount: 0,
+    kv6ObservedLegCount: 0,
     message: "Geen bevestigde NDOV-koppeling toegepast.",
   };
   if (!candidates.length) {
@@ -1150,6 +1151,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv6Error = null;
   let kv6MatchedLegCount = 0;
   let kv6DelayLegCount = 0;
+  let kv6ObservedLegCount = 0;
   try {
     const liveItems = candidates.filter((item) => item.identityKey && item.leg.ndovRealtime?.status !== "cancelled");
     const events = await getCurrentBisonEvents(env, liveItems.map((item) => item.identityKey));
@@ -1257,7 +1259,8 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         ...kv6Observation,
       };
       kv6MatchedLegCount += 1;
-      if (delaySeconds !== null && delaySeconds > 0) kv6DelayLegCount += 1;
+      if (delaySeconds === null) kv6ObservedLegCount += 1;
+      else if (delaySeconds > 0) kv6DelayLegCount += 1;
     }
   } catch (error) {
     kv6Error = error instanceof Error ? error.message : "KV6-actuele ritgegevens niet beschikbaar.";
@@ -1397,6 +1400,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     recoveredLegCount: recovered,
     kv6MatchedLegCount,
     kv6DelayLegCount,
+    kv6ObservedLegCount,
     kv6Error,
     kv78FeedState,
     kv78FeedAgeSeconds,
@@ -1408,9 +1412,9 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     message: cancelled
       ? `${cancelled} exacte KV17-annulering(en) aan een reisdeel gekoppeld.`
       : kv78DataLegCount
-        ? `KV78 leverde actuele haltegegevens voor ${kv78DataLegCount} reisdelen, waarvan ${kv78DelayLegCount} met positieve haltevertraging; KV6 leverde ${kv6MatchedLegCount} exacte ritmatches waarvan ${kv6DelayLegCount} met vertraging.`
+        ? `KV78 leverde actuele haltegegevens voor ${kv78DataLegCount} reisdelen, waarvan ${kv78DelayLegCount} met positieve haltevertraging; KV6 leverde ${kv6MatchedLegCount} exacte ritmatches (${kv6DelayLegCount} met vertraging en ${kv6ObservedLegCount} verse voertuigwaarnemingen zonder actuele punctuality).`
         : kv6MatchedLegCount
-          ? `KV6 leverde ${kv6MatchedLegCount} actuele exacte ritmatches, waarvan ${kv6DelayLegCount} met vertraging. ${kv6Error ? `KV6-waarschuwing: ${kv6Error}` : ""}`.trim()
+          ? `KV6 leverde ${kv6MatchedLegCount} actuele exacte ritmatches (${kv6DelayLegCount} met vertraging en ${kv6ObservedLegCount} verse voertuigwaarnemingen zonder actuele punctuality). ${kv6Error ? `KV6-waarschuwing: ${kv6Error}` : ""}`.trim()
           : "Geen verse exacte KV6-ritmatch of bruikbare KV78-haltegegevens ontvangen; er wordt geen vertraging verzonnen.",
   };
   return plan;
