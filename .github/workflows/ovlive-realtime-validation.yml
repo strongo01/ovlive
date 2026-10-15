@@ -104,3 +104,8 @@ jobs:
           fi
 
           OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/openov-live-plan-validation.mjs
+
+      - name: Actual deployed OVLive production endpoint diagnostic
+        env:
+          OVLIVE_BASE_URL: https://ovlive.maxveldhuis.workers.dev
+        run: node scripts/openov-live-plan-validation.mjs
