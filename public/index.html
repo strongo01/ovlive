@@ -1119,6 +1119,24 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
     return null;
   }
 
+  // De API heeft per halte al een gecombineerde selectie gemaakt op basis
+  // van versheid en bronbetrouwbaarheid. Gebruik die als eerste voor de UI,
+  // zonder NS-voorrang of annuleringen hierboven te omzeilen.
+  const unifiedPrediction = leg.realtimePrediction;
+  const unifiedEvent = unifiedPrediction?.[kind];
+  if (
+    ['available', 'partial'].includes(unifiedPrediction?.status) &&
+    unifiedEvent?.time &&
+    Number.isFinite(Date.parse(unifiedEvent.time))
+  ) {
+    return {
+      time: unifiedEvent.time,
+      source: String(
+        unifiedEvent.source ?? unifiedPrediction.source ?? 'OVLive realtime'
+      ),
+    };
+  }
+
   // KV78Turbo: koppel de expliciete halteafwijking aan de geplande tijd.
   // targetTime is op zichzelf geen bewijs van een voorspelde aankomst
   // of vertrek.
