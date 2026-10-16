@@ -383,33 +383,9 @@ function stopEventHtml(label, event, scheduledValue) {
   return `<div>${esc(label)}: <span class="leg-time">${esc(time)}</span>
     <span class="muted">(${esc(timeType)})</span>
     <span class="${colorClass}">· ${esc(delayText)}</span></div>`;
-}function openovStatusSummary(rt) {
-  if (leg.ndovRealtime?.status === 'kv6_observed') {
-    const ndov = leg.ndovRealtime?.kv6 ?? leg.ndovRealtime;
-    const eventType = String(ndov.eventType ?? '').toUpperCase();
-    const activityLabel = ({
-      ONROUTE: 'onderweg',
-      ONSTOP: 'bij een halte',
-      DEPARTURE: 'vertrokken bij een halte',
-      ARRIVAL: 'aangekomen bij een halte'
-    })[eventType] || 'waargenomen';
-    const vehicle = ndov.vehicleNumber ? `Voertuig: ${esc(ndov.vehicleNumber)}` : '';
-    const block = ndov.blockCode ? `Blok: ${esc(ndov.blockCode)}` : '';
-    const stop = ndov.currentStopCode ? `Haltecode: ${esc(ndov.currentStopCode)}` : '';
-    const received = ndov.receivedAt && Number.isFinite(Date.parse(ndov.receivedAt))
-      ? new Date(ndov.receivedAt).toLocaleTimeString('nl-NL')
-      : null;
-    return `<div class="rt-status">
-      <strong>NDOV · actuele voertuigwaarneming (KV6)</strong>
-      <div class="rt-details">De bron meldt dat het voertuig ${esc(activityLabel)} is. De waarneming hoort bij deze exact gematchte rit.</div>
-      <div class="rt-details rt-unknown">Deze melding bevat geen actuele punctuality. Vertraging en verwachte aankomst blijven onbekend; dit betekent niet automatisch dat de rit op tijd rijdt.</div>
-      ${vehicle ? `<div class="rt-details">${vehicle}</div>` : ''}
-      ${block ? `<div class="rt-details">${block}</div>` : ''}
-      ${stop ? `<div class="rt-details">${stop}</div>` : ''}
-      <div class="rt-details">Gebeurtenis: ${esc(eventType || 'onbekend')} · ontvangen: ${esc(received || 'tijd onbekend')} · ${esc(ndov.matchMethod || 'exacte GTFS-NL-ritkoppeling')}</div>
-      <div class="rt-details">OpenOV-status: ${esc(openovStatusSummary(rt))}.</div>
-    </div>`;
-  }
+}
+
+function openovStatusSummary(rt) {
 
   if (rt?.status === "vehicle_observed") {
     return "voertuig van deze rit waargenomen; halteprognose ontbreekt";
@@ -862,6 +838,33 @@ function realtimeHtml(leg) {
       <div class="rt-details">Matchmethode: ${esc(kv78.matchMethod || 'onbekend')}</div>
       ${kv78RowAgeParts.length ? `<div class="rt-details">Leeftijd opgeslagen KV78-haltegegevens: ${esc(kv78RowAgeParts.join(' · '))}.</div>` : ''}
       <div class="rt-details">Leeftijd laatste algemene KV78-stroombericht: ${esc(kv78.feedAgeSeconds ?? '?')} sec.</div>
+    </div>`;
+  }
+
+  if (leg.ndovRealtime?.status === 'kv6_observed') {
+    const ndov = leg.ndovRealtime?.kv6 ?? leg.ndovRealtime;
+    const eventType = String(ndov.eventType ?? '').toUpperCase();
+    const activityLabel = ({
+      ONROUTE: 'onderweg',
+      ONSTOP: 'bij een halte',
+      DEPARTURE: 'vertrokken bij een halte',
+      ARRIVAL: 'aangekomen bij een halte'
+    })[eventType] || 'waargenomen';
+    const vehicle = ndov.vehicleNumber ? `Voertuig: ${esc(ndov.vehicleNumber)}` : '';
+    const block = ndov.blockCode ? `Blok: ${esc(ndov.blockCode)}` : '';
+    const stop = ndov.currentStopCode ? `Haltecode: ${esc(ndov.currentStopCode)}` : '';
+    const received = ndov.receivedAt && Number.isFinite(Date.parse(ndov.receivedAt))
+      ? new Date(ndov.receivedAt).toLocaleTimeString('nl-NL')
+      : null;
+    return `<div class="rt-status">
+      <strong>NDOV · actuele voertuigwaarneming (KV6)</strong>
+      <div class="rt-details">De bron meldt dat het voertuig ${esc(activityLabel)} is. De waarneming hoort bij deze exact gematchte rit.</div>
+      <div class="rt-details rt-unknown">Deze melding bevat geen actuele punctuality. Vertraging en verwachte aankomst blijven onbekend; dit betekent niet automatisch dat de rit op tijd rijdt.</div>
+      ${vehicle ? `<div class="rt-details">${vehicle}</div>` : ''}
+      ${block ? `<div class="rt-details">${block}</div>` : ''}
+      ${stop ? `<div class="rt-details">${stop}</div>` : ''}
+      <div class="rt-details">Gebeurtenis: ${esc(eventType || 'onbekend')} · ontvangen: ${esc(received || 'tijd onbekend')} · ${esc(ndov.matchMethod || 'exacte GTFS-NL-ritkoppeling')}</div>
+      <div class="rt-details">OpenOV-status: ${esc(openovStatusSummary(rt))}.</div>
     </div>`;
   }
 
