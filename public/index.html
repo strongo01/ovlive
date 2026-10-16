@@ -689,6 +689,12 @@ function realtimeHtml(leg) {
       const delaySeconds = event?.delaySeconds == null ? null : Number(event.delaySeconds);
       if (delaySeconds !== 0 || !Number.isFinite(delaySeconds)) return html;
 
+      const stopAssignmentConfirmed =
+        String(event?.stopAssignmentStatus ?? '').startsWith('confirmed_');
+      if (!stopAssignmentConfirmed) {
+        return `${html}<div class="rt-details rt-unknown">De nulafwijking hoort bij een tijdmatch zonder bevestigde PSA/CHB-halte; dit bevestigt niet dat deze halte op tijd wordt bediend.</div>`;
+      }
+
       // Normalize common zero-delay labels if the underlying helper emits one.
       // If it already says "Op tijd", preserve its existing markup unchanged.
       const normalized = delaySeconds === 0
@@ -714,10 +720,10 @@ function realtimeHtml(leg) {
       return html;
     };
     const departure = stopEventHtmlWithZeroOnTime(
-      departureLabel, kv78.departure, leg.from?.scheduledDeparture || leg.scheduledStartTime || leg.from?.departure || leg.startTime
+      departureLabel, kv78.departure, plannedEndpointTime(leg, 'departure')
     );
     const arrival = stopEventHtmlWithZeroOnTime(
-      arrivalLabel, kv78.arrival, leg.to?.scheduledArrival || leg.scheduledEndTime || leg.to?.arrival || leg.endTime
+      arrivalLabel, kv78.arrival, plannedEndpointTime(leg, 'arrival')
     );
 
     // Toon zowel de leeftijd van de geselecteerde haltegegevens als
@@ -1154,7 +1160,13 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
     const kv78 = leg.ndovRealtime.kv78 ?? leg.ndovRealtime;
     const event = kv78[kind];
 
-    if (event?.time && Number.isFinite(Date.parse(event.time))) {
+    const hasConfirmedKv78Stop =
+      String(event?.stopAssignmentStatus ?? '').startsWith('confirmed_');
+    if (
+      hasConfirmedKv78Stop &&
+      event?.time &&
+      Number.isFinite(Date.parse(event.time))
+    ) {
       return { time: event.time, source: 'NDOV KV78Turbo' };
     }
 
@@ -1167,6 +1179,7 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
     const feedAge = Number(kv78.feedAgeSeconds);
 
     if (
+      hasConfirmedKv78Stop &&
       event &&
       targetClock &&
       Number.isFinite(delay) &&
@@ -1270,22 +1283,63 @@ function timelineTimeHtml(prediction, scheduledTime, displayedTime) {
     <span class="muted">· realtime ${esc(prediction.source)}${planned}</span>`;
 }
 
+function plannedEndpointTime(leg, kind) {
+  const isDeparture = kind === 'departure';
+  const scheduled = isDeparture
+    ? (leg?.scheduledStartTime || leg?.from?.scheduledDeparture)
+    : (leg?.scheduledEndTime || leg?.to?.scheduledArrival);
+  if (scheduled) return scheduled;
+
+  // Voor lopen zijn startTime/endTime routeplanningstijden.
+  // Bij OV kan MOTIS die tijden realtime aanpassen: gebruik ze alleen als
+  // realTime expliciet false is. Een realtime tijd is geen dienstregeling.
+  const mode = String(leg?.mode || '').toUpperCase();
+  if (mode === 'WALK' || leg?.realTime === false) {
+    return isDeparture
+      ? (leg?.startTime || leg?.departureTime || leg?.from?.departure || null)
+      : (leg?.endTime || leg?.arrivalTime || leg?.to?.arrival || null);
+  }
+  return null;
+}
+
+function journeyChronologyIssue(legs, toleranceSeconds = 60) {
+  const items = Array.isArray(legs) ? legs : [];
+  let previousEndMs = null;
+
+  for (let index = 0; index < items.length; index += 1) {
+    const leg = items[index];
+    const startValue = leg?.startTime || leg?.from?.departure ||
+      leg?.scheduledStartTime || leg?.from?.scheduledDeparture;
+    const endValue = leg?.endTime || leg?.to?.arrival ||
+      leg?.scheduledEndTime || leg?.to?.scheduledArrival;
+    const startMs = Date.parse(startValue || '');
+    const endMs = Date.parse(endValue || '');
+
+    if (
+      previousEndMs !== null &&
+      Number.isFinite(startMs) &&
+      startMs < previousEndMs - toleranceSeconds * 1000
+    ) {
+      return {
+        legIndex: index,
+        previousArrival: new Date(previousEndMs).toISOString(),
+        nextDeparture: new Date(startMs).toISOString()
+      };
+    }
+
+    if (Number.isFinite(endMs)) previousEndMs = endMs;
+  }
+
+  return null;
+}
+
 function renderLeg(leg, index = 0) {
   const title = lineTitle(leg);
   const fromName = leg.from?.name || leg.origin?.name || 'Onbekende halte';
   const toName = leg.to?.name || leg.destination?.name || 'Onbekende halte';
 
-  const fromSchedule = leg.from?.scheduledDeparture ||
-    leg.scheduledStartTime ||
-    leg.from?.departure ||
-    leg.startTime ||
-    leg.departureTime;
-
-  const toSchedule = leg.to?.scheduledArrival ||
-    leg.scheduledEndTime ||
-    leg.to?.arrival ||
-    leg.endTime ||
-    leg.arrivalTime;
+  const fromSchedule = plannedEndpointTime(leg, 'departure');
+  const toSchedule = plannedEndpointTime(leg, 'arrival');
 
   const fromPrediction = timelineRealtimePrediction(leg, 'departure', fromSchedule);
   const toPrediction = timelineRealtimePrediction(leg, 'arrival', toSchedule);
@@ -1525,12 +1579,38 @@ q.set('pedestrianSpeed', '1.5');
       return;
     }
 
-    const cards = journeys.slice(0, 5).map((journey, index) => {
+    const itineraryCandidates = journeys.map(journey => {
       const sourceLegs = Array.isArray(journey.legs)
         ? journey.legs
         : Array.isArray(journey.transitLegs)
           ? journey.transitLegs
           : [];
+      return {
+        journey,
+        sourceLegs,
+        chronologyIssue: journeyChronologyIssue(sourceLegs)
+      };
+    });
+    const invalidChronologyCount = itineraryCandidates
+      .filter(item => item.chronologyIssue)
+      .length;
+    const validItineraryCandidates = itineraryCandidates
+      .filter(item => !item.chronologyIssue);
+
+    if (validItineraryCandidates.length === 0) {
+      $('journeys').innerHTML =
+        (invalidChronologyCount
+          ? `<div class="status rt-unknown"><strong>Geen veilige reisoptie weergegeven.</strong><div class="rt-details">Transitous leverde ${invalidChronologyCount} reisoptie(s) met een onmogelijke tijdvolgorde: een volgend OV-deel vertrekt vóór aankomst van het vorige deel. Deze opties zijn verborgen om een gemiste bus of trein te voorkomen.</div></div>`
+          : '<p>Er zijn geen bruikbare reisopties ontvangen.</p>') +
+        renderAlerts(data.openovAlerts || []);
+      return;
+    }
+
+    const chronologyWarningHtml = invalidChronologyCount
+      ? `<div class="status rt-unknown"><strong>${invalidChronologyCount} reisoptie(s) verborgen.</strong><div class="rt-details">Transitous gaf een tijdvolgorde terug die niet aansluit: een OV-deel vertrekt voordat je bij de halte kunt zijn. Deze opties worden niet getoond.</div></div>`
+      : '';
+
+    const cards = validItineraryCandidates.slice(0, 5).map(({ journey, sourceLegs }, index) => {
 
       // Werk met kopieën: de oorspronkelijke API-resultaten blijven intact.
       const legs = sourceLegs.map(leg => ({
@@ -1552,14 +1632,10 @@ q.set('pedestrianSpeed', '1.5');
         firstTransit &&
         Number.isFinite(maxInitialWaitSeconds)
       ) {
-        const startValue = firstWalk.from?.departure ||
-          firstWalk.startTime ||
-          firstWalk.departureTime ||
+        const startValue = plannedEndpointTime(firstWalk, 'departure') ||
           journey.startTime;
 
-        const transitStartValue = firstTransit.from?.departure ||
-          firstTransit.startTime ||
-          firstTransit.departureTime;
+        const transitStartValue = plannedEndpointTime(firstTransit, 'departure');
 
         const startMs = Date.parse(startValue || '');
         const transitStartMs = Date.parse(transitStartValue || '');
@@ -1632,7 +1708,7 @@ q.set('pedestrianSpeed', '1.5');
     }).join('');
 
     $('journeys').innerHTML =
-      feedInfo + renderRealtimeLegend() + cards + renderAlerts(data.openovAlerts || []);
+      feedInfo + renderRealtimeLegend() + chronologyWarningHtml + cards + renderAlerts(data.openovAlerts || []);
 
   } catch (error) {
     $('planStatus').innerHTML =
