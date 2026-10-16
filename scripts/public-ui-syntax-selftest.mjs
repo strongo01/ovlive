@@ -74,7 +74,7 @@ const unconfirmedKv78Html = stopEventHtml("Vertrek (KV78-halte 50000128)", {
   targetTime: "21:54:00",
   delaySeconds: 31,
   stopAssignmentStatus: "time_only_unverified"
-}, "2026-10-16T19:54:00Z");
+}, "2026-10-16T19:54:00Z", { requireConfirmedStopAssignment: true });
 assert.ok(unconfirmedKv78Html.includes("tijdindicatie uit KV78-doeltijd + afwijking; halte niet bevestigd"),
   "time-only KV78 matching must be described as a diagnostic time indication, not an expected departure");
 assert.ok(unconfirmedKv78Html.includes('class="rt-unknown"'),
@@ -87,13 +87,36 @@ const confirmedKv78Html = stopEventHtml("Vertrek (KV78-halte 51112304)", {
   targetTime: "21:54:00",
   delaySeconds: 31,
   stopAssignmentStatus: "confirmed_quay_platform"
-}, "2026-10-16T19:54:00Z");
+}, "2026-10-16T19:54:00Z", { requireConfirmedStopAssignment: true });
 assert.ok(confirmedKv78Html.includes("verwacht, berekend uit KV78-doeltijd + halteafwijking"),
   "a confirmed KV78 stop assignment may retain its expected-time wording");
 assert.ok(confirmedKv78Html.includes('class="rt-delay"'),
   "a confirmed KV78 stop assignment may retain its delay styling");
+
+const unconfirmedOpenovHtml = stopEventHtml("Vertrek", {
+  time: "2026-10-16T19:54:00Z",
+  delaySeconds: 0
+}, "2026-10-16T19:54:00Z", {
+  sourceLabel: "OpenOV",
+  unconfirmed: true
+});
+assert.ok(unconfirmedOpenovHtml.includes("tijd uit OpenOV-ritupdate; rit-timestamp ontbreekt"),
+  "OpenOV predictions without a per-trip timestamp must be labelled as OpenOV, never as KV78");
+assert.equal(unconfirmedOpenovHtml.includes("KV78-rij"), false,
+  "OpenOV rendering must not accidentally identify its event as a KV78 row");
+assert.ok(unconfirmedOpenovHtml.includes("gemeld: 0 sec afwijking; op tijd niet bevestigd"),
+  "zero deviation from an unconfirmed OpenOV trip update must not claim on-time running");
+assert.ok(unconfirmedOpenovHtml.includes('class="rt-unknown"') &&
+  !unconfirmedOpenovHtml.includes('class="rt-ok"'),
+  "unconfirmed OpenOV timing must use neutral styling");
+
+assert.ok(realtimeRenderer.includes("{ sourceLabel: 'OpenOV', unconfirmed: openovPredictionUnconfirmed }"),
+  "OpenOV renderer must pass its own source and timestamp confidence to the shared event renderer");
+assert.ok(realtimeRenderer.includes("{ requireConfirmedStopAssignment: true }"),
+  "only KV78 events must require PSA/CHB stop confirmation for authoritative stop labels");
 console.log("PASS: unconfirmed KV78 stop matches remain diagnostic and neutral");
 console.log("PASS: confirmed KV78 stop matches retain stop-specific prediction display");
+console.log("PASS: OpenOV events keep OpenOV identity and remain unconfirmed without trip timestamps");
 
 // MOTIS can expose a realtime-adjusted startTime alongside the original timetable.
  // Always select explicit scheduled times first; never silently substitute a realtime time.
