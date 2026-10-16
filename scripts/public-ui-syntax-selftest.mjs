@@ -38,6 +38,17 @@ assert.ok(realtimeRendererStart >= 0 && realtimeRendererEnd > realtimeRendererSt
 const realtimeRenderer = html.slice(realtimeRendererStart, realtimeRendererEnd);
 assert.equal(realtimeRenderer.includes("leg.ndovRealtime?.status === 'kv6_observed'"), true,
   "realtimeHtml must explicitly render fresh KV6 observations without punctuality");
+assert.ok(realtimeRenderer.includes("const rawDelay = ndov.punctualitySeconds;") &&
+  realtimeRenderer.includes("rawDelay == null || rawDelay === '' ? Number.NaN"),
+  "missing KV6 punctuality must remain unknown rather than becoming zero");
+assert.ok(realtimeRenderer.includes("'Voertuigupdate meldt 0 sec afwijking'"),
+  "zero KV6 punctuality must be described as the vehicle update's measurement, not stop-level on-time status");
+assert.ok(realtimeRenderer.includes("!Number.isFinite(delay) || delay === 0"),
+  "zero-deviation KV6 status must use neutral/unknown styling, not the on-time green styling");
+assert.ok(realtimeRenderer.includes("geen bevestigde verwachte vertrek- of aankomsttijd op deze halte"),
+  "KV6 vehicle punctuality must be distinguished from a stop-specific arrival/departure prediction");
+assert.equal(realtimeRenderer.includes("Op tijd volgens de actuele voertuigupdate"), false,
+  "a vehicle-only KV6 observation must not be labelled as simply on time");
 
 // MOTIS can expose a realtime-adjusted startTime alongside the original timetable.
  // Always select explicit scheduled times first; never silently substitute a realtime time.
