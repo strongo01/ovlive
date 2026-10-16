@@ -878,20 +878,22 @@ function realtimeHtml(leg) {
 
   if (leg.ndovRealtime?.status === 'kv6_live') {
     const ndov = leg.ndovRealtime?.kv6 ?? leg.ndovRealtime;
-    const delay = Math.trunc(Number(ndov.punctualitySeconds));
+    const rawDelay = ndov.punctualitySeconds;
+    const delay = rawDelay == null || rawDelay === '' ? Number.NaN : Math.trunc(Number(rawDelay));
     const seconds = Math.abs(delay);
-    const delayLabel = delay > 0
-      ? `${Math.floor(seconds / 60)} min ${seconds % 60} sec vertraging`
-      : delay < 0
-        ? `${Math.floor(seconds / 60)} min ${seconds % 60} sec te vroeg`
-        : 'Op tijd volgens de actuele voertuigupdate';
-    const delayColorClass = !Number.isFinite(delay)
+    const delayLabel = !Number.isFinite(delay)
+      ? 'Punctualiteit onbekend'
+      : delay > 0
+        ? `Voertuigupdate meldt ${Math.floor(seconds / 60)} min ${seconds % 60} sec vertraging`
+        : delay < 0
+          ? `Voertuigupdate meldt ${Math.floor(seconds / 60)} min ${seconds % 60} sec te vroeg`
+          : 'Voertuigupdate meldt 0 sec afwijking';
+    // Zero deviation at the observed vehicle is not a stop-specific punctuality prediction.
+    const delayColorClass = !Number.isFinite(delay) || delay === 0
       ? 'rt-unknown'
       : delay > 0
         ? 'rt-delay'
-        : delay < 0
-          ? 'rt-early'
-          : 'rt-ok';
+        : 'rt-early';
     const vehicle = ndov.vehicleNumber ? `Voertuig: ${esc(ndov.vehicleNumber)}` : '';
     const block = ndov.blockCode ? `Blok: ${esc(ndov.blockCode)}` : '';
     const stop = ndov.currentStopCode ? `Laatste haltecode: ${esc(ndov.currentStopCode)}` : '';
@@ -901,6 +903,7 @@ function realtimeHtml(leg) {
     return `<div class="rt-status">
       <strong>NDOV · live voertuigupdate (KV6)</strong>
       <div class="rt-details"><span class="${delayColorClass}">${esc(delayLabel)}</span></div>
+      <div class="rt-details rt-unknown">Dit is de gemelde punctualiteit bij een voertuigwaarneming, geen bevestigde verwachte vertrek- of aankomsttijd op deze halte. De tijden in de reis blijven de geplande tijden.</div>
       ${vehicle ? `<div class="rt-details">${vehicle}</div>` : ''}
       ${block ? `<div class="rt-details">${block}</div>` : ''}
       ${stop ? `<div class="rt-details">${stop}</div>` : ''}
