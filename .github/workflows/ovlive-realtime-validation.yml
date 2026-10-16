@@ -120,3 +120,8 @@ jobs:
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/ovlive-production-endpoint-diagnostics.mjs
+
+      - name: Production mixed-mode NS realtime regression
+        env:
+          OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
+        run: node scripts/ns-mixed-mode-live-validation.mjs
