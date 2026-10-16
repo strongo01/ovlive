@@ -10,6 +10,17 @@ assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\
 assert.match(planCancellationSource, /status\?stream=bison&identityDiagnostics=1/,
   'no-match diagnostics must include the targeted current CXX journey identities');
 
+const mutationFailureAt = planCancellationSource.indexOf('status: "mutation_lookup_unavailable"');
+const mutationFailureStart = planCancellationSource.lastIndexOf("plan.ndovRealtimeMeta = {", mutationFailureAt);
+const mutationFailureEnd = planCancellationSource.indexOf("return plan;", mutationFailureAt);
+assert.ok(mutationFailureAt > 0 && mutationFailureStart >= 0 && mutationFailureEnd > mutationFailureStart,
+  'mutation lookup failure branch must be inspectable');
+assert.match(
+  planCancellationSource.slice(mutationFailureStart, mutationFailureEnd),
+  /\.\.\.routeCrosswalkMeta\(\)/,
+  'an NDOV mutation lookup failure must not discard exact NS train identities'
+);
+
 
 // NS identity lookup must not inherit the 12-record diagnostic truncation.
 {
