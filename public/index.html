@@ -359,20 +359,32 @@ function stopEventHtml(label, event, scheduledValue) {
       ? clock(expectedMs)
       : clock(scheduledValue);
 
-  const timeType = event.time
-    ? 'verwacht uit realtimebron'
-    : expectedFromTargetMs !== null
-      ? 'verwacht, berekend uit KV78-doeltijd + halteafwijking'
-      : expectedFromScheduleMs !== null
-        ? 'verwacht, berekend uit dienstregeling + vertraging'
-        : 'gepland';
+  const stopAssignmentConfirmed =
+    String(event.stopAssignmentStatus ?? '').startsWith('confirmed_');
+  const timeType = !stopAssignmentConfirmed
+    ? event.time
+      ? 'tijd uit KV78-rij; halte niet bevestigd'
+      : expectedFromTargetMs !== null
+        ? 'tijdindicatie uit KV78-doeltijd + afwijking; halte niet bevestigd'
+        : expectedFromScheduleMs !== null
+          ? 'tijdindicatie uit dienstregeling + afwijking; halte niet bevestigd'
+          : 'dienstregeling; halte niet bevestigd'
+    : event.time
+      ? 'verwacht uit realtimebron'
+      : expectedFromTargetMs !== null
+        ? 'verwacht, berekend uit KV78-doeltijd + halteafwijking'
+        : expectedFromScheduleMs !== null
+          ? 'verwacht, berekend uit dienstregeling + vertraging'
+          : 'gepland';
 
-  const delayText = delay !== null
-    ? delayLabel(delay)
-    : 'geen vertraging voor deze halte opgegeven';
+  const delayText = delay === null
+    ? 'geen vertraging voor deze halte opgegeven'
+    : !stopAssignmentConfirmed
+      ? `gemeld: ${delayLabel(delay)}`
+      : delayLabel(delay);
 
-  // Kleur de gemelde afwijking zelf; ontbrekende data blijft grijs.
-  const colorClass = delay === null
+  // Zonder officiële PSA/CHB-haltebevestiging blijven tijd en afwijking neutraal.
+  const colorClass = !stopAssignmentConfirmed || delay === null
     ? 'rt-unknown'
     : delay > 0
       ? 'rt-delay'
@@ -759,14 +771,12 @@ function realtimeHtml(leg) {
         ? `${Math.floor(kv6Abs / 60)} min ${kv6Abs % 60} sec vertraging volgens voertuigupdate`
         : kv6Seconds < 0
           ? `${Math.floor(kv6Abs / 60)} min ${kv6Abs % 60} sec te vroeg volgens voertuigupdate`
-          : 'Voertuigupdate meldt op tijd';
-    const kv6ColorClass = kv6Seconds == null || !Number.isFinite(kv6Seconds)
+          : 'Voertuigupdate meldt 0 sec afwijking';
+    const kv6ColorClass = kv6Seconds == null || !Number.isFinite(kv6Seconds) || kv6Seconds === 0
       ? 'rt-unknown'
       : kv6Seconds > 0
         ? 'rt-delay'
-        : kv6Seconds < 0
-          ? 'rt-early'
-          : 'rt-ok';
+        : 'rt-early';
     // Toon een waarschuwing bij een duidelijk verschil tussen
     // haltevertragingen van OpenOV en KV78Turbo. Verander geen bronwaarden.
     const formatDelayDuration = (value) => {
@@ -793,6 +803,9 @@ function realtimeHtml(leg) {
     ]) {
       const openovEvent = rt?.[kind];
       const kv78Event = kv78?.[kind];
+      const kv78StopConfirmed =
+        String(kv78Event?.stopAssignmentStatus ?? '').startsWith('confirmed_');
+      if (!kv78StopConfirmed) continue;
 
       const openovSeconds = openovEvent?.delaySeconds == null
         ? null
