@@ -91,6 +91,18 @@ const env = {
   ASSETS: {
     async fetch(request) {
       const url = new URL(request.url);
+      if (url.pathname.endsWith('/ndov-stop-crosswalk/manifest.json')) {
+        return Response.json({ generatedAt: now, shardCount: 1 });
+      }
+      if (url.pathname.endsWith('/ndov-stop-crosswalk/shards/stop-assignments-0.json')) {
+        return Response.json({ assignments: {} });
+      }
+      if (url.pathname.endsWith('/ndov-openov-stopplace-crosswalk/manifest.json')) {
+        return Response.json({ generatedAt: now, shardCount: 1 });
+      }
+      if (url.pathname.endsWith('/ndov-openov-stopplace-crosswalk/shards/openov-stop-places-0.json')) {
+        return Response.json({ stopPlaces: {} });
+      }
       if (url.pathname.endsWith('/manifest.json')) return Response.json(manifest);
       if (/\/trips-\d+\.json$/.test(url.pathname)) {
         return Response.json(url.pathname.endsWith('/trips-382.json') ? shard : {});
