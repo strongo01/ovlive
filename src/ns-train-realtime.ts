@@ -66,7 +66,7 @@ const FALLBACK_STATIONS = [
 
 function safeNsError(error: unknown): string {
   const message = text(error instanceof Error ? error.message : error);
-  const http = message.match(/NS API HTTP (\\d{3})/i);
+  const http = message.match(/NS API HTTP (\d{3})/i);
   if (http) return `HTTP ${http[1]}`;
   if (/NS_API_SUBSCRIPTION_KEY ontbreekt/i.test(message)) return "API-sleutel ontbreekt";
   if (/timeout|timed out|abort/i.test(message)) return "time-out";
