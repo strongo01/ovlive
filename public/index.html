@@ -680,6 +680,9 @@ function realtimeHtml(leg) {
       ${ns.arrival ? renderNsEvent("Aankomst", ns.arrival, toTime) : '<div class="rt-details rt-unknown">Geen unieke NS-aankomstregel gevonden.</div>'}
       <div class="${deviationSummaryClass}">Actuele afwijking: vertrek ${departureDeviationKnown ? "bekend" : "onbekend"} · aankomst ${arrivalDeviationKnown ? "bekend" : "onbekend"}. Een ritmatch bevestigt niet automatisch de punctualiteit.</div>
       <div class="rt-details">Bron: NS Reisinformatie API · ${esc(ns.matchMethod || "match op treinnummer, station en geplande tijd")}.</div>
+      ${ns.stationLookupSource === "builtin_fallback"
+        ? `<div class="rt-details rt-unknown">NS-stationslijst niet beschikbaar (${esc(ns.stationListError || "onbekende fout")}); lokale reserve-stationcodes gebruikt.</div>`
+        : ""}
     </div>`;
   }
 
@@ -1575,7 +1578,10 @@ q.set('pedestrianSpeed', '1.5');
           `aankomst ${nsMeta.arrivalDeviationKnownLegCount ?? 0}/${nsMeta.candidateLegCount ?? 0}; ` +
           `${nsMeta.partlyUnknownDeviationLegCount ?? nsMeta.unknownLegCount ?? 0} met (deels) onbekende afwijking; ` +
           `${nsMeta.cancelledLegCount ?? 0} geannuleerd, ` +
-          `${nsMeta.unknownLegCount ?? 0} niet gekoppeld.`;
+          `${nsMeta.unknownLegCount ?? 0} niet gekoppeld.` +
+          (nsMeta.stationLookupSource === 'builtin_fallback'
+            ? ` NS-stationslijst: ${nsMeta.stationListError || 'onbekende fout'}; lokale reserve-stationcodes gebruikt.`
+            : '');
     if (meta?.status === 'enrichment_failed') {
       $('planStatus').textContent =
         `Reisplanner klaar · realtimeverwerking mislukt. ` +
