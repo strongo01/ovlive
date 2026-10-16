@@ -616,6 +616,10 @@ function routeLineNumber(value) {
 }
 
 function kv78VehicleLookupForItem(item) {
+  // Exact trip identity remains authoritative. Vehicle fallback is only for
+  // the specific gap where the static NDOV trip crosswalk did not resolve.
+  if (item?.identityKey) return null;
+
   const position = item?.leg?.openovRealtime?.vehiclePosition;
   const vehicleId = String(position?.vehicleId ?? "").replace(/^nl-OpenOV_/i, "").trim();
   const vehicleMatch = vehicleId.match(/^([A-Za-z0-9_-]+):([^:]+)$/);
