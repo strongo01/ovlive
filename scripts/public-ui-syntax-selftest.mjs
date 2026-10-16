@@ -77,14 +77,20 @@ assert.equal(plannedEndpointTime({
 
 assert.equal(journeyChronologyIssue([
   { mode: "WALK", startTime: "2026-10-16T19:43:00.000Z", endTime: "2026-10-16T19:47:00.000Z" },
-  { mode: "BUS", startTime: realtimeDeparture, endTime: "2026-10-16T19:35:00.000Z", scheduledStartTime: scheduledDeparture }
+  {
+    mode: "BUS", realTime: true,
+    startTime: "2026-10-16T19:47:00.000Z",
+    endTime: "2026-10-16T20:05:00.000Z",
+    scheduledStartTime: "2026-10-16T19:22:00.000Z",
+    scheduledEndTime: "2026-10-16T19:40:00.000Z"
+  }
 ])?.legIndex, 1,
-"an itinerary must be rejected when the vehicle departs before the previous leg reaches the stop");
+"an itinerary must be rejected when a displayed scheduled departure is before arrival, even if startTime looks chronological");
 assert.equal(journeyChronologyIssue([
   { mode: "WALK", startTime: "2026-10-16T19:43:00.000Z", endTime: "2026-10-16T19:47:00.000Z" },
-  { mode: "BUS", startTime: scheduledDeparture, endTime: "2026-10-16T20:05:00.000Z", scheduledStartTime: scheduledDeparture }
+  { mode: "BUS", realTime: true, startTime: realtimeDeparture, endTime: "2026-10-16T20:05:00.000Z", scheduledStartTime: scheduledDeparture, scheduledEndTime: "2026-10-16T20:05:00.000Z" }
 ]), null,
-"a chronological walk-to-bus connection remains valid");
+"a chronological walk-to-bus connection remains valid when judged using the same scheduled times as the UI");
 console.log("PASS: planned times prefer timetable fields over realtime-adjusted time");
 console.log("PASS: impossible itinerary chronology is rejected");
 
