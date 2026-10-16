@@ -317,7 +317,7 @@ console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
   let activeBoardRequests = 0;
   let maxActiveBoardRequests = 0;
 
-  const legs = Array.from({ length: 4 }, (_, index) => {
+  const legs = Array.from({ length: 13 }, (_, index) => {
     const number = String(6080 + index);
     const departureMs = baseMs + index * 10 * 60_000;
     const arrivalMs = departureMs + 5 * 60_000;
@@ -351,11 +351,19 @@ console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
       ]
     })),
     ndovRealtimeMeta: {
-      routeCrosswalkOutcomes: legs.map((leg, index) => ({
-        tripId: leg.tripId,
+      // Simulate the production diagnostic truncation: the NS train identity
+      // lands after 12 unrelated BUS/COACH route matches in a mixed-mode plan.
+      routeCrosswalkOutcomes: Array.from({ length: 12 }, (_, index) => ({
+        tripId: `bus-trip-${index}`,
         source: "openov-route-crossmatch",
         reason: "exact_openov_trip_id_match",
-        parsedIdentity: { owner: "IFF", journey: String(6080 + index) }
+        parsedIdentity: { owner: "CXX", journey: `U073:${7000 + index}` }
+      })),
+      // Compact identities are produced from all outcomes, not just the
+      // diagnostic subset above. The 13th train must still be enriched.
+      nsTrainIdentities: legs.map((leg, index) => ({
+        tripId: leg.tripId,
+        trainNumber: String(6080 + index)
       }))
     }
   };
@@ -418,8 +426,8 @@ console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
     globalThis.fetch = originalFetch;
   }
 
-  assert.equal(plan.nsRealtimeMeta.candidateLegCount, 4);
-  assert.equal(plan.nsRealtimeMeta.matchedLegCount, 4);
+  assert.equal(plan.nsRealtimeMeta.candidateLegCount, 13);
+  assert.equal(plan.nsRealtimeMeta.matchedLegCount, 13);
   assert.ok(
     maxActiveBoardRequests <= 4,
     `NS-bordbelasting te hoog: maximaal ${maxActiveBoardRequests} gelijktijdige bordverzoeken`
@@ -429,7 +437,7 @@ console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
     assert.equal(itinerary.legs[0].nsRealtime.departure.delaySeconds, 60);
     assert.equal(itinerary.legs[0].nsRealtime.arrival.delaySeconds, 60);
   }
-  console.log("PASS: extra gemengde reisopties veroorzaken geen onbeperkte NS-burst; alle 4 treinritten behouden hun realtimevertraging");
+  console.log("PASS: ook de 13e trein buiten de 12 diagnostische crosswalk-resultaten krijgt NS-realtime; alle 13 vertragingen behouden en NS-bordbelasting begrensd");
 }
 
 console.log("Alle NS-regressietests geslaagd.");
