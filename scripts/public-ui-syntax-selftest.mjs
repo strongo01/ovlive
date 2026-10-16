@@ -19,4 +19,26 @@ for (const block of blocks) {
   }
 }
 
-console.log("All public UI JavaScript syntax checks passed.");
+// Regression guard: OpenOV status formatting must only use its own
+// parameter, never a free-standing "leg" from another renderer's scope.
+const summaryStart = html.indexOf("function openovStatusSummary(rt) {");
+const summaryEnd = html.indexOf("function renderRealtimeLegend()", summaryStart);
+assert.ok(summaryStart >= 0 && summaryEnd > summaryStart,
+  "openovStatusSummary and renderRealtimeLegend must both exist");
+const summaryFunction = html.slice(summaryStart, summaryEnd);
+assert.doesNotMatch(summaryFunction, /\\bleg\\s*\\./,
+  "openovStatusSummary must not reference the out-of-scope variable leg");
+
+// Vehicle-only KV6 observations should be rendered in realtimeHtml(leg), not
+// inside the string-only OpenOV status helper.
+const realtimeRendererStart = html.indexOf("function realtimeHtml(leg) {");
+const realtimeRendererEnd = html.indexOf("function timelineRealtimePrediction(", realtimeRendererStart);
+assert.ok(realtimeRendererStart >= 0 && realtimeRendererEnd > realtimeRendererStart,
+  "realtimeHtml renderer must exist");
+const realtimeRenderer = html.slice(realtimeRendererStart, realtimeRendererEnd);
+assert.match(realtimeRenderer, /leg\\.ndovRealtime\\?\\.status === ['"]kv6_observed['"]/,
+  "realtimeHtml must explicitly render fresh KV6 observations without punctuality");
+
+console.log("PASS: OpenOV status helper has no out-of-scope leg reference");
+console.log("PASS: KV6 observed-only status is rendered in the leg UI");
+console.log("All public UI JavaScript checks passed.");
