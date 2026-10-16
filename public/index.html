@@ -1308,10 +1308,12 @@ function journeyChronologyIssue(legs, toleranceSeconds = 60) {
 
   for (let index = 0; index < items.length; index += 1) {
     const leg = items[index];
-    const startValue = leg?.startTime || leg?.from?.departure ||
-      leg?.scheduledStartTime || leg?.from?.scheduledDeparture;
-    const endValue = leg?.endTime || leg?.to?.arrival ||
-      leg?.scheduledEndTime || leg?.to?.scheduledArrival;
+
+    // Use exactly the same time resolver as renderLeg. Otherwise a realtime-
+    // adjusted startTime can hide a conflicting scheduledStartTime here,
+    // while the UI then displays that older scheduled value as the departure.
+    const startValue = plannedEndpointTime(leg, 'departure');
+    const endValue = plannedEndpointTime(leg, 'arrival');
     const startMs = Date.parse(startValue || '');
     const endMs = Date.parse(endValue || '');
 
