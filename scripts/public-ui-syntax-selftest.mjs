@@ -49,7 +49,7 @@ assert.ok(plannedStart >= 0 && chronologyStart > plannedStart && renderLegStartF
 const plannedTimeSource = html.slice(plannedStart, chronologyStart).trim();
 const chronologySource = html.slice(chronologyStart, renderLegStartForHelpers).trim();
 const plannedEndpointTime = new vm.Script("(" + plannedTimeSource + ")").runInNewContext();
-const journeyChronologyIssue = new vm.Script("(" + chronologySource + ")").runInNewContext();
+const journeyChronologyIssue = new vm.Script("(" + chronologySource + ")").runInNewContext({ plannedEndpointTime });
 
 const realtimeDeparture = "2026-10-16T19:22:00.000Z";
 const scheduledDeparture = "2026-10-16T19:47:00.000Z";
