@@ -1271,6 +1271,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   } catch (error) {
     plan.ndovRealtimeMeta = {
       ...baseMeta,
+      ...routeCrosswalkMeta(),
       status: "mutation_lookup_unavailable",
       feedAgeSeconds: Math.round(feedAgeMs / 1000),
       message: `Exacte KV17-mutaties niet opvraagbaar: ${error instanceof Error ? error.message : "onbekende fout"}`,
