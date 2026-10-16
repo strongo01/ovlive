@@ -274,7 +274,7 @@ function nsTrainNumber(
     (item: any) => text(item?.tripId) === tripId
   );
   const compactNumber = text(compactMatch?.trainNumber);
-  if (compactMatch && /^\\d+$/.test(compactNumber)) return compactNumber;
+  if (compactMatch && /^\d+$/.test(compactNumber)) return compactNumber;
 
   // Backwards-compatible fallback for old plans and self-tests.
   const match = outcomes.find((item: any) => text(item?.tripId) === tripId);
