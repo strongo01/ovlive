@@ -92,7 +92,9 @@ const env = {
     async fetch(request) {
       const url = new URL(request.url);
       if (url.pathname.endsWith('/manifest.json')) return Response.json(manifest);
-      if (url.pathname.endsWith('/trips-382.json')) return Response.json(shard);
+      if (/\/trips-\d+\.json$/.test(url.pathname)) {
+        return Response.json(url.pathname.endsWith('/trips-382.json') ? shard : {});
+      }
       return new Response('not found', { status: 404 });
     },
   },
