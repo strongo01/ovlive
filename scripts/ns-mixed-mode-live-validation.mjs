@@ -35,17 +35,32 @@ const planUrl = new URL("/api/plan", baseUrl);
 planUrl.searchParams.set("fromPlace", fromPlace);
 planUrl.searchParams.set("toPlace", toPlace);
 planUrl.searchParams.set("time", new Date(Date.now() + 120_000).toISOString());
-planUrl.searchParams.set("numItineraries", "5");
-planUrl.searchParams.set("maxItineraries", "5");
+planUrl.searchParams.set("numItineraries", "3");
+planUrl.searchParams.set("maxItineraries", "3");
 planUrl.searchParams.set("maxPreTransitTime", "900");
 planUrl.searchParams.set("maxPostTransitTime", "900");
 planUrl.searchParams.set("pedestrianSpeed", "1.5");
 planUrl.searchParams.set("transitModes", transitModes);
 
-const response = await fetch(planUrl, {
-  headers: { accept: "application/json" },
-  signal: AbortSignal.timeout(70_000)
-});
+const requestStartedAt = Date.now();
+let response;
+try {
+  response = await fetch(planUrl, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(70_000)
+  });
+} catch (error) {
+  console.log(JSON.stringify({
+    check: "production-mixed-mode-ns-realtime",
+    baseUrl,
+    fromPlace,
+    toPlace,
+    transitModes,
+    requestDurationMs: Date.now() - requestStartedAt,
+    error: error instanceof Error ? error.message : String(error)
+  }, null, 2));
+  throw new Error("Mixed-mode /api/plan did not return a response within the validation window.");
+}
 const body = await response.text();
 let plan;
 try {
