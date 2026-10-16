@@ -53,7 +53,7 @@ assert.ok(realtimeRenderer.includes("Voertuigupdate meldt 0 sec afwijking") &&
   realtimeRenderer.includes("kv6Seconds === 0"),
   "the nested KV6 vehicle status must also use neutral wording/styling for zero deviation");
 const compareHelperStart = html.indexOf("function canCompareOpenovWithKv78(");
-const compareHelperEnd = html.indexOf("\\n}", compareHelperStart) + 2;
+const compareHelperEnd = html.indexOf("\n}", compareHelperStart) + 2;
 assert.ok(compareHelperStart >= 0 && compareHelperEnd > compareHelperStart,
   "OpenOV-versus-KV78 confidence helper must exist");
 const compareHelperSource = html.slice(compareHelperStart, compareHelperEnd);
