@@ -39,6 +39,27 @@ const realtimeRenderer = html.slice(realtimeRendererStart, realtimeRendererEnd);
 assert.equal(realtimeRenderer.includes("leg.ndovRealtime?.status === 'kv6_observed'"), true,
   "realtimeHtml must explicitly render fresh KV6 observations without punctuality");
 
+// Unconfirmed OpenOV predictions must not replace planned stop times in the main timeline.
+const predictionStart = html.indexOf("function timelineRealtimePrediction(leg, kind, scheduledTime) {");
+const predictionEnd = html.indexOf("function timelineTimeHtml(", predictionStart);
+assert.ok(predictionStart >= 0 && predictionEnd > predictionStart,
+  "timeline prediction selector must exist");
+const predictionFunction = html.slice(predictionStart, predictionEnd);
+assert.ok(predictionFunction.includes("!unifiedTimestampMissing"),
+  "unified predictions without a per-trip timestamp must not drive the timeline");
+assert.ok(predictionFunction.includes("unifiedEvent?.confidence !== 'low'"),
+  "low-confidence unified predictions must not drive the timeline");
+assert.ok(predictionFunction.includes("String(rt.timestampBasis ?? '').toLowerCase() === 'trip_update'"),
+  "raw OpenOV predictions must have an explicit per-trip timestamp");
+assert.ok(predictionFunction.includes("if (!hasPerTripTimestamp) {\n    return null;"),
+  "raw OpenOV fallback must fail closed when the per-trip timestamp is missing");
+
+assert.ok(summaryFunction.includes("${label}: gemeld ${value}"),
+  "feed-header-only deviations must be described as reported, not confirmed");
+assert.ok(summaryFunction.includes("niet gebruikt als verwachte tijd in de tijdlijn"),
+  "OpenOV status must explain why an unconfirmed time does not replace the schedule");
+
 console.log("PASS: OpenOV status helper has no out-of-scope leg reference");
 console.log("PASS: KV6 observed-only status is rendered in the leg UI");
+console.log("PASS: unconfirmed OpenOV times cannot replace planned timeline times");
 console.log("All public UI JavaScript checks passed.");
