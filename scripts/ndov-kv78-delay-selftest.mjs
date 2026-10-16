@@ -72,6 +72,38 @@ const vehicleTripRows = [
     targetArrivalTime: '09:29:00', expectedArrivalTime: '09:29:38', arrivalDelaySeconds: 38,
     userStopOrderNumber: '19', userStopCode: 'CXX-DUKE',
   }),
+  row({
+    identity: 'CXX|2026-10-12|U073|9999|0',
+    dataOwnerCode: 'CXX', operationDate: '2026-10-12', linePlanningNumber: 'U073',
+    journeyNumber: '9999', fortifyOrderNumber: '0', vehicleNumber: '2281',
+    targetDepartureTime: null, expectedDepartureTime: null, departureDelaySeconds: null,
+    targetArrivalTime: '09:29:00', expectedArrivalTime: '09:16:00', arrivalDelaySeconds: -780,
+    userStopOrderNumber: '19', userStopCode: 'WRONG-LINE',
+  }),
+  row({
+    identity: 'CXX|2026-10-12|U005|9998|0',
+    dataOwnerCode: 'CXX', operationDate: '2026-10-12', linePlanningNumber: 'U005',
+    journeyNumber: '9998', fortifyOrderNumber: '0', vehicleNumber: '9999',
+    targetDepartureTime: null, expectedDepartureTime: null, departureDelaySeconds: null,
+    targetArrivalTime: '09:29:00', expectedArrivalTime: '09:44:00', arrivalDelaySeconds: 900,
+    userStopOrderNumber: '19', userStopCode: 'WRONG-VEHICLE',
+  }),
+  row({
+    identity: 'CXX|2026-10-13|U005|1051|0',
+    dataOwnerCode: 'CXX', operationDate: '2026-10-13', linePlanningNumber: 'U005',
+    journeyNumber: '1051', fortifyOrderNumber: '0', vehicleNumber: '2281',
+    targetDepartureTime: null, expectedDepartureTime: null, departureDelaySeconds: null,
+    targetArrivalTime: '09:29:00', expectedArrivalTime: '09:20:00', arrivalDelaySeconds: -540,
+    userStopOrderNumber: '19', userStopCode: 'WRONG-DATE',
+  }),
+  row({
+    identity: 'CXX|2026-10-12|U005|1052|0',
+    dataOwnerCode: 'CXX', operationDate: '2026-10-12', linePlanningNumber: 'U005',
+    journeyNumber: '1052', fortifyOrderNumber: '0', vehicleNumber: '2281',
+    targetDepartureTime: null, expectedDepartureTime: null, departureDelaySeconds: null,
+    targetArrivalTime: '09:50:00', expectedArrivalTime: '10:05:00', arrivalDelaySeconds: 900,
+    userStopOrderNumber: '20', userStopCode: 'WRONG-TIME',
+  }),
 ];
 const mutation = {
   source: 'BISON', protocol: 'KV17', eventType: 'CANCEL',
