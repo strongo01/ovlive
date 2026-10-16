@@ -260,8 +260,23 @@ function isRail(leg: any): boolean {
   ].includes(String(leg?.mode ?? "").toUpperCase());
 }
 
-function nsTrainNumber(leg: any, outcomes: any[]): string | null {
+function nsTrainNumber(
+  leg: any,
+  outcomes: any[],
+  trainIdentities: any[] = []
+): string | null {
   const tripId = text(leg?.tripId ?? leg?.trip?.id);
+
+  // Use the complete compact identity index first. routeCrosswalkOutcomes is
+  // deliberately capped for diagnostics and may omit this train on a mixed-mode
+  // plan with many bus/tram/train legs.
+  const compactMatch = trainIdentities.find(
+    (item: any) => text(item?.tripId) === tripId
+  );
+  const compactNumber = text(compactMatch?.trainNumber);
+  if (compactMatch && /^\\d+$/.test(compactNumber)) return compactNumber;
+
+  // Backwards-compatible fallback for old plans and self-tests.
   const match = outcomes.find((item: any) => text(item?.tripId) === tripId);
 
   if (!match || match.source !== "openov-route-crossmatch") return null;
@@ -529,9 +544,15 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
   const outcomes = Array.isArray(plan?.ndovRealtimeMeta?.routeCrosswalkOutcomes)
     ? plan.ndovRealtimeMeta.routeCrosswalkOutcomes
     : [];
+  const trainIdentities = Array.isArray(plan?.ndovRealtimeMeta?.nsTrainIdentities)
+    ? plan.ndovRealtimeMeta.nsTrainIdentities
+    : [];
 
   const candidates = legs
-    .map((leg: any) => ({ leg, number: nsTrainNumber(leg, outcomes) }))
+    .map((leg: any) => ({
+      leg,
+      number: nsTrainNumber(leg, outcomes, trainIdentities)
+    }))
     .filter((item: any) => item.number !== null);
 
   plan.nsRealtimeMeta = {
