@@ -49,6 +49,51 @@ assert.ok(realtimeRenderer.includes("geen bevestigde verwachte vertrek- of aanko
   "KV6 vehicle punctuality must be distinguished from a stop-specific arrival/departure prediction");
 assert.equal(realtimeRenderer.includes("Op tijd volgens de actuele voertuigupdate"), false,
   "a vehicle-only KV6 observation must not be labelled as simply on time");
+assert.ok(realtimeRenderer.includes("Voertuigupdate meldt 0 sec afwijking") &&
+  realtimeRenderer.includes("kv6Seconds === 0"),
+  "the nested KV6 vehicle status must also use neutral wording/styling for zero deviation");
+assert.ok(realtimeRenderer.includes("if (!kv78StopConfirmed) continue;"),
+  "OpenOV-versus-KV78 discrepancy warnings must require a confirmed KV78 stop");
+
+const delayLabelStart = html.indexOf("function delayLabel(value) {");
+const stopEventStart = html.indexOf("function stopEventHtml(label, event, scheduledValue) {");
+const stopEventEnd = html.indexOf("function openovStatusSummary(rt) {", stopEventStart);
+assert.ok(delayLabelStart >= 0 && stopEventStart > delayLabelStart && stopEventEnd > stopEventStart,
+  "KV78 delay and stop-event renderers must exist");
+const delayLabelSource = html.slice(delayLabelStart, stopEventStart).trim();
+const stopEventSource = html.slice(stopEventStart, stopEventEnd).trim();
+const delayLabel = new vm.Script("(" + delayLabelSource + ")").runInNewContext();
+const stopEventHtml = new vm.Script("(" + stopEventSource + ")").runInNewContext({
+  delayLabel,
+  esc: value => String(value ?? ""),
+  clock: value => new Date(value).toLocaleTimeString("nl-NL", {
+    timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit"
+  })
+});
+const unconfirmedKv78Html = stopEventHtml("Vertrek (KV78-halte 50000128)", {
+  targetTime: "21:54:00",
+  delaySeconds: 31,
+  stopAssignmentStatus: "time_only_unverified"
+}, "2026-10-16T19:54:00Z");
+assert.ok(unconfirmedKv78Html.includes("tijdindicatie uit KV78-doeltijd + afwijking; halte niet bevestigd"),
+  "time-only KV78 matching must be described as a diagnostic time indication, not an expected departure");
+assert.ok(unconfirmedKv78Html.includes('class="rt-unknown"'),
+  "delay values from unconfirmed KV78 stop matches must use neutral styling");
+assert.ok(unconfirmedKv78Html.includes("gemeld: 31 sec vertraging"),
+  "an unconfirmed KV78 deviation may be shown only as a reported value");
+assert.equal(unconfirmedKv78Html.includes('class="rt-delay"'), false,
+  "an unconfirmed KV78 stop match must not colour a reported delay as confirmed");
+const confirmedKv78Html = stopEventHtml("Vertrek (KV78-halte 51112304)", {
+  targetTime: "21:54:00",
+  delaySeconds: 31,
+  stopAssignmentStatus: "confirmed_quay_platform"
+}, "2026-10-16T19:54:00Z");
+assert.ok(confirmedKv78Html.includes("verwacht, berekend uit KV78-doeltijd + halteafwijking"),
+  "a confirmed KV78 stop assignment may retain its expected-time wording");
+assert.ok(confirmedKv78Html.includes('class="rt-delay"'),
+  "a confirmed KV78 stop assignment may retain its delay styling");
+console.log("PASS: unconfirmed KV78 stop matches remain diagnostic and neutral");
+console.log("PASS: confirmed KV78 stop matches retain stop-specific prediction display");
 
 // MOTIS can expose a realtime-adjusted startTime alongside the original timetable.
  // Always select explicit scheduled times first; never silently substitute a realtime time.
