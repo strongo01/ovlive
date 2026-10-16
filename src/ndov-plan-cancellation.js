@@ -14,6 +14,50 @@ let openovRouteManifestPromise = null;
 const openovRouteCache = new Map();
 let lastKv6NoExactMatchDiagnosticAt = 0;
 
+// Keep exact NS train identities separate from the bounded diagnostic list of
+// route-crosswalk outcomes. Mixed-mode plans can contain more than 12 legs;
+// truncating diagnostics must never make an otherwise exact train invisible
+// to the NS real-time enricher.
+export function buildNsTrainIdentities(outcomes) {
+  const acceptedReasons = new Set([
+    "exact_route_time_stop_match",
+    "exact_openov_trip_id_match",
+    "resolved_by_exact_trip_id_crosswalk",
+  ]);
+  const numbersByTripId = new Map();
+
+  for (const outcome of Array.isArray(outcomes) ? outcomes : []) {
+    const tripId = String(outcome?.tripId ?? "").trim();
+    const reason = String(outcome?.reason ?? "");
+    const owner = String(outcome?.parsedIdentity?.owner ?? "").trim().toUpperCase();
+    const trainNumber = String(outcome?.parsedIdentity?.journey ?? "").trim();
+
+    if (
+      !tripId ||
+      outcome?.source !== "openov-route-crossmatch" ||
+      !acceptedReasons.has(reason) ||
+      owner !== "IFF" ||
+      !/^\\d+$/.test(trainNumber)
+    ) {
+      continue;
+    }
+
+    if (!numbersByTripId.has(tripId)) {
+      numbersByTripId.set(tripId, new Set());
+    }
+    numbersByTripId.get(tripId).add(trainNumber);
+  }
+
+  // Fail closed if a single Transitous trip ID somehow points to multiple
+  // different NS train numbers.
+  return [...numbersByTripId.entries()]
+    .filter(([, numbers]) => numbers.size === 1)
+    .map(([tripId, numbers]) => ({
+      tripId,
+      trainNumber: [...numbers][0],
+    }));
+}
+
 function jsonResponseError(message) {
   return { ok: false, status: "unavailable", message };
 }
@@ -1114,6 +1158,9 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     openovRouteCrosswalkGeneratedAt: routeCrosswalkGeneratedAt,
     routeCrosswalkMatchedLegCount,
     routeCrosswalkError,
+    // Full compact exact identities for NS; detailed diagnostic candidates
+    // remain bounded to protect the public API payload.
+    nsTrainIdentities: buildNsTrainIdentities(routeCrosswalkOutcomes),
     routeCrosswalkOutcomes: routeCrosswalkOutcomes.slice(0, 12),
   });
   try {
@@ -1688,6 +1735,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     openovRouteCrosswalkGeneratedAt: routeCrosswalkGeneratedAt,
     routeCrosswalkMatchedLegCount,
     routeCrosswalkError,
+    nsTrainIdentities: buildNsTrainIdentities(routeCrosswalkOutcomes),
     routeCrosswalkOutcomes: routeCrosswalkOutcomes.slice(0, 12),
     matchedLegCount: matched,
     kv17MatchedLegCount: matched,
