@@ -660,6 +660,21 @@ function kv78RowMatchesVehicleLookup(row, item, lookup) {
   return true;
 }
 
+function kv78RowWithinLegTimeWindow(row, item, toleranceSeconds = 180) {
+  const scheduledDeparture = valueOf(item?.leg?.from, "departure") ??
+    valueOf(item?.leg, "startTime", "departureTime");
+  const scheduledArrival = valueOf(item?.leg?.to, "arrival") ??
+    valueOf(item?.leg, "endTime", "arrivalTime");
+  const departureDistance = row?.targetDepartureTime
+    ? clockDistanceSeconds(wallClockSeconds(scheduledDeparture), wallClockSeconds(row.targetDepartureTime))
+    : null;
+  const arrivalDistance = row?.targetArrivalTime
+    ? clockDistanceSeconds(wallClockSeconds(scheduledArrival), wallClockSeconds(row.targetArrivalTime))
+    : null;
+  return (departureDistance !== null && departureDistance <= toleranceSeconds) ||
+    (arrivalDistance !== null && arrivalDistance <= toleranceSeconds);
+}
+
 function sameKv78TripIdentity(row, item) {
   if (!row || !item?.identityKey) return false;
   const rowIdentity = toIdentity(
@@ -1458,7 +1473,8 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           }
         }
         const filteredVehicleRows = vehicleRows.filter((row) =>
-          kv78RowMatchesVehicleLookup(row, item, vehicleLookup)
+          kv78RowMatchesVehicleLookup(row, item, vehicleLookup) &&
+          kv78RowWithinLegTimeWindow(row, item)
         );
         const uniqueRows = new Map();
         for (const row of [...exactRows, ...filteredVehicleRows]) {
