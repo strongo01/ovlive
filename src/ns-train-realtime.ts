@@ -42,6 +42,38 @@ function normalizeName(value: unknown): string {
     .replace(/\s+/g, " ");
 }
 
+// De live NS-stationslijst is een externe afhankelijkheid. Deze kleine
+// reserve-index houdt de Utrecht Centraal–Terwijde-verbinding bruikbaar
+// als alleen /api/v2/stations faalt; overige stations blijven fail-closed.
+const FALLBACK_STATIONS = [
+  {
+    code: "UT",
+    UICCode: "8400621",
+    name: "Utrecht Centraal",
+    longName: "Utrecht Centraal",
+    namen: { lang: "Utrecht Centraal", middel: "Utrecht Centraal", kort: "Utrecht" },
+    synoniemen: ["Utrecht CS", "Utrecht Centraal Station"]
+  },
+  {
+    code: "UTT",
+    UICCode: "8400614",
+    name: "Utrecht Terwijde",
+    longName: "Utrecht Terwijde",
+    namen: { lang: "Utrecht Terwijde", middel: "Utrecht Terwijde", kort: "Terwijde" },
+    synoniemen: ["Station Utrecht Terwijde"]
+  }
+];
+
+function safeNsError(error: unknown): string {
+  const message = text(error instanceof Error ? error.message : error);
+  const http = message.match(/NS API HTTP (\\d{3})/i);
+  if (http) return `HTTP ${http[1]}`;
+  if (/NS_API_SUBSCRIPTION_KEY ontbreekt/i.test(message)) return "API-sleutel ontbreekt";
+  if (/timeout|timed out|abort/i.test(message)) return "time-out";
+  if (/onverwacht formaat/i.test(message)) return "onverwacht antwoordformaat";
+  return "netwerk- of JSON-fout";
+}
+
 async function nsJson(
   path: string,
   params: Record<string, string>,
@@ -488,7 +520,9 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
     unknownLegCount: candidates.length,
     message: candidates.length
       ? "NS-treinen worden gecontroleerd op treinnummer, station en geplande tijd."
-      : "Geen exact gekruisverwezen NS-treinnummer gevonden."
+      : "Geen exact gekruisverwezen NS-treinnummer gevonden.",
+    stationLookupSource: "not_checked",
+    stationListError: null
   };
 
   // Een rit zonder betrouwbaar NS-treinnummer krijgt geen OpenOV-fallback
@@ -506,17 +540,20 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
   }
 
   let stations: StationIndex;
+  let stationLookupSource = "ns_api";
+  let stationListError: string | null = null;
   try {
     stations = makeStationIndex(await getStations(env));
-  } catch {
-    for (const item of candidates) {
-      markUnknown(item.leg, item.number,
-        "De NS-stationslijst kon niet worden opgehaald.");
-    }
-    plan.nsRealtimeMeta.status = "unavailable";
-    plan.nsRealtimeMeta.message = "De NS-stationslijst is niet beschikbaar.";
-    return plan;
+  } catch (error) {
+    stationLookupSource = "builtin_fallback";
+    stationListError = safeNsError(error);
+    stations = makeStationIndex(FALLBACK_STATIONS);
+    plan.nsRealtimeMeta.stationLookupSource = stationLookupSource;
+    plan.nsRealtimeMeta.stationListError = stationListError;
+    plan.nsRealtimeMeta.stationListFallbackStationCount = FALLBACK_STATIONS.length;
   }
+  plan.nsRealtimeMeta.stationLookupSource = stationLookupSource;
+  plan.nsRealtimeMeta.stationListError = stationListError;
 
   const results = await Promise.all(candidates.map(async (item: any) => {
     const leg = item.leg;
@@ -527,8 +564,18 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
     const arriveMs = scheduledMs(leg, "arrival");
 
     if (!fromCode || !toCode || departMs === null || arriveMs === null) {
+      const unresolved = [
+        !fromCode ? `vertrekstation (${text(leg?.from?.name ?? leg?.from?.stationName) || "onbekend"})` : null,
+        !toCode ? `aankomststation (${text(leg?.to?.name ?? leg?.to?.stationName) || "onbekend"})` : null,
+        departMs === null || arriveMs === null ? "geplande tijd" : null
+      ].filter(Boolean).join(", ");
+      const diagnostic = stationLookupSource === "builtin_fallback"
+        ? ` NS-stationslijst faalde (${stationListError}); voor deze halte bestaat geen lokale reservekoppeling.`
+        : "";
       markUnknown(leg, number,
-        "NS-match niet mogelijk: stationcode of geplande tijd ontbreekt.");
+        `NS-match niet mogelijk: ${unresolved} ontbreekt of kan niet worden gekoppeld.${diagnostic}`);
+      leg.nsRealtime.stationLookupSource = stationLookupSource;
+      leg.nsRealtime.stationListError = stationListError;
       return { matched: false, dep: false, arr: false, cancelled: false, depDeviationKnown: false, arrDeviationKnown: false };
     }
 
@@ -602,6 +649,8 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
         status: cancelled ? "cancelled" : matched ? "matched" : "unknown",
         trainNumber: number,
         checkedAt: new Date().toISOString(),
+        stationLookupSource,
+        stationListError,
         matchMethod: departureUsedJourney || arrivalUsedJourney
           ? "NS-reisdetails: treinnummer + stationcode + geplande tijd binnen 3 minuten"
           : "NS-treinnummer + stationcode + geplande tijd binnen 3 minuten",
@@ -609,7 +658,7 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
         arrival,
         message: matched
           ? null
-          : "Geen unieke NS-vertrek- of aankomstregel bij deze trein gevonden."
+          : `Geen unieke NS-vertrek- of aankomstregel bij deze trein gevonden.${stationLookupSource === "builtin_fallback" ? ` Lokale stationcodes gebruikt; NS-stationslijst faalde (${stationListError}).` : ""}`
       };
 
       return {
@@ -620,9 +669,16 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
         depDeviationKnown: hasKnownPunctualityDeviation(departure),
         arrDeviationKnown: hasKnownPunctualityDeviation(arrival)
       };
-    } catch {
+    } catch (error) {
+      const boardError = safeNsError(error);
+      const stationWarning = stationLookupSource === "builtin_fallback"
+        ? ` Stationcodes kwamen uit de lokale reservekoppeling omdat de NS-stationslijst faalde (${stationListError}).`
+        : "";
       markUnknown(leg, number,
-        "De NS-vertrek- of aankomstgegevens konden niet worden opgehaald.");
+        `NS-vertrek-/aankomstgegevens niet beschikbaar (${boardError}).${stationWarning}`);
+      leg.nsRealtime.stationLookupSource = stationLookupSource;
+      leg.nsRealtime.stationListError = stationListError;
+      leg.nsRealtime.boardError = boardError;
       return { matched: false, dep: false, arr: false, cancelled: false, depDeviationKnown: false, arrDeviationKnown: false };
     }
   }));
