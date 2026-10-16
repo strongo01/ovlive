@@ -57,6 +57,55 @@ const stopPlaceIndex = { stopPlaces: {
 }
 
 {
+  const { "3924354": omittedMapping, ...withoutCurrentStopMapping } = stopPlaceIndex.stopPlaces;
+  const fallbackEvent = { ...event, eventType: "DEPARTURE" };
+  const prediction = deriveNdovKv6Prediction({
+    leg,
+    pattern,
+    event: fallbackEvent,
+    assignmentIndex,
+    stopPlaceIndex: { stopPlaces: withoutCurrentStopMapping },
+    operationDate: "20261012",
+    nowMs,
+  });
+  assert.ok(prediction, "unique near-exact stop time plus active official PSA/CHB quay should resolve a missing static OpenOV mapping");
+  assert.equal(prediction.confidence, "medium");
+  assert.match(prediction.method, /scheduled stop time.*PSA\/CHB quay.*mapping missing/i);
+  assert.equal(prediction.currentStop.stopId, "3924354");
+  assert.equal(prediction.currentStop.stopPlaceCode, "NL:S:123");
+  assert.equal(prediction.currentStop.quayCode, "ABC");
+  assert.equal(prediction.arrival.delaySeconds, 20);
+  console.log("PASS: unique stop-time fallback handles missing OpenOV mapping with medium confidence");
+
+  const nonStopEvent = { ...fallbackEvent, eventType: "ONSTOP" };
+  assert.equal(deriveNdovKv6Prediction({
+    leg,
+    pattern,
+    event: nonStopEvent,
+    assignmentIndex,
+    stopPlaceIndex: { stopPlaces: withoutCurrentStopMapping },
+    operationDate: "20261012",
+    nowMs,
+  }), null, "schedule-time fallback must not be used for ONSTOP events without a static mapping");
+
+  const conflictingStopPlaces = {
+    ...stopPlaceIndex.stopPlaces,
+    "3924354": { stopPlaceCode: "NL:S:123", quayCode: "NL:Q:OTHER" },
+  };
+  const conflictPrediction = deriveNdovKv6Prediction({
+    leg,
+    pattern,
+    event: fallbackEvent,
+    assignmentIndex,
+    stopPlaceIndex: { stopPlaces: conflictingStopPlaces },
+    operationDate: "20261012",
+    nowMs,
+  });
+  assert.equal(conflictPrediction, null, "a present but conflicting static stop mapping must never be bypassed");
+  console.log("PASS: fallback rejects ONSTOP-only evidence and conflicting static quay mappings");
+}
+
+{
   const atDestination = {
     ...event, userStopCode: "59250255",
     timestamp: "2026-10-12T11:50:20+02:00", punctualityTimestamp: "2026-10-12T11:50:20+02:00",
