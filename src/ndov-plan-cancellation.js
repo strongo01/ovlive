@@ -1137,6 +1137,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let recovered = 0;
   let kv78MatchedLegCount = 0;
   let kv78DataLegCount = 0;
+  let kv78ConfirmedStopLegCount = 0;
   let kv78DelayLegCount = 0;
   let kv78FeedAgeSeconds = null;
   let kv78FeedState = "unknown";
@@ -1431,6 +1432,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         const selectedStopMatches = [departure ? departureMatch : null, arrival ? arrivalMatch : null].filter(Boolean);
         const psaPlatformConfirmed = selectedStopMatches.length > 0 && selectedStopMatches.every((match) => match.stopAssignmentStatus === "confirmed_quay_platform");
         const psaStopPlaceConfirmed = selectedStopMatches.length > 0 && selectedStopMatches.every((match) => String(match.stopAssignmentStatus ?? "").startsWith("confirmed_"));
+        if (psaStopPlaceConfirmed) kv78ConfirmedStopLegCount += 1;
         const matchMethod = psaPlatformConfirmed
           ? "exact-trip-identity + official PSA/CHB StopPlace + Quay/haltezijde + dienstregelingstijd"
           : psaStopPlaceConfirmed
@@ -1543,6 +1545,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv78StopCrosswalkGeneratedAt: stopAssignmentIndex?.generatedAt ?? null,
     kv78MatchedLegCount,
     kv78DataLegCount,
+    kv78ConfirmedStopLegCount,
     kv78DelayLegCount,
     kv78Error,
     message: cancelled
