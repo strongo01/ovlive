@@ -1589,7 +1589,7 @@ q.set('pedestrianSpeed', '1.5');
         `${meta.noPredictionLegCount ?? meta.unknownLegCount ?? 0} zonder bruikbare halteprognose. ` +
         `Storingsmeldingen: ${(data.openovAlerts || []).length}.` +
         (data.ndovRealtimeMeta
-          ? ` NDOV KV6: ${data.ndovRealtimeMeta.kv6MatchedLegCount ?? 0} live ritmatches (${data.ndovRealtimeMeta.kv6DelayLegCount ?? 0} met vertraging); KV78: ${data.ndovRealtimeMeta.kv78DataLegCount ?? 0} reisdelen met haltegegevens (${data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0} met bevestigde PSA/CHB-halte, ${Math.max(0, (data.ndovRealtimeMeta.kv78DataLegCount ?? 0) - (data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0))} zonder bevestigde halte-match; ${data.ndovRealtimeMeta.kv78DelayLegCount ?? 0} met gemelde vertraging); KV17: ${data.ndovRealtimeMeta.cancelledLegCount ?? 0} exacte annuleringen.`
+          ? ` NDOV KV6: ${data.ndovRealtimeMeta.kv6MatchedLegCount ?? 0} live ritmatches (${data.ndovRealtimeMeta.kv6DelayLegCount ?? 0} met vertraging); KV78: ${data.ndovRealtimeMeta.kv78DataLegCount ?? 0} reisdelen met haltegegevens (${data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0} met bevestigde PSA/CHB-halte, ${Math.max(0, (data.ndovRealtimeMeta.kv78DataLegCount ?? 0) - (data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0))} zonder bevestigde halte-match; ${data.ndovRealtimeMeta.kv78VehicleFallbackLegCount ?? 0} via waargenomen voertuig + halte/tijd gekoppeld zonder exacte NDOV-rit-ID; ${data.ndovRealtimeMeta.kv78DelayLegCount ?? 0} met gemelde vertraging); KV17: ${data.ndovRealtimeMeta.cancelledLegCount ?? 0} exacte annuleringen.`
           : ' NDOV-status niet ontvangen.') +
         nsSummary;
     } else {
