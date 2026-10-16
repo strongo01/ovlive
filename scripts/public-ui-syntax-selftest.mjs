@@ -56,7 +56,7 @@ assert.ok(realtimeRenderer.includes("if (!kv78StopConfirmed) continue;"),
   "OpenOV-versus-KV78 discrepancy warnings must require a confirmed KV78 stop");
 
 const delayLabelStart = html.indexOf("function delayLabel(value) {");
-const stopEventStart = html.indexOf("function stopEventHtml(label, event, scheduledValue) {");
+const stopEventStart = html.indexOf("function stopEventHtml(label, event, scheduledValue, options = {}) {");
 const stopEventEnd = html.indexOf("function openovStatusSummary(rt) {", stopEventStart);
 assert.ok(delayLabelStart >= 0 && stopEventStart > delayLabelStart && stopEventEnd > stopEventStart,
   "KV78 delay and stop-event renderers must exist");
