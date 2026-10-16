@@ -11,7 +11,7 @@ from pathlib import Path
 
 DEFAULT_GTFS = Path.home() / "Library/Caches/ovlive-ndov/gtfs-openov-nl.zip"
 DEFAULT_OUT = Path("public/ndov-openov-route-crosswalk")
-MAX_SHARD_BYTES = 8 * 1024 * 1024
+MAX_SHARD_BYTES = 512 * 1024
 MAX_OPEN_FILES = 48
 
 
@@ -42,33 +42,38 @@ def clock(value):
 
 
 class RouteShardWriter:
+    """Write compact route+start-time shards and aligned service-ID sidecars."""
     def __init__(self, out_dir: Path):
         self.out_dir = out_dir
         self.routes_dir = out_dir / "routes"
         self.routes_dir.mkdir(parents=True, exist_ok=True)
-        self.states = {}  # route -> part/count/bytes/files
+        # (route ID, start-time bucket) -> output state
+        self.states = {}
         self.handles = OrderedDict()
         self.signatures = set()
         self.signature_services = {}
         self.pattern_count = 0
         self.total_bytes = 0
+        self.routes_by_start_bucket = {}
+        self.route_shard_count = 0
 
-    def _path(self, route, part):
-        return self.routes_dir / f"route-{route}-{part}.json"
+    def _path(self, route, bucket, part):
+        return self.routes_dir / f"route-{route}-t{bucket}-{part}.json"
 
     def _close_lru(self):
         while len(self.handles) >= MAX_OPEN_FILES:
             _, fp = self.handles.popitem(last=False)
-            fp.flush(); fp.close()
+            fp.flush()
+            fp.close()
 
-    def _handle(self, route, part, state):
-        key = (route, part)
+    def _handle(self, route, bucket, part, state):
+        key = (route, bucket, part)
         if key in self.handles:
             fp = self.handles.pop(key)
             self.handles[key] = fp
             return fp
         self._close_lru()
-        path = self._path(route, part)
+        path = self._path(route, bucket, part)
         if state["counts"].get(part, 0) == 0 and not path.exists():
             fp = open(path, "wb")
             fp.write(b"[")
@@ -78,13 +83,15 @@ class RouteShardWriter:
         self.handles[key] = fp
         return fp
 
-    def _finalize_part(self, route, part, state):
-        key = (route, part)
+    def _finalize_part(self, route, bucket, part, state):
+        key = (route, bucket, part)
         fp = self.handles.pop(key, None)
         if fp is not None:
-            fp.write(b"]"); fp.flush(); fp.close()
+            fp.write(b"]")
+            fp.flush()
+            fp.close()
         else:
-            with open(self._path(route, part), "ab") as out:
+            with open(self._path(route, bucket, part), "ab") as out:
                 out.write(b"]")
         state["closed"].add(part)
 
@@ -95,6 +102,15 @@ class RouteShardWriter:
         route = str(trip_meta["routeId"])
         if not parts or not route or not route.isdigit():
             return
+
+        first = stops[0]
+        first_clock = str(first.get("departureTime") or first.get("arrivalTime") or "").strip()
+        start_seconds = clock(first_clock)
+        if start_seconds is None:
+            return
+        start_hour = start_seconds // 3600
+        bucket = "24" if start_hour >= 24 else "12" if start_hour >= 12 else "00"
+
         pattern = {
             "routeId": route,
             "realtimeTripId": trip_meta["realtimeTripId"],
@@ -111,20 +127,25 @@ class RouteShardWriter:
             return
         self.signatures.add(signature)
         self.signature_services[signature] = {service_id} if service_id else set()
-        state = self.states.setdefault(route, {"part": 0, "counts": {}, "bytes": {}, "files": [], "closed": set(), "signatureLists": {}})
+
+        state_key = (route, bucket)
+        state = self.states.setdefault(
+            state_key,
+            {"part": 0, "counts": {}, "bytes": {}, "closed": set(), "signatureLists": {}},
+        )
         part = state["part"]
         count = state["counts"].get(part, 0)
         byte_count = state["bytes"].get(part, 0)
         extra = len(compact) + (1 if count else 0)
         if count > 0 and byte_count + extra > MAX_SHARD_BYTES:
-            self._finalize_part(route, part, state)
+            self._finalize_part(route, bucket, part, state)
             part += 1
             state["part"] = part
             state["counts"][part] = 0
             state["bytes"][part] = 0
             count = 0
-            byte_count = 0
-        fp = self._handle(route, part, state)
+
+        fp = self._handle(route, bucket, part, state)
         if count:
             fp.write(b",")
             self.total_bytes += 1
@@ -132,30 +153,30 @@ class RouteShardWriter:
         state["counts"][part] = count + 1
         state["signatureLists"].setdefault(part, []).append(signature)
         state["bytes"][part] = state["bytes"].get(part, 0) + extra
-        if state["bytes"][part] == 0:
-            state["bytes"][part] = 1 + len(compact)
-        filename = self._path(route, part).name
-        if filename not in state["files"]:
-            state["files"].append(filename)
         self.pattern_count += 1
         self.total_bytes += len(compact)
 
     def finish(self):
         for fp in self.handles.values():
-            fp.flush(); fp.close()
+            fp.flush()
+            fp.close()
         self.handles.clear()
+
         routes_manifest = {}
-        for route, state in sorted(self.states.items(), key=lambda kv: int(kv[0])):
+        routes_by_start_bucket = {}
+        for (route, bucket), state in sorted(
+            self.states.items(), key=lambda item: (int(item[0][0]), int(item[0][1]))
+        ):
+            filenames = []
             for part in range(state["part"] + 1):
+                path = self._path(route, bucket, part)
                 if part not in state["closed"]:
-                    with open(self._path(route, part), "ab") as out:
+                    with open(path, "ab") as out:
                         out.write(b"]")
                     state["closed"].add(part)
 
                 signatures = state["signatureLists"].get(part, [])
-                services_path = self._path(route, part).with_name(
-                    self._path(route, part).stem + "-services.json"
-                )
+                services_path = path.with_name(path.stem + "-services.json")
                 services_path.write_text(
                     json.dumps(
                         [sorted(self.signature_services.get(sig, set())) for sig in signatures],
@@ -163,9 +184,14 @@ class RouteShardWriter:
                     ) + "\n",
                     encoding="utf-8",
                 )
-            routes_manifest[route] = state["files"]
-        return routes_manifest
+                filenames.append(path.name)
 
+            routes_manifest.setdefault(route, []).extend(filenames)
+            routes_by_start_bucket.setdefault(route, {})[bucket] = filenames
+
+        self.routes_by_start_bucket = routes_by_start_bucket
+        self.route_shard_count = sum(len(names) for names in routes_manifest.values())
+        return routes_manifest
 
 
 def _optional_gtfs_rows(zf, basename):
@@ -362,7 +388,18 @@ def main():
                 "routeCount": len(routes_manifest),
                 "serviceCalendarDateCount": len(service_calendar),
                 "routes": routes_manifest,
-                "note": "OpenOV GTFS route and full-stop-time crossmatch; static schedule only. Runtime still requires fresh exact BISON KV6 event.",
+                "routesByStartBucket": writer.routes_by_start_bucket,
+                "timeBucketHours": 12,
+                "routeShardCount": writer.route_shard_count,
+                "indexPartitioning": {
+                    "strategy": "full-trip-start-time",
+                    "bucketHours": 12,
+                    "maxPatternShardBytes": MAX_SHARD_BYTES,
+                    "timeBucketHours": 12,
+                },
+                "serviceIdsEmbedded": False,
+                "maxPatternShardBytes": MAX_SHARD_BYTES,
+                "note": "OpenOV GTFS route and full-stop-time crossmatch, partitioned by trip start time; service IDs are in aligned sidecars. Runtime still requires a fresh exact BISON KV6 event.",
             }
             (build_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
             total_file_bytes = sum(p.stat().st_size for p in build_dir.rglob("*.json"))

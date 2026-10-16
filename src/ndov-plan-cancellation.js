@@ -152,46 +152,101 @@ async function getOpenovServiceCalendar(env) {
   return calendar;
 }
 
-async function getOpenovRouteCrosswalk(env, routeId) {
+export function openovTripStartBucket(tripId) {
+  const match = String(tripId ?? "").trim().match(/^\d{8}_(\d{1,3}):\d{2}(?::\d{2})?_/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  if (!Number.isFinite(hour) || hour < 0) return null;
+  return hour >= 24 ? "24" : hour >= 12 ? "12" : "00";
+}
+
+async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
   let manifest;
   try {
     if (!openovRouteManifestPromise) {
-      openovRouteManifestPromise = readAssetJson(env, `${OPENOV_ROUTE_CROSSWALK_ROOT}/manifest.json`).catch((error) => {
+      openovRouteManifestPromise = readAssetJson(
+        env,
+        OPENOV_ROUTE_CROSSWALK_ROOT + "/manifest.json"
+      ).catch((error) => {
         openovRouteManifestPromise = null;
         throw error;
       });
     }
     manifest = await openovRouteManifestPromise;
   } catch (error) {
-    return { indexedRoute: false, patterns: [], generatedAt: null, error: error instanceof Error ? error.message : "OpenOV-routeindex niet beschikbaar." };
+    return {
+      indexedRoute: false,
+      patterns: [],
+      generatedAt: null,
+      error: error instanceof Error ? error.message : "OpenOV-routeindex niet beschikbaar.",
+    };
   }
-  const files = manifest?.routes?.[String(routeId)];
+
+  const routeKey = String(routeId);
+  const bucketIndex = manifest?.routesByStartBucket?.[routeKey];
+  const bucket = openovTripStartBucket(originalTripId);
+  const useBucket = Boolean(bucketIndex && bucket);
+  let files = useBucket
+    ? bucketIndex[bucket]
+    : manifest?.routes?.[routeKey];
+
+  if (useBucket && (!Array.isArray(files) || files.length === 0)) {
+    return {
+      indexedRoute: true,
+      patterns: [],
+      generatedAt: manifest?.generatedAt ?? null,
+      serviceCalendarDateCount: Number(manifest?.serviceCalendarDateCount ?? 0),
+      error: null,
+    };
+  }
+
   if (!Array.isArray(files) || !files.length) {
-    return { indexedRoute: false, patterns: [], generatedAt: manifest?.generatedAt ?? null, error: null };
+    return {
+      indexedRoute: false,
+      patterns: [],
+      generatedAt: manifest?.generatedAt ?? null,
+      error: null,
+    };
   }
-  let promise = openovRouteCache.get(String(routeId));
+
+  // Cache each route+time bucket separately so a morning request cannot reuse
+  // an afternoon shard list for the same route.
+  const cacheKey = useBucket ? routeKey + ":" + bucket : routeKey;
+  let promise = openovRouteCache.get(cacheKey);
   if (!promise) {
     promise = (async () => {
       const all = [];
       for (const filename of files) {
         const name = String(filename ?? "").trim();
-        if (!name || name.includes("..") || name.includes("/")) throw new Error("Ongeldige route-shardnaam in OpenOV-manifest.");
-        const rows = await readAssetJson(env, `${OPENOV_ROUTE_CROSSWALK_ROOT}/routes/${name}`);
-        if (!Array.isArray(rows)) throw new Error(`OpenOV-route-shard ${name} is geen JSON-array.`);
-        if (Number(manifest?.serviceCalendarDateCount ?? 0) > 0 && manifest?.serviceIdsEmbedded !== true) {
+        if (!name || name.includes("..") || name.includes("/")) {
+          throw new Error("Ongeldige route-shardnaam in OpenOV-manifest.");
+        }
+        const rows = await readAssetJson(
+          env,
+          OPENOV_ROUTE_CROSSWALK_ROOT + "/routes/" + name
+        );
+        if (!Array.isArray(rows)) {
+          throw new Error("OpenOV-route-shard " + name + " is geen JSON-array.");
+        }
+        if (
+          Number(manifest?.serviceCalendarDateCount ?? 0) > 0 &&
+          manifest?.serviceIdsEmbedded !== true
+        ) {
           const servicesName = name.replace(/\.json$/i, "-services.json");
           const serviceRows = await readAssetJson(
             env,
-            `${OPENOV_ROUTE_CROSSWALK_ROOT}/routes/${servicesName}`
+            OPENOV_ROUTE_CROSSWALK_ROOT + "/routes/" + servicesName
           );
           if (!Array.isArray(serviceRows) || serviceRows.length !== rows.length) {
-            throw new Error(`OpenOV-service-sidecar ${servicesName} ontbreekt of is niet uitgelijnd.`);
+            throw new Error(
+              "OpenOV-service-sidecar " + servicesName + " ontbreekt of is niet uitgelijnd."
+            );
           }
           all.push(...rows.map((row, index) => ({
             ...row,
             serviceIds: Array.isArray(serviceRows[index])
               ? serviceRows[index].map(String)
-              : []
+              : [],
           })));
         } else {
           all.push(...rows);
@@ -199,12 +254,15 @@ async function getOpenovRouteCrosswalk(env, routeId) {
       }
       return all;
     })().catch((error) => {
-      openovRouteCache.delete(String(routeId));
+      openovRouteCache.delete(cacheKey);
       throw error;
     });
-    openovRouteCache.set(String(routeId), promise);
-    if (openovRouteCache.size > 40) openovRouteCache.delete(openovRouteCache.keys().next().value);
+    openovRouteCache.set(cacheKey, promise);
+    if (openovRouteCache.size > 40) {
+      openovRouteCache.delete(openovRouteCache.keys().next().value);
+    }
   }
+
   try {
     const patterns = await promise;
     return {
@@ -212,14 +270,18 @@ async function getOpenovRouteCrosswalk(env, routeId) {
       patterns,
       generatedAt: manifest?.generatedAt ?? null,
       serviceCalendarDateCount: Number(manifest?.serviceCalendarDateCount ?? 0),
-      error: null
+      error: null,
     };
   } catch (error) {
-    // A route listed in the manifest but missing a shard is not safe to resolve via an old numeric ID.
-    return { indexedRoute: true, patterns: [], generatedAt: manifest?.generatedAt ?? null, error: error instanceof Error ? error.message : "OpenOV-route-shard niet beschikbaar." };
+    // A missing expected shard is not safe to resolve through a numeric fallback.
+    return {
+      indexedRoute: true,
+      patterns: [],
+      generatedAt: manifest?.generatedAt ?? null,
+      error: error instanceof Error ? error.message : "OpenOV-route-shard niet beschikbaar.",
+    };
   }
 }
-
 function stopTimeValue(stop, kind) {
   if (!stop) return null;
   if (kind === "departure") return valueOf(stop, "departureTime", "departure", "arrivalTime", "arrival");
@@ -397,7 +459,7 @@ export function matchOpenovRoutePattern(leg, patterns, activeServiceIds = null) 
 async function resolveRealtimeTripForLeg(env, item) {
   const routeId = routeNumericId(item?.leg);
   if (routeId) {
-    const crosswalk = await getOpenovRouteCrosswalk(env, routeId);
+    const crosswalk = await getOpenovRouteCrosswalk(env, routeId, item?.identity?.originalTripId);
     if (crosswalk.indexedRoute) {
       if (crosswalk.error) return { parsed: null, source: "openov-route-crosswalk", generatedAt: crosswalk.generatedAt, error: crosswalk.error, indexedRoute: true };
       let activeServiceIds = null;

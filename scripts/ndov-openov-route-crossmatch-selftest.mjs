@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
-import { matchOpenovRoutePattern, applyNdovCancellationsToPlan } from '../src/ndov-plan-cancellation.js';
+import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket } from '../src/ndov-plan-cancellation.js';
+
+assert.equal(openovTripStartBucket('20261011_11:59_nl-OpenOV_390000001'), '00');
+assert.equal(openovTripStartBucket('20261011_12:00_nl-OpenOV_390000001'), '12');
+assert.equal(openovTripStartBucket('20261011_24:02_nl-OpenOV_390000001'), '24');
+assert.equal(openovTripStartBucket('invalid-trip-id'), null);
+console.log('PASS: service-day trip start selects the correct 00/12/24 route bucket');
 
 const patterns = [{
   routeId: '146903', realtimeTripId: 'CXX:U073:7054', headsign: 'Maarssenbroek', directionId: '1',
@@ -141,8 +147,21 @@ const planEnv = {
     async fetch(request) {
       const url = new URL(request.url);
       if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: [] });
-      if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({ generatedAt: now, routes: { '146903': ['route-146903-0.json'] } });
-      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-0.json') return Response.json(patterns);
+      if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({
+        generatedAt: now,
+        serviceCalendarDateCount: 0,
+        routes: { '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json'] },
+        routesByStartBucket: {
+          '146903': {
+            '00': ['route-146903-t00-0.json'],
+            '12': ['route-146903-t12-0.json'],
+          },
+        },
+      });
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t00-0.json') {
+        return new Response('A different start-time bucket must not be loaded.', { status: 500 });
+      }
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t12-0.json') return Response.json(patterns);
       return new Response('not found', { status: 404 });
     },
   },
