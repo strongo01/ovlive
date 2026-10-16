@@ -13,6 +13,35 @@ const MATCH_TOLERANCE_MS = 180_000;
 let stationCache: { until: number; promise: Promise<any[]> } | null = null;
 const boardCache = new Map<string, { until: number; promise: Promise<any[]> }>();
 
+
+// Keep a mixed-mode itinerary from bursting the NS API with every candidate
+// train at once. Each candidate can start departure + arrival board requests;
+// additional journey-detail calls are made only after those finish.
+const MAX_CONCURRENT_NS_TRAIN_LOOKUPS = 2;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(
+    items.length,
+    Math.max(1, Math.floor(concurrency))
+  );
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+
+  return results;
+}
+
 function text(value: unknown): string {
   return String(value ?? "").trim();
 }
@@ -555,7 +584,7 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
   plan.nsRealtimeMeta.stationLookupSource = stationLookupSource;
   plan.nsRealtimeMeta.stationListError = stationListError;
 
-  const results = await Promise.all(candidates.map(async (item: any) => {
+  const results = await mapWithConcurrency(candidates, MAX_CONCURRENT_NS_TRAIN_LOOKUPS, async (item: any) => {
     const leg = item.leg;
     const number = item.number as string;
     const fromCode = getStationCode(leg?.from, stations);
@@ -681,7 +710,7 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
       leg.nsRealtime.boardError = boardError;
       return { matched: false, dep: false, arr: false, cancelled: false, depDeviationKnown: false, arrDeviationKnown: false };
     }
-  }));
+  });
 
   const meta = plan.nsRealtimeMeta;
   meta.checkedAt = new Date().toISOString();
