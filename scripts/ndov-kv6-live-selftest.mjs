@@ -105,6 +105,7 @@ await applyNdovCancellationsToPlan(plan, env);
 const [cancelledLeg, kv78Leg, kv6Leg, staleLeg, observedLeg] = plan.itineraries[0].legs;
 assert.equal(plan.ndovRealtimeMeta.kv17MatchedLegCount, plan.ndovRealtimeMeta.matchedLegCount, 'KV17-teller moet expliciet beschikbaar zijn');
 assert.equal(plan.ndovRealtimeMeta.kv78DataLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.kv78ConfirmedStopLegCount, 0, 'time-only KV78 matches must not be counted as confirmed stops');
 assert.equal(cancelledLeg.ndovRealtime.status, 'cancelled');
 assert.equal(cancelledLeg.cancelled, true);
 assert.equal(kv78Leg.ndovRealtime.status, 'kv78_delay');
