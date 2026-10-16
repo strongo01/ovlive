@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { applyNdovCancellationsToPlan } from '../src/ndov-plan-cancellation.js';
+import { applyNdovCancellationsToPlan, buildNsTrainIdentities } from '../src/ndov-plan-cancellation.js';
 
 const planCancellationSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
@@ -10,6 +10,44 @@ assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\
 assert.match(planCancellationSource, /status\?stream=bison&identityDiagnostics=1/,
   'no-match diagnostics must include the targeted current CXX journey identities');
 
+
+// NS identity lookup must not inherit the 12-record diagnostic truncation.
+{
+  const prefixOutcomes = Array.from({ length: 12 }, (_, index) => ({
+    tripId: `bus-trip-${index}`,
+    source: 'openov-route-crossmatch',
+    reason: 'exact_openov_trip_id_match',
+    parsedIdentity: { owner: 'CXX', journey: `U073:${7000 + index}` },
+  }));
+  const trainOutcome = {
+    tripId: '20261016_22:44_nl-OpenOV_382969680',
+    source: 'openov-route-crossmatch',
+    reason: 'exact_openov_trip_id_match',
+    parsedIdentity: { owner: 'IFF', journey: '6080' },
+  };
+  const identities = buildNsTrainIdentities([...prefixOutcomes, trainOutcome]);
+  assert.deepEqual(identities, [{
+    tripId: trainOutcome.tripId,
+    trainNumber: '6080',
+  }]);
+  assert.deepEqual(
+    buildNsTrainIdentities([...prefixOutcomes, {
+      ...trainOutcome,
+      reason: 'ambiguous_route_time_stop_match',
+    }]),
+    [],
+    'ambiguous train identities must not enter the NS lookup index',
+  );
+  assert.deepEqual(
+    buildNsTrainIdentities([...prefixOutcomes, trainOutcome, {
+      ...trainOutcome,
+      parsedIdentity: { owner: 'IFF', journey: '6081' },
+    }]),
+    [],
+    'conflicting train numbers for one trip ID must fail closed',
+  );
+  console.log('PASS: exact NS identity index includes a train beyond 12 bus matches and rejects ambiguous/conflicting mappings');
+}
 
 const now = () => new Date().toISOString();
 function createEnv({ latestMessageAt = now(), latestMutations = [], state = 'complete' } = {}) {
