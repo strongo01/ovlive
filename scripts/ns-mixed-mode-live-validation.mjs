@@ -9,7 +9,7 @@ if (!baseUrl) throw new Error("OVLIVE_BASE_URL is required.");
 const fromPlace = process.env.OVLIVE_FROM_PLACE ?? "52.0888900756836,5.11027765274048";
 const toPlace = process.env.OVLIVE_TO_PLACE ?? "52.102126,5.048507";
 const transitModes = process.env.OVLIVE_TRANSIT_MODES ??
-  "RAIL,HIGHSPEED_RAIL,LONG_DISTANCE,NIGHT_RAIL,REGIONAL_FAST_RAIL,REGIONAL_RAIL,SUBURBAN,BUS,COACH,METRO,SUBWAY,TRAM,FERRY";
+  "RAIL,HIGHSPEED_RAIL,LONG_DISTANCE,NIGHT_RAIL,REGIONAL_FAST_RAIL,REGIONAL_RAIL,SUBURBAN,BUS,COACH";
 
 function collectLegs(plan) {
   const containers = [
@@ -34,7 +34,10 @@ function collectLegs(plan) {
 const planUrl = new URL("/api/plan", baseUrl);
 planUrl.searchParams.set("fromPlace", fromPlace);
 planUrl.searchParams.set("toPlace", toPlace);
-planUrl.searchParams.set("time", new Date(Date.now() + 120_000).toISOString());
+// Give the planner enough lead time to produce a future train+bus option,
+ // rather than only the immediately departing bus options.
+const requestTime = new Date(Date.now() + 15 * 60_000).toISOString();
+planUrl.searchParams.set("time", requestTime);
 planUrl.searchParams.set("numItineraries", "3");
 planUrl.searchParams.set("maxItineraries", "3");
 planUrl.searchParams.set("maxPreTransitTime", "900");
@@ -86,6 +89,7 @@ const summary = {
   fromPlace,
   toPlace,
   transitModes,
+  requestTime,
   httpStatus: response.status,
   itineraryCount: Array.isArray(plan?.itineraries) ? plan.itineraries.length : null,
   totalLegCount: legs.length,
