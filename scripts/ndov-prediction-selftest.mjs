@@ -166,7 +166,7 @@ const stopPlaceIndex = { stopPlaces: {
   const combinedLeg = {
     ...leg,
     openovRealtime: {
-      status: "matched", updateAgeSeconds: 5,
+      status: "matched", timestampBasis: "trip_update", updateAgeSeconds: 5,
       departure: { time: "2026-10-12T09:31:00.000Z", delaySeconds: 60, delayBasis: "absolute_prediction_minus_scheduled_time" },
       arrival: { time: "2026-10-12T09:51:00.000Z", delaySeconds: 60, delayBasis: "gtfsrt_propagated_from_prior_stop_update" },
     },
@@ -187,6 +187,56 @@ const stopPlaceIndex = { stopPlaces: {
   assert.equal(unified.arrival.source, "NDOV BISON KV6", "fresh measured punctuality should outrank OpenOV propagation from an earlier stop");
   assert.equal(unified.arrival.time, "2026-10-12T09:52:00.000Z");
   console.log("PASS: unified predictions prefer direct stop predictions over weaker propagation");
+}
+
+{
+  const feedHeaderOnlyLeg = {
+    ...leg,
+    openovRealtime: {
+      status: "matched",
+      timestampBasis: "feed_header",
+      updateAgeSeconds: 5,
+      freshnessNote: "De timestamp per rit ontbreekt; de versheid is afgeleid van de feed-header.",
+      departure: {
+        time: "2026-10-12T09:31:00.000Z",
+        delaySeconds: 60,
+        delayBasis: "absolute_prediction_minus_scheduled_time",
+      },
+      arrival: {
+        time: "2026-10-12T09:51:00.000Z",
+        delaySeconds: 60,
+        delayBasis: "absolute_prediction_minus_scheduled_time",
+      },
+    },
+  };
+  const unconfirmedOnly = buildUnifiedRealtimePrediction(feedHeaderOnlyLeg, "2026-10-12T09:30:20.000Z");
+  assert.equal(
+    unconfirmedOnly.departure.source,
+    "OpenOV GTFS-Realtime (rit-timestamp ontbreekt)",
+    "feed-header-only predictions must be visibly marked unconfirmed",
+  );
+  assert.equal(unconfirmedOnly.departure.confidence, "low");
+  assert.equal(unconfirmedOnly.departure.hasPerTripTimestamp, false);
+
+  const independentlyConfirmedLeg = {
+    ...feedHeaderOnlyLeg,
+    ndovRealtime: {
+      status: "kv6_live",
+      prediction: {
+        departure: { time: "2026-10-12T09:32:00.000Z", delaySeconds: 120, source: "NDOV BISON KV6" },
+      },
+    },
+  };
+  const independentlyConfirmed = buildUnifiedRealtimePrediction(
+    independentlyConfirmedLeg,
+    "2026-10-12T09:30:20.000Z",
+  );
+  assert.equal(
+    independentlyConfirmed.departure.source,
+    "NDOV BISON KV6",
+    "a fresh independent NDOV projection must outrank OpenOV data without a per-trip timestamp",
+  );
+  console.log("PASS: feed-header-only OpenOV predictions are downgraded and clearly labelled");
 }
 
 console.log("All NDOV prediction regression tests passed.");
