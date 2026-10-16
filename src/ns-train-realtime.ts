@@ -99,8 +99,28 @@ function safeNsError(error: unknown): string {
   if (http) return `HTTP ${http[1]}`;
   if (/NS_API_SUBSCRIPTION_KEY ontbreekt/i.test(message)) return "API-sleutel ontbreekt";
   if (/timeout|timed out|abort/i.test(message)) return "time-out";
+  if (/geen geldige JSON/i.test(message)) return "ongeldig JSON-antwoord";
+  if (/subrequest|too many requests to internal services/i.test(message) &&
+      /limit|too many|exceeded/i.test(message)) return "Cloudflare-subrequestlimiet";
+  if (/fetch failed|networkerror|network request failed|connection reset|socket hang up|econnreset|econnrefused/i.test(message)) return "netwerkfout";
   if (/onverwacht formaat/i.test(message)) return "onverwacht antwoordformaat";
   return "netwerk- of JSON-fout";
+}
+
+const NS_API_RETRY_DELAY_MS = 250;
+
+function retryableNsTransportError(error: unknown): boolean {
+  const message = text(error instanceof Error ? error.message : error);
+  const name = text((error as any)?.name);
+  // Do not retry hard runtime quotas or timeouts; a retry cannot fix those.
+  if (/subrequest|too many|quota|limit exceeded/i.test(message)) return false;
+  if (name === "TimeoutError" || /timeout|timed out|abort/i.test(message)) return false;
+  return error instanceof TypeError ||
+    /fetch failed|networkerror|network request failed|connection reset|socket hang up|econnreset|econnrefused/i.test(message);
+}
+
+async function waitBeforeNsRetry(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, NS_API_RETRY_DELAY_MS));
 }
 
 async function nsJson(
@@ -116,7 +136,7 @@ async function nsJson(
     url.searchParams.set(name, value);
   }
 
-  const response = await fetch(url, {
+  const init: RequestInit = {
     headers: {
       accept: "application/json",
       "Ocp-Apim-Subscription-Key": key,
@@ -125,12 +145,70 @@ async function nsJson(
         (env.APP_CONTACT ? ` (${env.APP_CONTACT})` : "")
     },
     signal: AbortSignal.timeout(12_000)
-  });
+  };
 
-  if (!response.ok) {
-    throw new Error(`NS API HTTP ${response.status}.`);
+  // NS's gateway can occasionally reset a connection or return a transient
+  // non-JSON body with HTTP 200. Retry those transient failures once, but do
+  // not retry timeouts, hard subrequest limits, or ordinary 4xx responses.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      if (attempt === 0 && retryableNsTransportError(error)) {
+        console.warn("[OVLIVE_NS_API_RETRY]", JSON.stringify({
+          path, reason: "transport_error", attempt: attempt + 1
+        }));
+        await waitBeforeNsRetry();
+        continue;
+      }
+      throw error;
+    }
+
+    if (!response.ok) {
+      if (attempt === 0 && response.status >= 500 && response.status <= 599) {
+        console.warn("[OVLIVE_NS_API_RETRY]", JSON.stringify({
+          path, reason: "upstream_5xx", status: response.status, attempt: attempt + 1
+        }));
+        await waitBeforeNsRetry();
+        continue;
+      }
+      throw new Error(`NS API HTTP ${response.status}.`);
+    }
+
+    let body: string;
+    try {
+      body = await response.text();
+    } catch (error) {
+      if (attempt === 0 && retryableNsTransportError(error)) {
+        console.warn("[OVLIVE_NS_API_RETRY]", JSON.stringify({
+          path, reason: "body_read_error", attempt: attempt + 1
+        }));
+        await waitBeforeNsRetry();
+        continue;
+      }
+      throw error;
+    }
+
+    try {
+      return JSON.parse(body);
+    } catch {
+      const contentType = response.headers.get("content-type") ?? "unknown";
+      if (attempt === 0) {
+        console.warn("[OVLIVE_NS_API_RETRY]", JSON.stringify({
+          path, reason: "invalid_json", status: response.status,
+          contentType, attempt: attempt + 1
+        }));
+        await waitBeforeNsRetry();
+        continue;
+      }
+      throw new Error(
+        `NS API antwoord bevat geen geldige JSON (HTTP ${response.status}; content-type ${contentType}).`
+      );
+    }
   }
-  return response.json();
+
+  throw new Error("NS API request failed after retry.");
 }
 
 async function getStations(env: NsEnv): Promise<any[]> {
