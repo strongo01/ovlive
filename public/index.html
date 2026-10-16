@@ -283,7 +283,7 @@ function delayLabel(value) {
     : `${minutes} min eerder`;
 }
 
-function stopEventHtml(label, event, scheduledValue) {
+function stopEventHtml(label, event, scheduledValue, options = {}) {
   if (!event || (!event.time && typeof event.delaySeconds !== 'number')) {
     return '';
   }
@@ -359,16 +359,30 @@ function stopEventHtml(label, event, scheduledValue) {
       ? clock(expectedMs)
       : clock(scheduledValue);
 
-  const stopAssignmentConfirmed =
+  const requiresStopConfirmation = options.requireConfirmedStopAssignment === true;
+  const stopAssignmentConfirmed = !requiresStopConfirmation ||
     String(event.stopAssignmentStatus ?? '').startsWith('confirmed_');
-  const timeType = !stopAssignmentConfirmed
-    ? event.time
-      ? 'tijd uit KV78-rij; halte niet bevestigd'
-      : expectedFromTargetMs !== null
-        ? 'tijdindicatie uit KV78-doeltijd + afwijking; halte niet bevestigd'
-        : expectedFromScheduleMs !== null
-          ? 'tijdindicatie uit dienstregeling + afwijking; halte niet bevestigd'
-          : 'dienstregeling; halte niet bevestigd'
+  const openovTimestampMissing =
+    options.sourceLabel === 'OpenOV' && options.unconfirmed === true;
+  const confidenceUnconfirmed = openovTimestampMissing ||
+    (requiresStopConfirmation && !stopAssignmentConfirmed);
+
+  const timeType = confidenceUnconfirmed
+    ? requiresStopConfirmation
+      ? event.time
+        ? 'tijd uit KV78-rij; halte niet bevestigd'
+        : expectedFromTargetMs !== null
+          ? 'tijdindicatie uit KV78-doeltijd + afwijking; halte niet bevestigd'
+          : expectedFromScheduleMs !== null
+            ? 'tijdindicatie uit dienstregeling + afwijking; halte niet bevestigd'
+            : 'dienstregeling; halte niet bevestigd'
+      : event.time
+        ? 'tijd uit OpenOV-ritupdate; rit-timestamp ontbreekt'
+        : expectedFromTargetMs !== null
+          ? 'tijdindicatie uit OpenOV-doeltijd + afwijking; rit-timestamp ontbreekt'
+          : expectedFromScheduleMs !== null
+            ? 'tijdindicatie uit dienstregeling + afwijking; rit-timestamp ontbreekt'
+            : 'dienstregeling; realtime niet bevestigd'
     : event.time
       ? 'verwacht uit realtimebron'
       : expectedFromTargetMs !== null
@@ -378,13 +392,17 @@ function stopEventHtml(label, event, scheduledValue) {
           : 'gepland';
 
   const delayText = delay === null
-    ? 'geen vertraging voor deze halte opgegeven'
-    : !stopAssignmentConfirmed
-      ? `gemeld: ${delayLabel(delay)}`
+    ? confidenceUnconfirmed
+      ? 'vertraging onbekend; realtime niet bevestigd'
+      : 'geen vertraging voor deze halte opgegeven'
+    : confidenceUnconfirmed
+      ? delay === 0
+        ? 'gemeld: 0 sec afwijking; op tijd niet bevestigd'
+        : `gemeld: ${delayLabel(delay)}`
       : delayLabel(delay);
 
-  // Zonder officiële PSA/CHB-haltebevestiging blijven tijd en afwijking neutraal.
-  const colorClass = !stopAssignmentConfirmed || delay === null
+  // Onbevestigde rit-/haltegegevens blijven neutraal.
+  const colorClass = confidenceUnconfirmed || delay === null
     ? 'rt-unknown'
     : delay > 0
       ? 'rt-delay'
@@ -697,7 +715,7 @@ function realtimeHtml(leg) {
       ? `Aankomst (KV78-halte ${kv78.arrival.stopCode}${kv78.arrival?.stopSideCode ? ` · zijde ${kv78.arrival.stopSideCode}` : ''})`
       : 'Aankomst volgens KV78Turbo';
     const stopEventHtmlWithZeroOnTime = (label, event, fallbackTime) => {
-      const html = stopEventHtml(label, event, fallbackTime);
+      const html = stopEventHtml(label, event, fallbackTime, { requireConfirmedStopAssignment: true });
       const delaySeconds = event?.delaySeconds == null ? null : Number(event.delaySeconds);
       if (delaySeconds !== 0 || !Number.isFinite(delaySeconds)) return html;
 
@@ -982,16 +1000,23 @@ function realtimeHtml(leg) {
     </div>`;
   }
 
+  // Feed-header versheid is geen bewijs dat deze specifieke ritupdate vers is.
+  const missingTripTimestamp = /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ''));
+  const hasExplicitStopPrediction = Boolean(rt.departure?.time || rt.arrival?.time);
+  const openovPredictionUnconfirmed = missingTripTimestamp || !hasExplicitStopPrediction;
+
   const departure = stopEventHtml(
     'Vertrek',
     rt.departure,
-    leg.from?.departure || leg.startTime
+    leg.from?.departure || leg.startTime,
+    { sourceLabel: 'OpenOV', unconfirmed: openovPredictionUnconfirmed }
   );
 
   const arrival = stopEventHtml(
     'Aankomst',
     rt.arrival,
-    leg.to?.arrival || leg.endTime
+    leg.to?.arrival || leg.endTime,
+    { sourceLabel: 'OpenOV', unconfirmed: openovPredictionUnconfirmed }
   );
 
   const hasStopInformation = Boolean(departure || arrival);
@@ -999,11 +1024,7 @@ function realtimeHtml(leg) {
   const freshnessNoteHtml = rt.freshnessNote
     ? `<div class="rt-details">${esc(rt.freshnessNote)}</div>`
     : '';
-
-  // Feed-header versheid is geen bewijs dat deze specifieke ritupdate vers is.
-  const missingTripTimestamp = /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ''));
-  const hasExplicitStopPrediction = Boolean(rt.departure?.time || rt.arrival?.time);
-  if (missingTripTimestamp || !hasExplicitStopPrediction) {
+  if (openovPredictionUnconfirmed) {
     return `<div class="rt-status rt-unknown">
       <strong>OpenOV · ritmatch gevonden, uitvoering niet bevestigd</strong>
       ${freshnessNoteHtml}
