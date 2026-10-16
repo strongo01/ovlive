@@ -440,4 +440,117 @@ console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
   console.log("PASS: ook de 13e trein buiten de 12 diagnostische crosswalk-resultaten krijgt NS-realtime; alle 13 vertragingen behouden en NS-bordbelasting begrensd");
 }
 
+// In mixed-mode searches the NS gateway may briefly return an HTML/non-JSON
+// response or reset one connection. The planner must retry a transient failure
+// once and still enrich the train while leaving the bus leg untouched.
+{
+  const originalFetch = globalThis.fetch;
+  const trainNumber = "6084";
+  const tripId = "20261016_23:44_nl-OpenOV_382969684";
+  const plannedDeparture = "2026-10-16T21:44:00.000Z";
+  const plannedArrival = "2026-10-16T21:50:00.000Z";
+  const actualDeparture = "2026-10-16T21:45:00.000Z";
+  const actualArrival = "2026-10-16T21:51:00.000Z";
+  let stationRequests = 0;
+  let departureRequests = 0;
+  let arrivalRequests = 0;
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/api/v2/stations")) {
+      stationRequests += 1;
+      if (stationRequests === 1) {
+        return new Response("<html>temporary gateway response</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      return new Response(JSON.stringify({ payload: [
+        { code: "UT", UICCode: "8400621", name: "Utrecht Centraal" },
+        { code: "UTT", UICCode: "8400614", name: "Utrecht Terwijde" }
+      ] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname.endsWith("/api/v2/departures")) {
+      departureRequests += 1;
+      if (departureRequests === 1) throw new TypeError("fetch failed");
+      return new Response(JSON.stringify({
+        payload: { departures: [{
+          product: { number: trainNumber },
+          plannedDateTime: plannedDeparture,
+          actualDateTime: actualDeparture,
+          delayInSeconds: 60,
+          cancelled: false
+        }] }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+
+    if (url.pathname.endsWith("/api/v2/arrivals")) {
+      arrivalRequests += 1;
+      return new Response(JSON.stringify({
+        payload: { arrivals: [{
+          product: { number: trainNumber },
+          plannedDateTime: plannedArrival,
+          actualDateTime: actualArrival,
+          delayInSeconds: 60,
+          cancelled: false
+        }] }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+
+    throw new Error(`Unexpected NS test request: ${url.pathname}`);
+  };
+
+  const busLeg = {
+    mode: "BUS",
+    tripId: "20261016_23:34_nl-OpenOV_391191145",
+    from: { name: "Utrecht, CS Jaarbeurszijde" },
+    to: { name: "Utrecht, Duke Ellingtonstraat" }
+  };
+  const trainLeg = {
+    mode: "RAIL",
+    tripId,
+    from: {
+      name: "Utrecht Centraal",
+      uicCode: "8400621",
+      departure: plannedDeparture
+    },
+    to: {
+      name: "Utrecht Terwijde",
+      uicCode: "8400614",
+      arrival: plannedArrival
+    }
+  };
+  const plan = {
+    itineraries: [{ legs: [busLeg, trainLeg] }],
+    ndovRealtimeMeta: {
+      routeCrosswalkOutcomes: [],
+      nsTrainIdentities: [{ tripId, trainNumber }]
+    }
+  };
+
+  try {
+    await enrichNsTrainPlan(plan, {
+      NS_API_SUBSCRIPTION_KEY: "selftest-key",
+      APP_NAME: "OVLive",
+      APP_VERSION: "selftest",
+      APP_CONTACT: "test"
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(stationRequests, 2, "ongeldige JSON van de NS-stationslijst moet één retry krijgen");
+  assert.equal(departureRequests, 2, "tijdelijke NS-netwerkfout moet één retry krijgen");
+  assert.equal(arrivalRequests, 1, "gezonde aankomstaanvraag mag niet opnieuw worden uitgevoerd");
+  assert.equal(plan.nsRealtimeMeta.candidateLegCount, 1);
+  assert.equal(plan.nsRealtimeMeta.matchedLegCount, 1);
+  assert.equal(trainLeg.nsRealtime.status, "matched");
+  assert.equal(trainLeg.nsRealtime.trainNumber, trainNumber);
+  assert.equal(trainLeg.nsRealtime.departure.delaySeconds, 60);
+  assert.equal(trainLeg.nsRealtime.arrival.delaySeconds, 60);
+  assert.equal(busLeg.nsRealtime, undefined, "NS-enrichment mag de busleg niet wijzigen");
+  console.log("PASS: gemengde bus/treinreis herstelt eenmalige NS JSON- en netwerkfouten veilig");
+}
+
 console.log("Alle NS-regressietests geslaagd.");
