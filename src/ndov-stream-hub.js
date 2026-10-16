@@ -962,9 +962,27 @@ export class NdovFeedHub extends DurableObject {
         const lookup = normalizeTripLookupIdentity(value);
         return lookup ? [lookup.owner, lookup.date, lookup.line, lookup.journey, lookup.reinforcement].join('|') : null;
       }).filter(Boolean))].slice(0, 20);
+      const vehicleNumber = String(url.searchParams.get('vehicleNumber') ?? '').trim().split(':').pop();
+      const vehicleOwner = String(url.searchParams.get('owner') ?? '').trim().toUpperCase();
+      const vehicleDate = normalizeOperatingDate(url.searchParams.get('date'));
+      const vehicleLine = String(url.searchParams.get('line') ?? '').trim().toUpperCase();
+      const vehicleLookupValid = Boolean(
+        vehicleNumber && vehicleOwner && /^\d{8}$/.test(vehicleDate)
+      );
+      if (!identities.length && !vehicleLookupValid) {
+        return Response.json({ ok: false, error: 'Geef identity=... of vehicleNumber=...&owner=...&date=YYYYMMDD op.' }, { status: 400 });
+      }
       this.pruneEvents(stream);
+      const selectedEvents = identities.length
+        ? identities.map((identity) => state.events.get(identity))
+        : [...state.events.values()].filter((event) =>
+            String(event?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
+            String(event?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
+            normalizeOperatingDate(event?.operationDate) === vehicleDate &&
+            (!vehicleLine || String(event?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
+          );
       const now = Date.now();
-      const events = identities.map((identity) => state.events.get(identity)).filter((event) => {
+      const events = selectedEvents.filter((event) => {
         if (!event) return false;
         const receivedMs = Date.parse(event.receivedAt ?? '');
         const punctualityReceivedMs = Date.parse(event.punctualityReceivedAt ?? '');
@@ -995,7 +1013,7 @@ export class NdovFeedHub extends DurableObject {
           punctualityTimestamp: null,
           punctualityReceivedAt: null,
         };
-      });
+      }).slice(-20);
       return Response.json({ ok: true, state: state.snapshot.state, latestMessageAt: state.snapshot.latestMessageAt, returnedCount: events.length, events }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname === '/mutations') {
@@ -1007,11 +1025,34 @@ export class NdovFeedHub extends DurableObject {
     if (url.pathname === '/rows') {
       if (stream !== 'kv78') return Response.json({ ok: false, error: 'KV78-halterijen zijn alleen beschikbaar op de KV78-stream.' }, { status: 400 });
       const identity = normalizeTripLookupIdentity(url.searchParams.get('identity'));
-      if (!identity) return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement op.' }, { status: 400 });
+      const vehicleNumber = String(url.searchParams.get('vehicleNumber') ?? '').trim().split(':').pop();
+      const vehicleOwner = String(url.searchParams.get('owner') ?? '').trim().toUpperCase();
+      const vehicleDate = normalizeOperatingDate(url.searchParams.get('date'));
+      const vehicleLine = String(url.searchParams.get('line') ?? '').trim().toUpperCase();
+      const vehicleLookupValid = Boolean(
+        vehicleNumber && vehicleOwner && /^\d{8}$/.test(vehicleDate)
+      );
+      if (!identity && !vehicleLookupValid) {
+        return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement of vehicleNumber=...&owner=...&date=YYYYMMDD op.' }, { status: 400 });
+      }
       const now = Date.now();
-      const rows = [...state.rows.values()].filter((row) => rowMatchesIdentity(row, identity));
+      const rows = [...state.rows.values()].filter((row) => identity
+        ? rowMatchesIdentity(row, identity)
+        : String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
+          String(row?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
+          normalizeOperatingDate(row?.operationDate) === vehicleDate &&
+          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
+      );
       const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
-      return Response.json({ ok: true, identity: [identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement].join('|'), returnedCount: Math.min(fresh.length, 200), staleCount: rows.length - fresh.length, rows: fresh.slice(0, 200) }, { headers: { 'cache-control': 'no-store' } });
+      fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
+      return Response.json({
+        ok: true,
+        identity: identity ? [identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement].join('|') : null,
+        lookup: identity ? null : { vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
+        returnedCount: Math.min(fresh.length, 200),
+        staleCount: rows.length - fresh.length,
+        rows: fresh.slice(-200),
+      }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname !== '/start') return new Response('not found', { status: 404 });
     const rawSeconds = Number(url.searchParams.get('seconds') || '45');
