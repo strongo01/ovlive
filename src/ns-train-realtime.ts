@@ -136,15 +136,12 @@ async function nsJson(
     url.searchParams.set(name, value);
   }
 
-  const init: RequestInit = {
-    headers: {
-      accept: "application/json",
-      "Ocp-Apim-Subscription-Key": key,
-      "user-agent":
-        `${env.APP_NAME || "OVLive"}/${env.APP_VERSION || "0.1.0"}` +
-        (env.APP_CONTACT ? ` (${env.APP_CONTACT})` : "")
-    },
-    signal: AbortSignal.timeout(12_000)
+  const headers = {
+    accept: "application/json",
+    "Ocp-Apim-Subscription-Key": key,
+    "user-agent":
+      `${env.APP_NAME || "OVLive"}/${env.APP_VERSION || "0.1.0"}` +
+      (env.APP_CONTACT ? ` (${env.APP_CONTACT})` : "")
   };
 
   // NS's gateway can occasionally reset a connection or return a transient
@@ -153,7 +150,10 @@ async function nsJson(
   for (let attempt = 0; attempt < 2; attempt++) {
     let response: Response;
     try {
-      response = await fetch(url, init);
+      response = await fetch(url, {
+        headers,
+        signal: AbortSignal.timeout(12_000)
+      });
     } catch (error) {
       if (attempt === 0 && retryableNsTransportError(error)) {
         console.warn("[OVLIVE_NS_API_RETRY]", JSON.stringify({
