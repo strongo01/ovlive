@@ -593,6 +593,85 @@ async function getCurrentKv78Rows(env, identity) {
   return data.rows;
 }
 
+async function getCurrentKv78RowsByVehicle(env, lookup) {
+  if (!lookup || !env?.NDOV_FEEDS) return [];
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
+  const stub = env.NDOV_FEEDS.get(id);
+  const url = new URL(`${ASSET_ORIGIN}/rows`);
+  url.searchParams.set("stream", "kv78");
+  url.searchParams.set("vehicleNumber", lookup.vehicleNumber);
+  url.searchParams.set("owner", lookup.owner);
+  url.searchParams.set("date", lookup.operationDate);
+  if (lookup.linePlanningNumber) url.searchParams.set("line", lookup.linePlanningNumber);
+  const response = await stub.fetch(url.toString());
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error ?? `KV78-voertuighalterijen gaven HTTP ${response.status}.`);
+  if (!Array.isArray(data?.rows)) throw new Error("KV78 gaf geen lijst met voertuig-haltes terug.");
+  return data.rows;
+}
+
+function routeLineNumber(value) {
+  const match = String(value ?? "").trim().toUpperCase().match(/(\d+)\s*$/);
+  return match ? String(Number(match[1])) : null;
+}
+
+function kv78VehicleLookupForItem(item) {
+  const position = item?.leg?.openovRealtime?.vehiclePosition;
+  const vehicleId = String(position?.vehicleId ?? "").replace(/^nl-OpenOV_/i, "").trim();
+  const vehicleMatch = vehicleId.match(/^([A-Za-z0-9_-]+):([^:]+)$/);
+  if (!vehicleMatch || !item?.identity?.serviceDate) return null;
+
+  const observedAt = timestampMs(position?.observedAt);
+  const ageMs = observedAt === null ? null : Date.now() - observedAt;
+  if (ageMs === null || ageMs < -30_000 || ageMs > MAX_BISON_AGE_MS) return null;
+
+  const owner = vehicleMatch[1].toUpperCase();
+  const vehicleNumber = vehicleMatch[2].trim();
+  const routeNumber = routeLineNumber(
+    item?.leg?.routeShortName ??
+    item?.leg?.route?.shortName ??
+    item?.leg?.route?.publicCode ??
+    item?.leg?.line?.publicCode
+  );
+  const linePlanningNumber = String(item?.realtimeIdentity?.line ?? "").trim().toUpperCase() || null;
+  if (!vehicleNumber || (!linePlanningNumber && !routeNumber)) return null;
+
+  return {
+    owner,
+    vehicleNumber,
+    operationDate: item.identity.serviceDate,
+    linePlanningNumber,
+    routeNumber,
+  };
+}
+
+function kv78RowMatchesVehicleLookup(row, item, lookup) {
+  if (!row || !lookup) return false;
+  if (String(row.dataOwnerCode ?? "").trim().toUpperCase() !== lookup.owner) return false;
+  if (normalizeDate(row.operationDate) !== lookup.operationDate) return false;
+  if (String(row.vehicleNumber ?? "").trim().split(":").pop() !== lookup.vehicleNumber) return false;
+
+  const rowLine = String(row.linePlanningNumber ?? "").trim().toUpperCase();
+  if (lookup.linePlanningNumber) {
+    if (rowLine !== lookup.linePlanningNumber) return false;
+  } else if (routeLineNumber(rowLine) !== lookup.routeNumber) {
+    return false;
+  }
+  return true;
+}
+
+function sameKv78TripIdentity(row, item) {
+  if (!row || !item?.identityKey) return false;
+  const rowIdentity = toIdentity(
+    row.dataOwnerCode,
+    row.operationDate,
+    row.linePlanningNumber,
+    row.journeyNumber,
+    row.fortifyOrderNumber ?? row.reinforcementNumber ?? "0"
+  );
+  return rowIdentity === item.identityKey;
+}
+
 let stopAssignmentManifestPromise = null;
 const stopAssignmentShardCache = new Map();
 
@@ -1138,6 +1217,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv78MatchedLegCount = 0;
   let kv78DataLegCount = 0;
   let kv78ConfirmedStopLegCount = 0;
+  let kv78VehicleFallbackLegCount = 0;
   let kv78DelayLegCount = 0;
   let kv78FeedAgeSeconds = null;
   let kv78FeedState = "unknown";
@@ -1359,11 +1439,52 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     const kv78AgeMs = kv78LatestMs === null ? null : Date.now() - kv78LatestMs;
     kv78FeedAgeSeconds = kv78AgeMs === null ? null : Math.round(kv78AgeMs / 1000);
     if (kv78Snapshot.state !== "error" && kv78AgeMs !== null && kv78AgeMs >= -30_000 && kv78AgeMs <= MAX_BISON_AGE_MS) {
-      const delayItems = candidates.filter((item) => item.identityKey && item.leg.ndovRealtime?.status !== "cancelled");
-      const rowResults = await Promise.all(delayItems.map(async (item) => ({
-        item,
-        rows: await getCurrentKv78Rows(env, item.identityKey),
-      })));
+      const delayItems = candidates.filter((item) =>
+        item.leg.ndovRealtime?.status !== "cancelled" &&
+        (item.identityKey || kv78VehicleLookupForItem(item))
+      );
+      const rowResults = await Promise.all(delayItems.map(async (item) => {
+        const vehicleLookup = kv78VehicleLookupForItem(item);
+        const exactRows = item.identityKey
+          ? await getCurrentKv78Rows(env, item.identityKey)
+          : [];
+        let vehicleRows = [];
+        let vehicleLookupError = null;
+        if (vehicleLookup) {
+          try {
+            vehicleRows = await getCurrentKv78RowsByVehicle(env, vehicleLookup);
+          } catch (error) {
+            vehicleLookupError = error instanceof Error ? error.message : String(error);
+          }
+        }
+        const filteredVehicleRows = vehicleRows.filter((row) =>
+          kv78RowMatchesVehicleLookup(row, item, vehicleLookup)
+        );
+        const uniqueRows = new Map();
+        for (const row of [...exactRows, ...filteredVehicleRows]) {
+          const identity = toIdentity(
+            row.dataOwnerCode,
+            row.operationDate,
+            row.linePlanningNumber,
+            row.journeyNumber,
+            row.fortifyOrderNumber ?? row.reinforcementNumber ?? "0"
+          );
+          const key = [identity, row.userStopOrderNumber ?? "", row.userStopCode ?? ""].join("|");
+          if (!uniqueRows.has(key)) uniqueRows.set(key, row);
+        }
+        return {
+          item,
+          rows: [...uniqueRows.values()],
+          vehicleLookup,
+          vehicleLookupError,
+        };
+      }));
+      const vehicleLookupErrors = [...new Set(rowResults
+        .map((result) => result.vehicleLookupError)
+        .filter(Boolean))];
+      if (vehicleLookupErrors.length) {
+        kv78Error = vehicleLookupErrors.slice(0, 3).join("; ");
+      }
 
       const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
       try {
@@ -1403,7 +1524,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         kv78Error = `PSA/CHB-haltecrosswalk niet beschikbaar; tijdmatching blijft ongeverifieerd: ${error instanceof Error ? error.message : "onbekende fout"}`;
       }
 
-      for (const { item, rows } of rowResults) {
+      for (const { item, rows, vehicleLookup } of rowResults) {
         if (!rows.length) {
           continue;
         }
@@ -1430,24 +1551,40 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         if (!departure && !arrival) continue;
         kv78DataLegCount += 1;
         const selectedStopMatches = [departure ? departureMatch : null, arrival ? arrivalMatch : null].filter(Boolean);
+        const vehicleFallback = selectedStopMatches.some((match) => !sameKv78TripIdentity(match.row, item));
         const psaPlatformConfirmed = selectedStopMatches.length > 0 && selectedStopMatches.every((match) => match.stopAssignmentStatus === "confirmed_quay_platform");
         const psaStopPlaceConfirmed = selectedStopMatches.length > 0 && selectedStopMatches.every((match) => String(match.stopAssignmentStatus ?? "").startsWith("confirmed_"));
         if (psaStopPlaceConfirmed) kv78ConfirmedStopLegCount += 1;
+        if (vehicleFallback) kv78VehicleFallbackLegCount += 1;
+        const vehicleLabel = vehicleLookup
+          ? `${vehicleLookup.owner}:${vehicleLookup.vehicleNumber}`
+          : "het waargenomen voertuig";
+        const identityBasis = vehicleFallback
+          ? `exact-vehicle ${vehicleLabel} + unieke halte-/dienstregelingstijd`
+          : "exact-trip-identity + dienstregelingstijd";
         const matchMethod = psaPlatformConfirmed
-          ? "exact-trip-identity + official PSA/CHB StopPlace + Quay/haltezijde + dienstregelingstijd"
+          ? `${identityBasis} + official PSA/CHB StopPlace + Quay/haltezijde`
           : psaStopPlaceConfirmed
-            ? "exact-trip-identity + official PSA/CHB StopPlace + dienstregelingstijd; haltezijde niet volledig bevestigd"
-            : "exact-trip-identity + unieke dienstregelingstijd; PSA/CHB-haltebevestiging ontbreekt";
-        const freshnessNote = psaPlatformConfirmed
-          ? "Haltezijde bevestigd via de officiële NDOV Passenger Stop Assignment en CHB-koppeling; de match gebruikt vervoerder, UserStopCode, geldigheid, station en haltezijde."
-          : psaStopPlaceConfirmed
-            ? "Station bevestigd via de officiële NDOV PSA/CHB-koppeling; de haltezijde kon niet afzonderlijk worden bevestigd."
-            : "De ritidentiteit en tijd zijn gematcht, maar voor deze halte ontbreekt een bevestigde PSA/CHB-match; behandel de halte als tijdmatch met lagere zekerheid.";
+            ? `${identityBasis} + official PSA/CHB StopPlace; haltezijde niet volledig bevestigd`
+            : `${identityBasis}; PSA/CHB-haltebevestiging ontbreekt`;
+        const freshnessNote = vehicleFallback
+          ? psaPlatformConfirmed
+            ? `KV78-halterij gekoppeld aan de exact waargenomen OpenOV-voertuiginstantie (${vehicleLabel}), bedieningsdag, lijn, geplande halte/tijd en officiële PSA/CHB StopPlace + Quay. De NDOV-ritidentiteit zelf kon niet exact aan de GTFS-rit worden gekoppeld.`
+            : psaStopPlaceConfirmed
+              ? `KV78-halterij gekoppeld aan voertuig ${vehicleLabel}, lijn, bedieningsdag en geplande halte/tijd; de officiële PSA/CHB StopPlace komt overeen, maar de haltezijde en exacte NDOV-ritidentiteit zijn niet volledig bevestigd.`
+              : `KV78-halterij gevonden via waargenomen voertuig ${vehicleLabel}, lijn, bedieningsdag en unieke geplande tijd. De exacte NDOV-ritidentiteit en PSA/CHB-haltebevestiging ontbreken; behandel dit als een diagnose met lagere zekerheid.`
+          : psaPlatformConfirmed
+            ? "Haltezijde bevestigd via de officiële NDOV Passenger Stop Assignment en CHB-koppeling; de match gebruikt vervoerder, UserStopCode, geldigheid, station en haltezijde."
+            : psaStopPlaceConfirmed
+              ? "Station bevestigd via de officiële NDOV PSA/CHB-koppeling; de haltezijde kon niet afzonderlijk worden bevestigd."
+              : "De ritidentiteit en tijd zijn gematcht, maar voor deze halte ontbreekt een bevestigde PSA/CHB-match; behandel de halte als tijdmatch met lagere zekerheid.";
         const kv78Observation = {
           status: "kv78_delay",
           source: "NDOV KV78Turbo",
-          identity: item.identityKey,
+          identity: item.identityKey ?? null,
           matchMethod,
+          matchBasis: vehicleFallback ? "exact_vehicle_stop_time" : "exact_trip_identity",
+          observedVehicleId: vehicleFallback ? vehicleLabel : null,
           feedAgeSeconds: kv78FeedAgeSeconds,
           stopCrosswalkGeneratedAt: stopAssignmentIndex?.generatedAt ?? null,
           freshnessNote,
@@ -1546,6 +1683,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv78MatchedLegCount,
     kv78DataLegCount,
     kv78ConfirmedStopLegCount,
+    kv78VehicleFallbackLegCount,
     kv78DelayLegCount,
     kv78Error,
     message: cancelled
