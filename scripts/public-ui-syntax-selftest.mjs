@@ -52,8 +52,30 @@ assert.equal(realtimeRenderer.includes("Op tijd volgens de actuele voertuigupdat
 assert.ok(realtimeRenderer.includes("Voertuigupdate meldt 0 sec afwijking") &&
   realtimeRenderer.includes("kv6Seconds === 0"),
   "the nested KV6 vehicle status must also use neutral wording/styling for zero deviation");
-assert.ok(realtimeRenderer.includes("if (!kv78StopConfirmed) continue;"),
-  "OpenOV-versus-KV78 discrepancy warnings must require a confirmed KV78 stop");
+const compareHelperStart = html.indexOf("function canCompareOpenovWithKv78(");
+const compareHelperEnd = html.indexOf("\\n}", compareHelperStart) + 2;
+assert.ok(compareHelperStart >= 0 && compareHelperEnd > compareHelperStart,
+  "OpenOV-versus-KV78 confidence helper must exist");
+const compareHelperSource = html.slice(compareHelperStart, compareHelperEnd);
+const canCompareOpenovWithKv78 = new vm.Script("(" + compareHelperSource + ")").runInNewContext();
+assert.equal(canCompareOpenovWithKv78(true, {
+  stopAssignmentStatus: "confirmed_quay_platform", stopSideCode: "C9"
+}), false, "OpenOV without a per-trip timestamp must not be compared against KV78");
+assert.equal(canCompareOpenovWithKv78(false, {
+  stopAssignmentStatus: "confirmed_psa_chb", stopSideCode: "C9"
+}), false, "a StopPlace-only match must not be treated as a confirmed platform match");
+assert.equal(canCompareOpenovWithKv78(false, {
+  stopAssignmentStatus: "confirmed_quay_platform"
+}), false, "a platform match without a concrete side code must not be compared");
+assert.equal(canCompareOpenovWithKv78(false, {
+  stopAssignmentStatus: "confirmed_quay_platform", stopSideCode: "C9"
+}), true, "source comparison requires a trip timestamp and a confirmed KV78 platform/side");
+assert.ok(realtimeRenderer.includes("if (!canCompareOpenovWithKv78(openovTripTimestampMissing, kv78Event)) continue;"),
+  "OpenOV-versus-KV78 discrepancy warnings must require reliable per-trip and platform identity");
+assert.ok(realtimeRenderer.includes("OpenOV meldt 0 sec zonder timestamp per rit"),
+  "the UI must explain that zero seconds without a trip timestamp does not prove punctual running");
+assert.ok(realtimeRenderer.includes("exacte haltezijde is niet bevestigd"),
+  "the UI must expose StopPlace-only confidence without claiming a confirmed platform");
 
 const delayLabelStart = html.indexOf("function delayLabel(value) {");
 const stopEventStart = html.indexOf("function stopEventHtml(label, event, scheduledValue, options = {}) {");
