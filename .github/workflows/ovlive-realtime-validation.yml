@@ -113,10 +113,10 @@ jobs:
 
       - name: Actual deployed OVLive production endpoint diagnostic
         env:
-          OVLIVE_BASE_URL: https://ovlive.maxveldhuis.workers.dev
+          OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/openov-live-plan-validation.mjs
 
       - name: Production NDOV crosswalk asset diagnostics
         env:
-          OVLIVE_BASE_URL: https://ovlive.maxveldhuis.workers.dev
+          OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/ovlive-production-endpoint-diagnostics.mjs
