@@ -37,7 +37,7 @@ export function buildNsTrainIdentities(outcomes) {
       outcome?.source !== "openov-route-crossmatch" ||
       !acceptedReasons.has(reason) ||
       owner !== "IFF" ||
-      !/^\\d+$/.test(trainNumber)
+      !/^\d+$/.test(trainNumber)
     ) {
       continue;
     }
