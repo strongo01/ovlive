@@ -26,7 +26,7 @@ const summaryEnd = html.indexOf("function renderRealtimeLegend()", summaryStart)
 assert.ok(summaryStart >= 0 && summaryEnd > summaryStart,
   "openovStatusSummary and renderRealtimeLegend must both exist");
 const summaryFunction = html.slice(summaryStart, summaryEnd);
-assert.doesNotMatch(summaryFunction, /\\bleg\\s*\\./,
+assert.equal(summaryFunction.includes("leg."), false,
   "openovStatusSummary must not reference the out-of-scope variable leg");
 
 // Vehicle-only KV6 observations should be rendered in realtimeHtml(leg), not
@@ -36,7 +36,7 @@ const realtimeRendererEnd = html.indexOf("function timelineRealtimePrediction(",
 assert.ok(realtimeRendererStart >= 0 && realtimeRendererEnd > realtimeRendererStart,
   "realtimeHtml renderer must exist");
 const realtimeRenderer = html.slice(realtimeRendererStart, realtimeRendererEnd);
-assert.match(realtimeRenderer, /leg\\.ndovRealtime\\?\\.status === ['"]kv6_observed['"]/,
+assert.equal(realtimeRenderer.includes("leg.ndovRealtime?.status === 'kv6_observed'"), true,
   "realtimeHtml must explicitly render fresh KV6 observations without punctuality");
 
 console.log("PASS: OpenOV status helper has no out-of-scope leg reference");
