@@ -408,6 +408,8 @@ function openovStatusSummary(rt) {
     return "annulering gemeld door OpenOV";
   }
 
+  const missingTripTimestamp =
+    /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ""));
   const events = [];
 
   for (const [label, event] of [
@@ -426,14 +428,14 @@ function openovStatusSummary(rt) {
         : seconds < 0
           ? `${seconds} sec`
           : "0 sec";
-      events.push(`${label}: ${value}`);
+      events.push(missingTripTimestamp
+        ? `${label}: gemeld ${value}`
+        : `${label}: ${value}`);
     } else if (event.time) {
       events.push(`${label}: tijd beschikbaar, vertraging onbekend`);
     }
   }
 
-  const missingTripTimestamp =
-    /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ""));
   const hasExplicitStopPrediction = Boolean(
     rt.departure?.time ||
     (rt.departure?.delaySeconds != null &&
@@ -446,7 +448,7 @@ function openovStatusSummary(rt) {
   const reliability = !hasExplicitStopPrediction
     ? "geen bruikbare halteprognose; uitvoering niet bevestigd"
     : missingTripTimestamp
-      ? "prognose beschikbaar, maar timestamp per rit ontbreekt"
+      ? "OpenOV-prognose niet bevestigd; niet gebruikt als verwachte tijd in de tijdlijn"
       : "halteprognoses beschikbaar";
 
   return `${events.length ? events.join(" · ") : "geen bruikbare halteprognose"} · ${reliability}`;
@@ -1127,8 +1129,13 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
   // zonder NS-voorrang of annuleringen hierboven te omzeilen.
   const unifiedPrediction = leg.realtimePrediction;
   const unifiedEvent = unifiedPrediction?.[kind];
+  const unifiedTimestampMissing =
+    unifiedEvent?.hasPerTripTimestamp === false ||
+    /rit-timestamp ontbreekt/i.test(String(unifiedEvent?.source ?? ""));
   if (
     ['available', 'partial'].includes(unifiedPrediction?.status) &&
+    !unifiedTimestampMissing &&
+    unifiedEvent?.confidence !== 'low' &&
     unifiedEvent?.time &&
     Number.isFinite(Date.parse(unifiedEvent.time))
   ) {
@@ -1207,9 +1214,9 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
     }
   }
 
-  // Een expliciete OpenOV-haltevoorspelling kan bruikbaar zijn,
-  // ook wanneer de afzonderlijke rit geen timestamp heeft.
-  // Die beperking blijft duidelijk zichtbaar in het bronlabel.
+  // Alleen een OpenOV-ritupdate met een eigen rit-timestamp mag
+  // de geplande tijd in de hoofd-tijdlijn vervangen. Een verse feed-header
+  // bewijst niet dat de individuele halteprognose bij de actuele ritinstantie hoort.
   const rt = leg.openovRealtime;
 
   if (!rt || rt.status === 'unknown' || rt.status === 'cancelled') {
@@ -1221,7 +1228,14 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
   }
 
   const age = Number(rt.updateAgeSeconds);
-  if (Number.isFinite(age) && age > 180) {
+  if (Number.isFinite(age) && (age < -30 || age > 180)) {
+    return null;
+  }
+
+  const hasPerTripTimestamp =
+    String(rt.timestampBasis ?? '').toLowerCase() === 'trip_update' &&
+    !/timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ''));
+  if (!hasPerTripTimestamp) {
     return null;
   }
 
@@ -1230,14 +1244,9 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
     return null;
   }
 
-  const missingTripTimestamp =
-    /timestamp per rit ontbreekt/i.test(String(rt.freshnessNote || ''));
-
   return {
     time: event.time,
-    source: missingTripTimestamp
-      ? 'OpenOV (rit-timestamp ontbreekt)'
-      : 'OpenOV'
+    source: 'OpenOV GTFS-Realtime'
   };
 }
 
