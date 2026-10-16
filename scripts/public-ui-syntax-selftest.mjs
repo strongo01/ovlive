@@ -39,7 +39,56 @@ const realtimeRenderer = html.slice(realtimeRendererStart, realtimeRendererEnd);
 assert.equal(realtimeRenderer.includes("leg.ndovRealtime?.status === 'kv6_observed'"), true,
   "realtimeHtml must explicitly render fresh KV6 observations without punctuality");
 
-// Unconfirmed OpenOV predictions must not replace planned stop times in the main timeline.
+// MOTIS can expose a realtime-adjusted startTime alongside the original timetable.
+ // Always select explicit scheduled times first; never silently substitute a realtime time.
+const plannedStart = html.indexOf("function plannedEndpointTime(leg, kind) {");
+const chronologyStart = html.indexOf("function journeyChronologyIssue(legs, toleranceSeconds = 60) {", plannedStart);
+const renderLegStartForHelpers = html.indexOf("function renderLeg(leg, index = 0) {", chronologyStart);
+assert.ok(plannedStart >= 0 && chronologyStart > plannedStart && renderLegStartForHelpers > chronologyStart,
+  "planned-time and itinerary chronology helpers must exist");
+const plannedTimeSource = html.slice(plannedStart, chronologyStart).trim();
+const chronologySource = html.slice(chronologyStart, renderLegStartForHelpers).trim();
+const plannedEndpointTime = new vm.Script("(" + plannedTimeSource + ")").runInNewContext();
+const journeyChronologyIssue = new vm.Script("(" + chronologySource + ")").runInNewContext();
+
+const realtimeDeparture = "2026-10-16T19:22:00.000Z";
+const scheduledDeparture = "2026-10-16T19:47:00.000Z";
+assert.equal(plannedEndpointTime({
+  mode: "BUS",
+  realTime: true,
+  startTime: realtimeDeparture,
+  scheduledStartTime: scheduledDeparture,
+  from: { departure: realtimeDeparture, scheduledDeparture: realtimeDeparture }
+}, "departure"), scheduledDeparture,
+"leg-level scheduled time must win over a conflicting realtime-adjusted stop time");
+assert.equal(plannedEndpointTime({
+  mode: "BUS",
+  realTime: true,
+  startTime: realtimeDeparture,
+  from: { departure: realtimeDeparture }
+}, "departure"), null,
+"an unlabelled realtime departure must never masquerade as a timetable time");
+assert.equal(plannedEndpointTime({
+  mode: "WALK",
+  startTime: "2026-10-16T19:43:00.000Z",
+  endTime: "2026-10-16T19:47:00.000Z"
+}, "departure"), "2026-10-16T19:43:00.000Z",
+"walking legs may use their route-calculated start time");
+
+assert.equal(journeyChronologyIssue([
+  { mode: "WALK", startTime: "2026-10-16T19:43:00.000Z", endTime: "2026-10-16T19:47:00.000Z" },
+  { mode: "BUS", startTime: realtimeDeparture, endTime: "2026-10-16T19:35:00.000Z", scheduledStartTime: scheduledDeparture }
+])?.legIndex, 1,
+"an itinerary must be rejected when the vehicle departs before the previous leg reaches the stop");
+assert.equal(journeyChronologyIssue([
+  { mode: "WALK", startTime: "2026-10-16T19:43:00.000Z", endTime: "2026-10-16T19:47:00.000Z" },
+  { mode: "BUS", startTime: scheduledDeparture, endTime: "2026-10-16T20:05:00.000Z", scheduledStartTime: scheduledDeparture }
+]), null,
+"a chronological walk-to-bus connection remains valid");
+console.log("PASS: planned times prefer timetable fields over realtime-adjusted time");
+console.log("PASS: impossible itinerary chronology is rejected");
+
+ // Unconfirmed OpenOV predictions must not replace planned stop times in the main timeline.
 const predictionStart = html.indexOf("function timelineRealtimePrediction(leg, kind, scheduledTime) {");
 const predictionEnd = html.indexOf("function timelineTimeHtml(", predictionStart);
 assert.ok(predictionStart >= 0 && predictionEnd > predictionStart,
@@ -53,6 +102,14 @@ assert.ok(predictionFunction.includes("String(rt.timestampBasis ?? '').toLowerCa
   "raw OpenOV predictions must have an explicit per-trip timestamp");
 assert.ok(predictionFunction.includes("if (!hasPerTripTimestamp) {\n    return null;"),
   "raw OpenOV fallback must fail closed when the per-trip timestamp is missing");
+assert.ok(predictionFunction.includes("String(event?.stopAssignmentStatus ?? '').startsWith('confirmed_')"),
+  "KV78 times must not replace planned timeline times without a confirmed stop assignment");
+
+assert.ok(realtimeRenderer.includes("nulafwijking hoort bij een tijdmatch zonder bevestigde PSA/CHB-halte"),
+  "unconfirmed KV78 zero-deviation must not be labelled as on-time at that stop");
+assert.ok(html.includes("invalidChronologyCount") &&
+  html.includes("Deze opties worden niet getoond"),
+  "time-inconsistent itineraries must be excluded and explained to the user");
 
 assert.ok(summaryFunction.includes("${label}: gemeld ${value}"),
   "feed-header-only deviations must be described as reported, not confirmed");
