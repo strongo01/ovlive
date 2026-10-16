@@ -173,8 +173,8 @@ assert.equal(vehicleFallbackLeg.ndovRealtime.status, 'kv78_delay');
 assert.equal(vehicleFallbackLeg.ndovRealtime.arrival.delaySeconds, 38, 'vehicle lookup must recover the source-provided delay for the target stop');
 assert.equal(vehicleFallbackLeg.ndovRealtime.matchBasis, 'exact_vehicle_stop_time');
 assert.equal(vehicleFallbackLeg.ndovRealtime.observedVehicleId, 'CXX:2281');
-assert.ok(vehicleFallbackLeg.ndovRealtime.freshnessNote.includes('NDOV-ritidentiteit zelf kon niet exact'),
-  'vehicle fallback must disclose that the exact NDOV trip ID was not crossmatched');
+assert.ok(vehicleFallbackLeg.ndovRealtime.freshnessNote.includes('De exacte NDOV-ritidentiteit en PSA/CHB-haltebevestiging ontbreken'),
+  'vehicle fallback must disclose that the exact NDOV trip ID was not crossmatched and stop assignment is unconfirmed');
 assert.equal(plan.ndovRealtimeMeta.kv78VehicleFallbackLegCount, 1);
 console.log('PASS: exact KV17 cancellation remains attached only to its trip');
 console.log('PASS: fresh KV78 delays attach to a separate exact trip identity');
