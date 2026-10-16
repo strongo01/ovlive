@@ -306,4 +306,130 @@ console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
   console.log("PASS: HTTP 503 op NS-stationslijst blokkeert treinnummer 6080 niet; UT/UTT-reservecodes halen de expliciete 63 sec vertraging op");
 }
 
+
+// Mixed-mode searches may return several train candidates. They must not
+// launch an unbounded burst of NS board requests that makes an otherwise
+// valid train realtime result intermittently disappear.
+{
+  const originalFetch = globalThis.fetch;
+  const baseMs = Date.parse("2026-11-12T10:00:00.000Z");
+  const byEvent = new Map();
+  let activeBoardRequests = 0;
+  let maxActiveBoardRequests = 0;
+
+  const legs = Array.from({ length: 4 }, (_, index) => {
+    const number = String(6080 + index);
+    const departureMs = baseMs + index * 10 * 60_000;
+    const arrivalMs = departureMs + 5 * 60_000;
+    const tripId = `20261112_${new Date(departureMs).toISOString().slice(11, 16)}_nl-OpenOV_${382969680 + index}`;
+    const departureIso = new Date(departureMs).toISOString();
+    const arrivalIso = new Date(arrivalMs).toISOString();
+    byEvent.set(`departures|${departureIso}`, number);
+    byEvent.set(`arrivals|${arrivalIso}`, number);
+
+    return {
+      mode: "RAIL",
+      tripId,
+      from: {
+        name: "Utrecht Centraal",
+        uicCode: "8400621",
+        departure: departureIso
+      },
+      to: {
+        name: "Utrecht Terwijde",
+        uicCode: "8400614",
+        arrival: arrivalIso
+      }
+    };
+  });
+
+  const plan = {
+    itineraries: legs.map((leg, index) => ({
+      legs: [
+        leg,
+        { mode: "BUS", routeShortName: String(5 + index), from: {}, to: {} }
+      ]
+    })),
+    ndovRealtimeMeta: {
+      routeCrosswalkOutcomes: legs.map((leg, index) => ({
+        tripId: leg.tripId,
+        source: "openov-route-crossmatch",
+        reason: "exact_openov_trip_id_match",
+        parsedIdentity: { owner: "IFF", journey: String(6080 + index) }
+      }))
+    }
+  };
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/api/v2/stations")) {
+      return new Response(JSON.stringify({ message: "temporarily unavailable" }), {
+        status: 503,
+        headers: { "content-type": "application/json" }
+      });
+    }
+
+    if (url.pathname.endsWith("/api/v2/departures") ||
+        url.pathname.endsWith("/api/v2/arrivals")) {
+      const kind = url.pathname.endsWith("/api/v2/departures")
+        ? "departures"
+        : "arrivals";
+      activeBoardRequests += 1;
+      maxActiveBoardRequests = Math.max(
+        maxActiveBoardRequests,
+        activeBoardRequests
+      );
+
+      try {
+        await new Promise(resolve => setTimeout(resolve, 12));
+        const plannedDateTime = url.searchParams.get("dateTime");
+        const trainNumber = byEvent.get(`${kind}|${plannedDateTime}`);
+        assert.ok(trainNumber, `onverwachte NS-bordaanvraag: ${kind} ${plannedDateTime}`);
+        return new Response(JSON.stringify({
+          payload: {
+            [kind]: [{
+              product: { number: trainNumber },
+              plannedDateTime,
+              actualDateTime: new Date(Date.parse(plannedDateTime) + 60_000).toISOString(),
+              delayInSeconds: 60,
+              cancelled: false
+            }]
+          }
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      } finally {
+        activeBoardRequests -= 1;
+      }
+    }
+
+    throw new Error(`Unexpected NS test request: ${url.pathname}`);
+  };
+
+  try {
+    await enrichNsTrainPlan(plan, {
+      NS_API_SUBSCRIPTION_KEY: "selftest-key",
+      APP_NAME: "OVLive",
+      APP_VERSION: "selftest",
+      APP_CONTACT: "test"
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(plan.nsRealtimeMeta.candidateLegCount, 4);
+  assert.equal(plan.nsRealtimeMeta.matchedLegCount, 4);
+  assert.ok(
+    maxActiveBoardRequests <= 4,
+    `NS-bordbelasting te hoog: maximaal ${maxActiveBoardRequests} gelijktijdige bordverzoeken`
+  );
+  for (const itinerary of plan.itineraries) {
+    assert.equal(itinerary.legs[0].nsRealtime.status, "matched");
+    assert.equal(itinerary.legs[0].nsRealtime.departure.delaySeconds, 60);
+    assert.equal(itinerary.legs[0].nsRealtime.arrival.delaySeconds, 60);
+  }
+  console.log("PASS: extra gemengde reisopties veroorzaken geen onbeperkte NS-burst; alle 4 treinritten behouden hun realtimevertraging");
+}
+
 console.log("Alle NS-regressietests geslaagd.");
