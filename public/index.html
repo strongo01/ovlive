@@ -536,6 +536,14 @@ function openovVehiclePositionHtml(rt) {
   </div>`;
 }
 
+function canCompareOpenovWithKv78(openovTripTimestampMissing, kv78Event) {
+  // Vergelijk alleen twee voldoende zekere haltewaarden: een actuele per-rit
+  // OpenOV-timestamp én een expliciete PSA/CHB-koppeling tot op haltezijde.
+  return !openovTripTimestampMissing &&
+    kv78Event?.stopAssignmentStatus === 'confirmed_quay_platform' &&
+    Boolean(kv78Event?.stopSideCode);
+}
+
 function realtimeHtml(leg) {
   if (leg.mode === 'WALK') {
     const minutes = typeof leg.duration === 'number'
@@ -816,6 +824,8 @@ function realtimeHtml(leg) {
         : `${duration} te vroeg`;
     };
 
+    const openovTripTimestampMissing =
+      /timestamp per rit ontbreekt/i.test(String(rt?.freshnessNote || ""));
     const sourceDisagreements = [];
 
     for (const [kind, label] of [
@@ -824,9 +834,10 @@ function realtimeHtml(leg) {
     ]) {
       const openovEvent = rt?.[kind];
       const kv78Event = kv78?.[kind];
-      const kv78StopConfirmed =
-        String(kv78Event?.stopAssignmentStatus ?? '').startsWith('confirmed_');
-      if (!kv78StopConfirmed) continue;
+      // Een halte-/tijdmatch op alleen StopPlace-niveau is niet voldoende:
+      // een ontbrekende rit-timestamp of onbevestigde haltezijde kan een
+      // schijnbare bron-tegenstrijdigheid veroorzaken.
+      if (!canCompareOpenovWithKv78(openovTripTimestampMissing, kv78Event)) continue;
 
       const openovSeconds = openovEvent?.delaySeconds == null
         ? null
@@ -851,19 +862,34 @@ function realtimeHtml(leg) {
       }
     }
 
-    const conflictNotes = [
-      String(rt?.freshnessNote || "").toLowerCase()
-        .includes("timestamp per rit ontbreekt")
-        ? "De timestamp per OpenOV-rit ontbreekt."
-        : "",
-      [kv78?.departure, kv78?.arrival].some(
-        event => event && !event.stopSideCode
-      )
-        ? "De exacte KV78-haltezijde is niet bevestigd."
-        : "",
-      "OVLive berekent geen gemiddelde van deze bronnen."
-    ].filter(Boolean).join(" ");
+    const hasOpenovReportedZero = [rt?.departure, rt?.arrival].some(
+      event => event?.delaySeconds != null && Number(event.delaySeconds) === 0
+    );
+    const kv78SideNotFullyConfirmed = [kv78?.departure, kv78?.arrival].some(
+      event => event &&
+        String(event.stopAssignmentStatus ?? "").startsWith("confirmed_") &&
+        (event.stopAssignmentStatus !== "confirmed_quay_platform" || !event.stopSideCode)
+    );
+    const sourceConfidenceNotes = [];
+    if (openovTripTimestampMissing && hasOpenovReportedZero) {
+      sourceConfidenceNotes.push(
+        "OpenOV meldt 0 sec zonder timestamp per rit; dat bevestigt niet dat de bus op tijd rijdt."
+      );
+    } else if (openovTripTimestampMissing) {
+      sourceConfidenceNotes.push(
+        "De timestamp per OpenOV-rit ontbreekt; de afwijking van OpenOV is daarom niet bevestigd."
+      );
+    }
+    if (kv78SideNotFullyConfirmed) {
+      sourceConfidenceNotes.push(
+        "KV78 is aan de officiële PSA/CHB-halte gekoppeld, maar de exacte haltezijde is niet bevestigd."
+      );
+    }
+    const sourceConfidenceNoteHtml = sourceConfidenceNotes.length
+      ? `<div class="rt-details rt-unknown">${esc(sourceConfidenceNotes.join(" "))} De voertuigupdate wordt apart weergegeven en is geen halteprognose.</div>`
+      : "";
 
+    const conflictNotes = "OVLive berekent geen gemiddelde van deze bronnen.";
     const sourceConflictHtml = sourceDisagreements.length
       ? `<div class="rt-details rt-warning"><strong>⚠️ Realtimebronnen spreken elkaar tegen.</strong> ${esc(sourceDisagreements.join(" "))} ${esc(conflictNotes)}</div>`
       : "";
@@ -871,6 +897,7 @@ function realtimeHtml(leg) {
     return `<div class="rt-status">
       <strong>NDOV · actuele haltegegevens (KV78Turbo)</strong>
       ${sourceConflictHtml}
+      ${sourceConfidenceNoteHtml}
       ${kv6DelayLabel ? `<div class="rt-details"><span class="${kv6ColorClass}">${esc(kv6DelayLabel)}</span>${kv6?.vehicleNumber ? ` · voertuig ${esc(kv6.vehicleNumber)}` : ''}</div>` : ''}
       ${kv78.freshnessNote ? `<div class="rt-details">${esc(kv78.freshnessNote)}</div>` : ''}
       ${departure}
