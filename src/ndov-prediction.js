@@ -345,6 +345,10 @@ function validOpenovPrediction(leg, kind, direct) {
   const age = typeof openov.updateAgeSeconds === "number" ? openov.updateAgeSeconds : null;
   if (age !== null && (age < -30 || age > 180)) return null;
 
+  const timestampBasis = String(openov.timestampBasis ?? "unknown").toLowerCase();
+  const hasPerTripTimestamp = timestampBasis === "trip_update" &&
+    !/timestamp per rit ontbreekt/i.test(String(openov.freshnessNote ?? ""));
+
   const delayBasis = String(item.delayBasis ?? "");
   const isDirect = delayBasis === "absolute_prediction_minus_scheduled_time"
     || delayBasis === "source_or_gtfs_propagated_delay";
@@ -356,8 +360,14 @@ function validOpenovPrediction(leg, kind, direct) {
     delaySeconds: typeof item.delaySeconds === "number" && Number.isFinite(item.delaySeconds)
       ? item.delaySeconds
       : null,
-    source: "OpenOV GTFS-Realtime",
-    confidence: isDirect ? "high" : "medium",
+    source: hasPerTripTimestamp
+      ? "OpenOV GTFS-Realtime"
+      : "OpenOV GTFS-Realtime (rit-timestamp ontbreekt)",
+    confidence: hasPerTripTimestamp
+      ? (isDirect ? "high" : "medium")
+      : "low",
+    hasPerTripTimestamp,
+    timestampBasis,
     basis: delayBasis || "openov_realtime",
     sourceStopId: item.sourceStopId ?? null,
     sourceStopSequence: item.sourceStopSequence ?? null,
@@ -399,12 +409,14 @@ export function buildUnifiedRealtimePrediction(leg, generatedAt = new Date().toI
   const nowMs = Date.now();
 
   const selectEndpoint = (kind) => {
+    const directOpenov = validOpenovPrediction(leg, kind, true);
+    const propagatedOpenov = validOpenovPrediction(leg, kind, false);
     const candidates = [
-      { priority: 1, item: validOpenovPrediction(leg, kind, true) },
+      { priority: directOpenov?.hasPerTripTimestamp ? 1 : 4, item: directOpenov },
       { priority: 2, item: validKv78Prediction(leg, kind, true, nowMs) },
       { priority: 3, item: leg?.ndovRealtime?.prediction?.[kind] ?? null },
-      { priority: 4, item: validOpenovPrediction(leg, kind, false) },
-      { priority: 5, item: validKv78Prediction(leg, kind, false, nowMs) },
+      { priority: propagatedOpenov?.hasPerTripTimestamp ? 5 : 7, item: propagatedOpenov },
+      { priority: 6, item: validKv78Prediction(leg, kind, false, nowMs) },
     ].filter((entry) => entry.item && timestampMs(entry.item.time) !== null);
     candidates.sort((a, b) => a.priority - b.priority);
     return candidates[0]?.item ?? null;
