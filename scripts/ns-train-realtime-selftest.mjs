@@ -18,7 +18,7 @@ const moduleUrl =
   "data:text/javascript;base64," +
   Buffer.from(compiled).toString("base64");
 
-const { eventFrom, hasKnownPunctualityDeviation, selectJourneyEventFromStops } = await import(moduleUrl);
+const { eventFrom, hasKnownPunctualityDeviation, selectJourneyEventFromStops, enrichNsTrainPlan } = await import(moduleUrl);
 
 const planned = "2026-10-14T11:10:00.000Z";
 const actual = "2026-10-14T11:10:00.000Z";
@@ -200,5 +200,110 @@ assert.equal(
   null
 );
 console.log("PASS: dubbelzinnige reisdetailmatch wordt geweigerd");
+
+// Als alleen de stationslijst faalt, gebruik dan gecontroleerde lokale
+// stationcodes en blijf de actuele vertrektijden/aankomsten bij NS ophalen.
+{
+  const originalFetch = globalThis.fetch;
+  const trainNumber = "6080";
+  const tripId = "20261016_23:09_nl-OpenOV_382969680";
+  const plannedDeparture = "2026-10-16T21:09:00.000Z";
+  const plannedArrival = "2026-10-16T21:15:00.000Z";
+  const actualDeparture = "2026-10-16T21:10:03.000Z";
+  const actualArrival = "2026-10-16T21:16:03.000Z";
+  const boardStations = [];
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/api/v2/stations")) {
+      return new Response(JSON.stringify({ message: "temporarily unavailable" }), {
+        status: 503,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    if (url.pathname.endsWith("/api/v2/departures")) {
+      const station = url.searchParams.get("station");
+      boardStations.push(`departures:${station}`);
+      assert.equal(station, "UT", "Utrecht Centraal moet via de lokale NS-stationcode worden gevonden");
+      return new Response(JSON.stringify({
+        payload: { departures: [{
+          product: { number: trainNumber },
+          plannedDateTime: plannedDeparture,
+          actualDateTime: actualDeparture,
+          delayInSeconds: 63,
+          cancelled: false,
+          plannedTrack: "20",
+          actualTrack: "20"
+        }] }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname.endsWith("/api/v2/arrivals")) {
+      const station = url.searchParams.get("station");
+      boardStations.push(`arrivals:${station}`);
+      assert.equal(station, "UTT", "Utrecht Terwijde moet via de lokale NS-stationcode worden gevonden");
+      return new Response(JSON.stringify({
+        payload: { arrivals: [{
+          product: { number: trainNumber },
+          plannedDateTime: plannedArrival,
+          actualDateTime: actualArrival,
+          delayInSeconds: 63,
+          cancelled: false,
+          plannedTrack: "4",
+          actualTrack: "4"
+        }] }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`Unexpected NS test request: ${url.pathname}`);
+  };
+
+  const plan = {
+    itineraries: [{
+      legs: [{
+        mode: "RAIL",
+        tripId,
+        from: {
+          name: "Utrecht Centraal",
+          uicCode: "8400621",
+          departure: plannedDeparture
+        },
+        to: {
+          name: "Utrecht Terwijde",
+          uicCode: "8400614",
+          arrival: plannedArrival
+        }
+      }]
+    }],
+    ndovRealtimeMeta: {
+      routeCrosswalkOutcomes: [{
+        tripId,
+        source: "openov-route-crossmatch",
+        reason: "exact_openov_trip_id_match",
+        parsedIdentity: { owner: "IFF", journey: trainNumber }
+      }]
+    }
+  };
+
+  try {
+    await enrichNsTrainPlan(plan, {
+      NS_API_SUBSCRIPTION_KEY: "selftest-key",
+      APP_NAME: "OVLive",
+      APP_VERSION: "selftest",
+      APP_CONTACT: "test"
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const leg = plan.itineraries[0].legs[0];
+  assert.equal(plan.nsRealtimeMeta.stationLookupSource, "builtin_fallback");
+  assert.equal(plan.nsRealtimeMeta.stationListError, "HTTP 503");
+  assert.equal(plan.nsRealtimeMeta.matchedLegCount, 1);
+  assert.equal(leg.nsRealtime.status, "matched");
+  assert.equal(leg.nsRealtime.trainNumber, trainNumber);
+  assert.equal(leg.nsRealtime.departure.delaySeconds, 63);
+  assert.equal(leg.nsRealtime.arrival.delaySeconds, 63);
+  assert.deepEqual(boardStations.sort(), ["arrivals:UTT", "departures:UT"]);
+  console.log("PASS: HTTP 503 op NS-stationslijst blokkeert treinnummer 6080 niet; UT/UTT-reservecodes halen de expliciete 63 sec vertraging op");
+}
 
 console.log("Alle NS-regressietests geslaagd.");
