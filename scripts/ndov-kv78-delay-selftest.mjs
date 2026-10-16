@@ -130,7 +130,7 @@ const env = {
         return Response.json({ assignments: {} });
       }
       if (url.pathname.endsWith('/ndov-openov-stopplace-crosswalk/manifest.json')) {
-        return Response.json({ generatedAt: now, shardCount: 1 });
+        return Response.json({ schemaVersion: 1, generatedAt: now, shardCount: 1 });
       }
       if (url.pathname.endsWith('/ndov-openov-stopplace-crosswalk/shards/openov-stop-places-0.json')) {
         return Response.json({ stopPlaces: {} });
