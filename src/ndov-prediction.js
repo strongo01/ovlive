@@ -226,6 +226,7 @@ export function deriveNdovKv6Prediction({
   const allCandidateIndices = [...new Set(candidates.map((item) => item.index))];
   let currentStopIndex = null;
   let quayConfirmed = false;
+  let scheduleTimeFallback = null;
   if (exactQuayIndices.length === 1) {
     currentStopIndex = exactQuayIndices[0];
     quayConfirmed = true;
@@ -233,6 +234,59 @@ export function deriveNdovKv6Prediction({
     return null;
   } else if (allCandidateIndices.length === 1) {
     currentStopIndex = allCandidateIndices[0];
+  } else if (allCandidateIndices.length === 0) {
+    // Narrow fallback for a missing static OpenOV/CHB mapping: the operator
+    // must report a stop-specific DEPARTURE/ARRIVAL, its active PSA assignment
+    // must resolve to exactly one official StopPlace+Quay, and its scheduled
+    // clock must uniquely identify one route stop within 30 seconds. A present
+    // but conflicting static mapping is never overridden by this fallback.
+    const eventType = String(event?.eventType ?? "").trim().toUpperCase();
+    const expectedClock = eventScheduleClock(event, delaySeconds);
+    const nearestStops = stops.map((stop, index) => {
+      const clocks = [clockSeconds(stop?.arrivalTime), clockSeconds(stop?.departureTime)]
+        .filter((value) => value !== null);
+      return {
+        index,
+        distanceSeconds: clocks.length
+          ? Math.min(...clocks.map((value) => clockDistanceSeconds(value, expectedClock)))
+          : Infinity,
+      };
+    }).filter((item) => Number.isFinite(item.distanceSeconds))
+      .sort((a, b) => a.distanceSeconds - b.distanceSeconds);
+
+    const best = nearestStops[0];
+    const second = nearestStops[1];
+    const activeQuayBindings = activeRecords.map((record) => ({
+      stopPlaceCode: normalizeStopPlace(record?.stopPlaceCode ?? record?.stopPlaceRef),
+      quayCode: normalizeQuay(record?.quayCode ?? record?.quayRef),
+    }));
+    const uniqueBindings = [...new Map(
+      activeQuayBindings
+        .filter((item) => item.stopPlaceCode && item.quayCode)
+        .map((item) => [item.stopPlaceCode + "|" + item.quayCode, item])
+    ).values()];
+    const allAssignmentsResolved = activeQuayBindings.length === activeRecords.length
+      && activeQuayBindings.every((item) => item.stopPlaceCode && item.quayCode);
+    const bindingIsUnique = allAssignmentsResolved && uniqueBindings.length === 1;
+    const bestStopId = best ? stopPlaceKey(stops[best.index]?.stopId) : null;
+    const bestStopMapping = bestStopId ? stopPlaceIndex?.stopPlaces?.[bestStopId] : null;
+    const hasStaticMapping = Boolean(bestStopMapping);
+    const timeIsUnique = Boolean(best)
+      && best.distanceSeconds <= 30
+      && (!second || second.distanceSeconds - best.distanceSeconds >= 30);
+
+    if (
+      (eventType === "DEPARTURE" || eventType === "ARRIVAL")
+      && expectedClock !== null
+      && timeIsUnique
+      && bindingIsUnique
+      && !hasStaticMapping
+    ) {
+      currentStopIndex = best.index;
+      scheduleTimeFallback = uniqueBindings[0];
+    } else {
+      return null;
+    }
   } else {
     return null;
   }
@@ -255,20 +309,27 @@ export function deriveNdovKv6Prediction({
     status: departure && arrival ? "available" : "partial",
     source: "NDOV BISON KV6",
     confidence: quayConfirmed ? "high" : "medium",
-    method: quayConfirmed
-      ? "exact trip identity + current KV6 stop + PSA/CHB quay + OpenOV route-stop order"
-      : "exact trip identity + unique PSA/CHB StopPlace + OpenOV route-stop order",
+    method: scheduleTimeFallback
+      ? "exact trip identity + unique near-exact scheduled stop time + active official PSA/CHB quay (OpenOV stop mapping missing)"
+      : quayConfirmed
+        ? "exact trip identity + current KV6 stop + PSA/CHB quay + OpenOV route-stop order"
+        : "exact trip identity + unique PSA/CHB StopPlace + OpenOV route-stop order",
     measuredDelaySeconds: delaySeconds,
     currentStop: {
       stopId: currentStop?.stopId ?? null,
       stopSequence: currentStop?.stopSequence ?? null,
       userStopCode: stopCode,
-      stopPlaceCode: candidates.find((item) => item.index === currentStopIndex)?.stopPlaceCode ?? null,
+      stopPlaceCode: candidates.find((item) => item.index === currentStopIndex)?.stopPlaceCode
+        ?? scheduleTimeFallback?.stopPlaceCode
+        ?? null,
+      quayCode: scheduleTimeFallback?.quayCode ?? null,
     },
     measuredAt: sourceTime || String(event?.punctualityReceivedAt ?? event?.receivedAt),
     receivedAt: String(event?.punctualityReceivedAt ?? event?.receivedAt),
     feedAgeSeconds: Math.max(0, Math.round(ageMs / 1000)),
-    note: "De actuele punctualiteit is alleen naar haltes op of na de waargenomen routepositie doorberekend; dit is een voorspelling, geen gemeten haltepassage.",
+    note: scheduleTimeFallback
+      ? "De routepositie is bepaald met een unieke dienstregelingstijd binnen 30 seconden en een actieve officiële PSA/CHB-halteverwijzing. De statische OpenOV/CHB-stopkoppeling ontbreekt; de voorspelling heeft daarom middelmatige zekerheid."
+      : "De actuele punctualiteit is alleen naar haltes op of na de waargenomen routepositie doorberekend; dit is een voorspelling, geen gemeten haltepassage.",
     departure,
     arrival,
   };
