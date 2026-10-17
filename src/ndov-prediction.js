@@ -1,5 +1,8 @@
 const MAX_FRESH_MS = 180_000;
-const MAX_CLOCK_DISTANCE_SECONDS = 20 * 60;
+// A KV6 timestamp adjusted by its measured punctuality should identify a
+// stop close to the corresponding timetable clock. A narrow window keeps route
+// crosswalk lookups small and fails closed rather than loading dozens of stop shards.
+const MAX_CLOCK_DISTANCE_SECONDS = 5 * 60;
 
 function timestampMs(value) {
   if (!value) return null;
