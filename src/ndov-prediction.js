@@ -251,6 +251,9 @@ export function deriveNdovKv6Prediction({
     // but conflicting static mapping is never overridden by this fallback.
     const eventType = String(event?.eventType ?? "").trim().toUpperCase();
     const expectedClock = eventScheduleClock(event, delaySeconds);
+    if (expectedClock === null) {
+      return fail("event_schedule_clock_missing");
+    }
     const nearestStops = stops.map((stop, index) => {
       const clocks = [clockSeconds(stop?.arrivalTime), clockSeconds(stop?.departureTime)]
         .filter((value) => value !== null);
@@ -289,9 +292,6 @@ export function deriveNdovKv6Prediction({
     }
     if (eventType !== "DEPARTURE" && eventType !== "ARRIVAL") {
       return fail("missing_static_stop_mapping_for_non_stop_event");
-    }
-    if (expectedClock === null) {
-      return fail("event_schedule_clock_missing");
     }
     if (!timeIsUnique) {
       return fail("scheduled_stop_time_not_unique");
