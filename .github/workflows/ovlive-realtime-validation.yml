@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - assistant/realtime-propagation-validation-20261015
+      - assistant/ns-priority-subrequest-budget-20261017
   workflow_dispatch:
 
 permissions:
@@ -112,21 +113,25 @@ jobs:
           OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/openov-live-plan-validation.mjs
 
       - name: Actual deployed OVLive production endpoint diagnostic
+        if: github.ref == 'refs/heads/assistant/realtime-propagation-validation-20261015'
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/openov-live-plan-validation.mjs
 
       - name: Production NDOV crosswalk asset diagnostics
+        if: github.ref == 'refs/heads/assistant/realtime-propagation-validation-20261015'
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/ovlive-production-endpoint-diagnostics.mjs
 
       - name: Production mixed-mode route identity diagnostic
+        if: github.ref == 'refs/heads/assistant/realtime-propagation-validation-20261015'
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/ns-mixed-mode-live-validation.mjs
 
       - name: Production current NS realtime with bus mode enabled
+        if: github.ref == 'refs/heads/assistant/realtime-propagation-validation-20261015'
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/ns-current-bus-filter-live-validation.mjs
