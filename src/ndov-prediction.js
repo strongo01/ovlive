@@ -3,6 +3,13 @@ const MAX_FRESH_MS = 180_000;
 // stop close to the corresponding timetable clock. A narrow window keeps route
 // crosswalk lookups small and fails closed rather than loading dozens of stop shards.
 const MAX_CLOCK_DISTANCE_SECONDS = 5 * 60;
+const AMSTERDAM_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Amsterdam",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
 
 function timestampMs(value) {
   if (!value) return null;
@@ -68,13 +75,7 @@ function clockDistanceSeconds(a, b) {
 function amsterdamClockSeconds(value) {
   const ms = timestampMs(value);
   if (ms === null) return null;
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/Amsterdam",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(ms));
+  const parts = AMSTERDAM_CLOCK_FORMATTER.formatToParts(new Date(ms));
   const part = (name) => Number(parts.find((item) => item.type === name)?.value);
   const hours = part("hour"), minutes = part("minute"), seconds = part("second");
   if (![hours, minutes, seconds].every(Number.isFinite)) return null;
