@@ -817,18 +817,41 @@ async function getKv78Snapshot(env) {
   return snapshot;
 }
 
-async function getCurrentKv78Rows(env, identity) {
-  if (!identity || !env?.NDOV_FEEDS) return [];
+async function getCurrentKv78RowsByIdentities(env, identities) {
+  const unique = [...new Set((Array.isArray(identities) ? identities : [])
+    .map((identity) => String(identity ?? "").trim())
+    .filter(Boolean))];
+  const rowsByIdentity = new Map(unique.map((identity) => [identity, []]));
+  if (!unique.length) return rowsByIdentity;
+  if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
+
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const url = new URL(`${ASSET_ORIGIN}/rows`);
-  url.searchParams.set("stream", "kv78");
-  url.searchParams.set("identity", identity);
-  const response = await stub.fetch(url.toString());
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error ?? `KV78-halterijen gaven HTTP ${response.status}.`);
-  if (!Array.isArray(data?.rows)) throw new Error("KV78 gaf geen lijst met halterijen terug.");
-  return data.rows;
+
+  // Multiple exact trip identities share one Durable Object call. The hub keeps
+  // the old 200-row cap per trip, avoiding repeated subrequests for every leg.
+  for (let offset = 0; offset < unique.length; offset += 50) {
+    const batch = unique.slice(offset, offset + 50);
+    const url = new URL(`${ASSET_ORIGIN}/rows`);
+    url.searchParams.set("stream", "kv78");
+    for (const identity of batch) url.searchParams.append("identity", identity);
+    const response = await stub.fetch(url.toString());
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error ?? `KV78-halterijen gaven HTTP ${response.status}.`);
+    if (!Array.isArray(data?.rows)) throw new Error("KV78 gaf geen lijst met halterijen terug.");
+
+    for (const row of data.rows) {
+      const rowIdentity = toIdentity(
+        row?.dataOwnerCode,
+        row?.operationDate,
+        row?.linePlanningNumber,
+        row?.journeyNumber,
+        row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? "0"
+      );
+      if (rowsByIdentity.has(rowIdentity)) rowsByIdentity.get(rowIdentity).push(row);
+    }
+  }
+  return rowsByIdentity;
 }
 
 async function getCurrentKv78RowsByVehicle(env, lookup) {
@@ -1808,6 +1831,8 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv78Error = null;
   let stopAssignmentIndex = null;
   let openovStopPlaceIndex = null;
+  let stopAssignmentIndexAttempted = false;
+  let openovStopPlaceIndexAttempted = false;
   try {
     const kv78Snapshot = await getKv78Snapshot(env);
     const kv78CachedRows = Array.isArray(kv78Snapshot.latestRows)
@@ -1822,10 +1847,14 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         item.leg.ndovRealtime?.status !== "cancelled" &&
         (item.identityKey || kv78VehicleLookupForItem(item))
       );
+      const exactRowsByIdentity = await getCurrentKv78RowsByIdentities(
+        env,
+        delayItems.map((item) => item.identityKey).filter(Boolean)
+      );
       const rowResults = await Promise.all(delayItems.map(async (item) => {
         const vehicleLookup = kv78VehicleLookupForItem(item);
         const exactRows = item.identityKey
-          ? await getCurrentKv78Rows(env, item.identityKey)
+          ? (exactRowsByIdentity.get(item.identityKey) ?? [])
           : [];
         let vehicleRows = [];
         let vehicleLookupError = null;
@@ -1875,6 +1904,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           ...rowResults.flatMap(({ item }) => [item?.leg?.from?.stopId, item?.leg?.to?.stopId]),
           ...kv6RouteStopIds,
         ];
+        openovStopPlaceIndexAttempted = true;
         openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, plannedStopIds);
       } catch (error) {
         kv78Error = [
@@ -1913,6 +1943,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         ...kv6AssignmentKeys,
       ])];
       try {
+        stopAssignmentIndexAttempted = true;
         stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
       } catch (error) {
         kv78Error = `PSA/CHB-haltecrosswalk niet beschikbaar; tijdmatching blijft ongeverifieerd: ${error instanceof Error ? error.message : "onbekende fout"}`;
@@ -2002,15 +2033,21 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   }
 
   const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
-  if (kv6PredictionItems.length && (!stopAssignmentIndex || !openovStopPlaceIndex)) {
+  if (kv6PredictionItems.length && (
+    (!stopAssignmentIndex && !stopAssignmentIndexAttempted) ||
+    (!openovStopPlaceIndex && !openovStopPlaceIndexAttempted)
+  )) {
     const stopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
       item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
     ));
-    try {
-      if (!openovStopPlaceIndex) openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, stopIds);
-    } catch (error) {
-      kv78Error = [kv78Error, "OpenOV/CHB-stopcrosswalk voor KV6-voorspelling niet beschikbaar: " +
-        (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+    if (!openovStopPlaceIndex && !openovStopPlaceIndexAttempted) {
+      try {
+        openovStopPlaceIndexAttempted = true;
+        openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, stopIds);
+      } catch (error) {
+        kv78Error = [kv78Error, "OpenOV/CHB-stopcrosswalk voor KV6-voorspelling niet beschikbaar: " +
+          (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+      }
     }
     const assignmentKeys = kv6PredictionItems.map((item) => {
       const event = item.kv6PredictionContext?.event;
@@ -2018,11 +2055,14 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       const stopCode = String(event?.userStopCode ?? "").trim();
       return owner && stopCode ? owner + "|" + stopCode : null;
     }).filter(Boolean);
-    try {
-      if (!stopAssignmentIndex) stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
-    } catch (error) {
-      kv78Error = [kv78Error, "PSA/CHB-haltecrosswalk voor KV6-voorspelling niet beschikbaar: " +
-        (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+    if (!stopAssignmentIndex && !stopAssignmentIndexAttempted) {
+      try {
+        stopAssignmentIndexAttempted = true;
+        stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
+      } catch (error) {
+        kv78Error = [kv78Error, "PSA/CHB-haltecrosswalk voor KV6-voorspelling niet beschikbaar: " +
+          (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+      }
     }
   }
 
