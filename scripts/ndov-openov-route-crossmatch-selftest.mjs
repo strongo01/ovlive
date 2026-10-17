@@ -1,11 +1,25 @@
 import assert from 'node:assert/strict';
-import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket } from '../src/ndov-plan-cancellation.js';
+import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue } from '../src/ndov-plan-cancellation.js';
 
 assert.equal(openovTripStartBucket('20261011_11:59_nl-OpenOV_390000001'), '00');
 assert.equal(openovTripStartBucket('20261011_12:00_nl-OpenOV_390000001'), '12');
 assert.equal(openovTripStartBucket('20261011_24:02_nl-OpenOV_390000001'), '24');
 assert.equal(openovTripStartBucket('invalid-trip-id'), null);
 console.log('PASS: service-day trip start selects the correct 00/12/24 route bucket');
+
+// Memory-safety regression: parsed crosswalk shards must not accumulate
+// unboundedly across many different routes in a long-lived Worker isolate.
+{
+  const cache = new Map([["route-a", 1], ["route-b", 2]]);
+  assert.equal(getLruCacheValue(cache, "route-a"), 1);
+  assert.deepEqual([...cache.keys()], ["route-b", "route-a"]);
+  setBoundedLruCacheValue(cache, "route-c", 3, 2);
+  assert.deepEqual([...cache.keys()], ["route-a", "route-c"]);
+  setBoundedLruCacheValue(cache, "route-d", 4, 2);
+  assert.deepEqual([...cache.keys()], ["route-c", "route-d"]);
+  assert.equal(cache.size, 2);
+  console.log("PASS: parsed crosswalk cache uses bounded least-recently-used eviction");
+}
 
 const patterns = [{
   routeId: '146903', realtimeTripId: 'CXX:U073:7054', headsign: 'Maarssenbroek', directionId: '1',
