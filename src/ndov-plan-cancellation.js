@@ -1005,8 +1005,21 @@ async function getKv78Snapshot(env, identities = []) {
   const stub = env.NDOV_FEEDS.get(id);
   const target = new URL(`${ASSET_ORIGIN}/status`);
   target.searchParams.set("stream", "kv78");
-  target.searchParams.set("identityDiagnostics", "1");
-  for (const identity of [...new Set(identities)].slice(0, 8)) target.searchParams.append("identity", identity);
+  // The planner only needs collector health and counts. Returning thousands of
+  // cached rows wastes Worker memory because exact rows are fetched separately
+  // by trip identity below.
+  target.searchParams.set("includeRows", "0");
+  const identityKeys = [...new Set(
+    (Array.isArray(identities) ? identities : [])
+      .map((identity) => String(identity ?? "").trim())
+      .filter(Boolean)
+  )].slice(0, 8);
+  // Full cross-cache identity diagnostics are expensive; opt in only for an
+  // explicit diagnostics request that actually supplied target identities.
+  if (identityKeys.length) {
+    target.searchParams.set("identityDiagnostics", "1");
+    for (const identity of identityKeys) target.searchParams.append("identity", identity);
+  }
   const response = await stub.fetch(target.toString());
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `KV78-status gaf HTTP ${response.status}.`);
@@ -2097,9 +2110,6 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
       includeIdentityDiagnostics ? candidates.map((item) => item.identityKey).filter(Boolean) : []
     );
     kv78IdentityDiagnosticSource = kv78Snapshot.kv78IdentityDiagnostics ?? null;
-    const kv78CachedRows = Array.isArray(kv78Snapshot.latestRows)
-      ? kv78Snapshot.latestRows
-      : [];
     kv78FeedState = kv78Snapshot.state ?? "unknown";
     const kv78LatestMs = timestampMs(valueOf(kv78Snapshot, "latestMessageAt"));
     const kv78AgeMs = kv78LatestMs === null ? null : Date.now() - kv78LatestMs;
@@ -2117,7 +2127,7 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
         messageCount: finiteCount(kv78Snapshot.messageCount),
         envelopeCounts: kv78Snapshot.envelopeCounts ?? {},
         storedRowCount: finiteCount(kv78Snapshot.storedKv78RowCount),
-        sampledRowCount: kv78CachedRows.length,
+        statusSampleAvailableCount: finiteCount(kv78Snapshot.kv78StatusSampleCount),
         passtimeMessageCount: finiteCount(kv78Snapshot.kv78PasstimeMessageCount),
         parsedRowCount: finiteCount(kv78Snapshot.kv78ParsedRowCount),
         lastPasstimeMessageAt: kv78Snapshot.kv78LastPasstimeMessageAt ?? null,
