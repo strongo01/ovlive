@@ -121,7 +121,9 @@ function kv78ClockSeconds(value) {
   const hour = Number(match[1]);
   const minute = Number(match[2]);
   const second = Number(match[3] ?? 0);
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return null;
+  // KV78 operation-day times may legitimately be expressed as 24:xx or 25:xx
+  // for after-midnight service, so do not clamp the hour to a civil clock day.
+  if (minute < 0 || minute > 59 || second < 0 || second > 59) return null;
   return hour * 3600 + minute * 60 + second;
 }
 

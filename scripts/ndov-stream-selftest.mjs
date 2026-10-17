@@ -49,6 +49,7 @@ assert.deepEqual(
 // Midnight must be interpreted conservatively as wall-clock schedule time.
 const midnightNow = Date.parse('2026-10-17T21:55:00.000Z'); // 23:55 Amsterdam
 assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '00:05:00' }, midnightNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '24:05:00' }, midnightNow), true);
 assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '23:51:00' }, midnightNow), false);
 
 // Ensure non-sample planning lines can be represented and correlated.
