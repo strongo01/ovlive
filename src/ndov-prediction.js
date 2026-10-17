@@ -169,39 +169,44 @@ export function deriveNdovKv6Prediction({
   operationDate,
   nowMs = Date.now(),
   maxAgeMs = MAX_FRESH_MS,
+  onFailure = null,
 }) {
+  const fail = (reason) => {
+    if (typeof onFailure === "function") onFailure(reason);
+    return null;
+  };
   const rawDelay = event?.punctualitySeconds;
   const delaySeconds = typeof rawDelay === "number" && Number.isFinite(rawDelay)
     ? Math.trunc(rawDelay)
     : (typeof rawDelay === "string" && /^-?\d+$/.test(rawDelay.trim()) ? Number(rawDelay) : null);
-  if (delaySeconds === null) return null;
+  if (delaySeconds === null) return fail("punctuality_missing_or_invalid");
 
   const receivedAt = timestampMs(event?.punctualityReceivedAt ?? event?.receivedAt);
-  if (receivedAt === null) return null;
+  if (receivedAt === null) return fail("punctuality_receive_timestamp_missing");
   const ageMs = nowMs - receivedAt;
-  if (ageMs < -30_000 || ageMs > maxAgeMs) return null;
+  if (ageMs < -30_000 || ageMs > maxAgeMs) return fail("punctuality_stale");
 
   const sourceTime = String(event?.punctualityTimestamp ?? event?.timestamp ?? "").trim();
   if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(sourceTime)) {
     const sourceMs = timestampMs(sourceTime);
     if (sourceMs !== null) {
       const sourceAgeMs = nowMs - sourceMs;
-      if (sourceAgeMs < -30_000 || sourceAgeMs > maxAgeMs) return null;
+      if (sourceAgeMs < -30_000 || sourceAgeMs > maxAgeMs) return fail("source_punctuality_timestamp_stale");
     }
   }
 
   const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
   const stopCode = String(event?.userStopCode ?? "").trim();
-  if (!owner || !stopCode) return null;
+  if (!owner || !stopCode) return fail("kv6_stop_identity_missing");
 
   const records = assignmentIndex?.assignments?.[owner + "|" + stopCode];
-  if (!Array.isArray(records) || !records.length) return null;
+  if (!Array.isArray(records) || !records.length) return fail("psa_assignment_missing");
   const activeRecords = records.filter((record) => assignmentIsActive(record, operationDate));
-  if (!activeRecords.length) return null;
+  if (!activeRecords.length) return fail("psa_assignment_inactive");
 
   const stops = Array.isArray(pattern?.stops) ? pattern.stops : [];
   const candidateIndices = candidatePatternStopIndices(pattern, event, delaySeconds);
-  if (!candidateIndices.length) return null;
+  if (!candidateIndices.length) return fail("no_route_stop_candidate_for_observation");
 
   const candidates = [];
   for (const record of activeRecords) {
@@ -235,7 +240,7 @@ export function deriveNdovKv6Prediction({
     currentStopIndex = exactQuayIndices[0];
     quayConfirmed = true;
   } else if (exactQuayIndices.length > 1) {
-    return null;
+    return fail("ambiguous_exact_quay_route_stop");
   } else if (allCandidateIndices.length === 1) {
     currentStopIndex = allCandidateIndices[0];
   } else if (allCandidateIndices.length === 0) {
@@ -279,26 +284,32 @@ export function deriveNdovKv6Prediction({
       && best.distanceSeconds <= 30
       && (!second || second.distanceSeconds - best.distanceSeconds >= 30);
 
-    if (
-      (eventType === "DEPARTURE" || eventType === "ARRIVAL")
-      && expectedClock !== null
-      && timeIsUnique
-      && bindingIsUnique
-      && !hasStaticMapping
-    ) {
-      currentStopIndex = best.index;
-      scheduleTimeFallback = uniqueBindings[0];
-    } else {
-      return null;
+    if (hasStaticMapping) {
+      return fail("static_stop_mapping_conflicts_with_psa");
     }
+    if (eventType !== "DEPARTURE" && eventType !== "ARRIVAL") {
+      return fail("missing_static_stop_mapping_for_non_stop_event");
+    }
+    if (expectedClock === null) {
+      return fail("event_schedule_clock_missing");
+    }
+    if (!timeIsUnique) {
+      return fail("scheduled_stop_time_not_unique");
+    }
+    if (!bindingIsUnique) {
+      return fail("psa_stopplace_quay_not_unique");
+    }
+    currentStopIndex = best.index;
+    scheduleTimeFallback = uniqueBindings[0];
   } else {
-    return null;
+    return fail("ambiguous_place_only_route_stop");
   }
 
   const fromIndex = uniquePatternStopIndex(pattern, leg?.from?.stopId);
   const toIndex = uniquePatternStopIndex(pattern, leg?.to?.stopId);
-  if (fromIndex === null || toIndex === null || fromIndex >= toIndex) return null;
-  if (currentStopIndex > toIndex) return null;
+  if (fromIndex === null || toIndex === null) return fail("planned_endpoint_missing_from_route_pattern");
+  if (fromIndex >= toIndex) return fail("planned_endpoint_order_invalid");
+  if (currentStopIndex > toIndex) return fail("observation_after_planned_arrival");
 
   const departure = currentStopIndex <= fromIndex
     ? makeProjectedEndpoint(leg, "departure", delaySeconds)
@@ -306,7 +317,7 @@ export function deriveNdovKv6Prediction({
   const arrival = currentStopIndex <= toIndex
     ? makeProjectedEndpoint(leg, "arrival", delaySeconds)
     : null;
-  if (!departure && !arrival) return null;
+  if (!departure && !arrival) return fail("no_future_endpoint_to_project");
 
   const currentStop = stops[currentStopIndex];
   return {
