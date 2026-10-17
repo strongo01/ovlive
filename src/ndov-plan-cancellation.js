@@ -62,6 +62,21 @@ export function selectCrosswalkShardNumbers(shardNumbers, maxShards) {
   return [...new Set(Array.isArray(shardNumbers) ? shardNumbers : [])].slice(0, limit);
 }
 
+/**
+ * Reuse shard promises already in the isolate cache and spend the per-request
+ * asset-read budget only on missing shards. Without this, slicing the requested
+ * shard list always chooses the same first two shards and can starve the rest.
+ */
+export function selectCachedCrosswalkShardNumbers(shardNumbers, cache, maxNewShards) {
+  const unique = [...new Set(Array.isArray(shardNumbers) ? shardNumbers : [])];
+  const limit = Number.isInteger(maxNewShards) ? Math.max(0, maxNewShards) : 0;
+  const hasCache = cache && typeof cache.has === "function";
+  if (!hasCache) return unique.slice(0, limit);
+  const cached = unique.filter((number) => cache.has(String(number)));
+  const missing = unique.filter((number) => !cache.has(String(number)));
+  return [...cached, ...missing.slice(0, limit)];
+}
+
 // Keep exact NS train identities separate from the bounded diagnostic list of
 // route-crosswalk outcomes. Mixed-mode plans can contain more than 12 legs;
 // truncating diagnostics must never make an otherwise exact train invisible
@@ -1169,8 +1184,9 @@ async function getStopAssignmentIndex(env, keys = []) {
   const shardNumbers = [...new Set(validKeys.map((key) => stopAssignmentShardNumber(key, shardCount)))];
   // The public plan endpoint shares its subrequest budget with route shards and live feeds.
   // Unloaded assignment records remain explicitly unverified instead of exhausting the Worker.
-  const selectedShardNumbers = selectCrosswalkShardNumbers(
+  const selectedShardNumbers = selectCachedCrosswalkShardNumbers(
     shardNumbers,
+    stopAssignmentShardCache,
     MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST
   );
   const assignments = Object.create(null);
@@ -1277,8 +1293,9 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
     keys.map((key) => openovStopPlaceShardNumber(key, shardCount)),
   )];
   // Unrelated stops do not justify more asset reads. Unloaded mappings stay unknown.
-  const selectedShardNumbers = selectCrosswalkShardNumbers(
+  const selectedShardNumbers = selectCachedCrosswalkShardNumbers(
     shardNumbers,
+    openovStopPlaceShardCache,
     MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST
   );
   const stopPlaces = Object.create(null);

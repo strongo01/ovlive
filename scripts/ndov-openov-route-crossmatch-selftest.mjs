@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue } from '../src/ndov-plan-cancellation.js';
+import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue, selectCachedCrosswalkShardNumbers } from '../src/ndov-plan-cancellation.js';
 
 assert.equal(openovTripStartBucket('20261011_11:59_nl-OpenOV_390000001'), '00');
 assert.equal(openovTripStartBucket('20261011_12:00_nl-OpenOV_390000001'), '12');
@@ -19,6 +19,26 @@ console.log('PASS: service-day trip start selects the correct 00/12/24 route buc
   assert.deepEqual([...cache.keys()], ["route-c", "route-d"]);
   assert.equal(cache.size, 2);
   console.log("PASS: parsed crosswalk cache uses bounded least-recently-used eviction");
+}
+
+{
+  const loadedCache = new Map([
+    ["11", Promise.resolve({})],
+    ["13", Promise.resolve({})],
+  ]);
+  assert.deepEqual(
+    selectCachedCrosswalkShardNumbers([11, 12, 13, 14, 15], loadedCache, 2),
+    [11, 13, 12, 14],
+    "cached shards must be reused while at most two new shards are selected",
+  );
+
+  const fullCache = new Map([["11", 1], ["12", 2], ["13", 3], ["14", 4]]);
+  assert.deepEqual(
+    selectCachedCrosswalkShardNumbers([11, 12, 13, 14, 15], fullCache, 2),
+    [11, 12, 13, 14, 15],
+    "a cached four-shard set may include one newly requested shard without an extra read burst",
+  );
+  console.log("PASS: stop-crosswalk selection reuses cached shards and rotates to missing shards");
 }
 
 const patterns = [{
