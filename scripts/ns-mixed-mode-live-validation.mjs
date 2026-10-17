@@ -11,6 +11,57 @@ const toPlace = process.env.OVLIVE_TO_PLACE ?? "52.102126,5.048507";
 const transitModes = process.env.OVLIVE_TRANSIT_MODES ??
   "RAIL,HIGHSPEED_RAIL,LONG_DISTANCE,NIGHT_RAIL,REGIONAL_FAST_RAIL,REGIONAL_RAIL,SUBURBAN,BUS,COACH";
 
+function amsterdamDateTime(dateKey, hour, minute) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const targetWallClockMs = Date.UTC(year, month - 1, day, hour, minute);
+  let candidateMs = targetWallClockMs;
+
+  // Convert an Amsterdam wall-clock time to UTC without assuming the
+  // current daylight-saving offset. 23:30 is never in the DST overlap.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Amsterdam",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(new Date(candidateMs))
+      .filter(part => part.type !== "literal")
+      .map(part => [part.type, part.value]));
+    const observedWallClockMs = Date.UTC(
+      Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+      Number(parts.hour), Number(parts.minute)
+    );
+    candidateMs += targetWallClockMs - observedWallClockMs;
+  }
+  return new Date(candidateMs);
+}
+
+function nextAmsterdamNightRequestTime() {
+  const dateFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Amsterdam",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const now = new Date();
+  const dateKey = dateFormatter.format(now);
+  let candidate = amsterdamDateTime(dateKey, 23, 30);
+  if (candidate.getTime() <= now.getTime()) {
+    const [year, month, day] = dateKey.split("-").map(Number);
+    const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
+    const tomorrowKey = [
+      String(tomorrow.getUTCFullYear()).padStart(4, "0"),
+      String(tomorrow.getUTCMonth() + 1).padStart(2, "0"),
+      String(tomorrow.getUTCDate()).padStart(2, "0")
+    ].join("-");
+    candidate = amsterdamDateTime(tomorrowKey, 23, 30);
+  }
+  return candidate.toISOString();
+}
+
 function collectLegs(plan) {
   const containers = [
     ...(Array.isArray(plan?.itineraries) ? plan.itineraries : []),
@@ -34,9 +85,10 @@ function collectLegs(plan) {
 const planUrl = new URL("/api/plan", baseUrl);
 planUrl.searchParams.set("fromPlace", fromPlace);
 planUrl.searchParams.set("toPlace", toPlace);
-// Give the planner enough lead time to produce a future train+bus option,
- // rather than only the immediately departing bus options.
-const requestTime = new Date(Date.now() + 15 * 60_000).toISOString();
+// The original regression occurred during the late-evening connection
+// window (bus 5 vs. Sprinter). Reuse that local time to avoid a test that
+// returns five faster daytime buses and never exercises the NS enrich path.
+const requestTime = process.env.OVLIVE_TEST_TIME ?? nextAmsterdamNightRequestTime();
 planUrl.searchParams.set("time", requestTime);
 planUrl.searchParams.set("numItineraries", "5");
 planUrl.searchParams.set("maxItineraries", "5");
