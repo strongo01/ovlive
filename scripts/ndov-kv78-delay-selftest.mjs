@@ -55,6 +55,36 @@ const tripRows = [
   }),
 ];
 
+// Stress fixture: irrelevant intermediate stops span all 16 PSA shards, but none
+// fall inside the planned departure/arrival windows. They must not be fetched.
+const stopAssignmentTestShard = (key) => {
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(key)) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash % 16;
+};
+const coveredStopAssignmentShards = new Set();
+const irrelevantTripRows = [];
+for (let index = 0; coveredStopAssignmentShards.size < 16 && index < 10000; index += 1) {
+  const stopCode = `IRRELEVANT_STOP_${String(index).padStart(5, "0")}`;
+  const shard = stopAssignmentTestShard(`EBS|${stopCode}`);
+  if (coveredStopAssignmentShards.has(shard)) continue;
+  coveredStopAssignmentShards.add(shard);
+  irrelevantTripRows.push(row({
+    identity: "EBS|2026-10-12|1314|1039|0",
+    dataOwnerCode: "EBS", operationDate: "2026-10-12", linePlanningNumber: "1314",
+    journeyNumber: "1039", fortifyOrderNumber: "0",
+    targetDepartureTime: "11:00:00", expectedDepartureTime: "11:03:00",
+    departureDelaySeconds: 180, targetArrivalTime: "11:01:00",
+    expectedArrivalTime: "11:03:00", arrivalDelaySeconds: 120,
+    userStopOrderNumber: String(index + 2), userStopCode: stopCode,
+  }));
+}
+assert.equal(coveredStopAssignmentShards.size, 16, "stress fixture must cover every PSA shard");
+tripRows.push(...irrelevantTripRows);
+
 const vehicleTripRows = [
   row({
     identity: 'CXX|2026-10-12|U005|1050|0',
@@ -169,14 +199,16 @@ const shard = {
   '382969681': 'GVB:50:56060',
 };
 
+const assetFetchPaths = [];
 const env = {
   ASSETS: {
     async fetch(request) {
       const url = new URL(request.url);
+      assetFetchPaths.push(url.pathname);
       if (url.pathname.endsWith('/ndov-stop-crosswalk/manifest.json')) {
-        return Response.json({ schemaVersion: 1, generatedAt: now, shardCount: 1 });
+        return Response.json({ schemaVersion: 1, generatedAt: now, shardCount: 16 });
       }
-      if (url.pathname.endsWith('/ndov-stop-crosswalk/shards/stop-assignments-0.json')) {
+      if (/\/ndov-stop-crosswalk\/shards\/stop-assignments-\d+\.json$/.test(url.pathname)) {
         return Response.json({ assignments: {} });
       }
       if (url.pathname.endsWith('/ndov-openov-stopplace-crosswalk/manifest.json')) {
@@ -303,6 +335,15 @@ assert.equal(plan.ndovRealtimeMeta.coverageByMode.TRAM.cancelledLegCount, 1);
 assert.equal(plan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv78DataLegCount, 1);
 assert.equal(plan.ndovRealtimeMeta.coverageByMode.METRO.kv78DataLegCount, 1);
 assert.equal(plan.ndovRealtimeMeta.coverageByMode.METRO.cancelledLegCount, 1);
+const assignmentShardReads = assetFetchPaths.filter((path) =>
+  /\/ndov-stop-crosswalk\/shards\/stop-assignments-\d+\.json$/.test(path)
+);
+assert.ok(assignmentShardReads.length > 0, "PSA candidate stop shards should be checked");
+assert.ok(
+  assignmentShardReads.length < 16,
+  `irrelevant mid-trip stop rows must not fetch all 16 PSA shards; fetched ${assignmentShardReads.length}`
+);
+console.log("PASS: PSA/CHB lookup only reads shards for time-relevant target haltes");
 console.log("PASS: exact KV17 cancellations attach only to their own bus/tram/metro trip");
 console.log("PASS: KV78 departure/arrival delays are tested for BUS/TRAM/SUBWAY/METRO");
 console.log("PASS: same planned time cannot cause another operator/trip's delay to be copied");
