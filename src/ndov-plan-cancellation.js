@@ -14,6 +14,35 @@ let openovRouteManifestPromise = null;
 const openovRouteCache = new Map();
 let lastKv6NoExactMatchDiagnosticAt = 0;
 
+// The route cache contains parsed GTFS patterns, which use substantially more
+// memory than their 512 KiB JSON shards. Keep only a few route buckets per
+// isolate; otherwise a sequence of different itineraries can exhaust Workers
+// memory (Error 1102). Smaller ancillary caches avoid retaining whole datasets.
+const MAX_OPENOV_ROUTE_CACHE_ENTRIES = 2;
+const MAX_TRIP_CROSSWALK_SHARD_CACHE_ENTRIES = 4;
+const MAX_STOP_ASSIGNMENT_SHARD_CACHE_ENTRIES = 4;
+const MAX_OPENOV_STOP_PLACE_SHARD_CACHE_ENTRIES = 4;
+
+export function getLruCacheValue(cache, key) {
+  if (!cache.has(key)) return undefined;
+  const value = cache.get(key);
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+export function setBoundedLruCacheValue(cache, key, value, maxEntries) {
+  const limit = Number.isInteger(maxEntries) ? Math.max(1, maxEntries) : 1;
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > limit) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+  return value;
+}
+
 // Keep exact NS train identities separate from the bounded diagnostic list of
 // route-crosswalk outcomes. Mixed-mode plans can contain more than 12 legs;
 // truncating diagnostics must never make an otherwise exact train invisible
@@ -212,7 +241,7 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
   // Cache each route+time bucket separately so a morning request cannot reuse
   // an afternoon shard list for the same route.
   const cacheKey = useBucket ? routeKey + ":" + bucket : routeKey;
-  let promise = openovRouteCache.get(cacheKey);
+  let promise = getLruCacheValue(openovRouteCache, cacheKey);
   if (!promise) {
     promise = (async () => {
       const all = [];
@@ -257,10 +286,9 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
       openovRouteCache.delete(cacheKey);
       throw error;
     });
-    openovRouteCache.set(cacheKey, promise);
-    if (openovRouteCache.size > 40) {
-      openovRouteCache.delete(openovRouteCache.keys().next().value);
-    }
+    setBoundedLruCacheValue(
+      openovRouteCache, cacheKey, promise, MAX_OPENOV_ROUTE_CACHE_ENTRIES
+    );
   }
 
   try {
@@ -623,13 +651,15 @@ async function getCrosswalkEntry(env, numericTripId) {
     .sort((a, b) => String(b).length - String(a).length)[0];
   if (!prefix) return { manifest, realtimeTripId: null };
 
-  let shardPromise = shardCache.get(prefix);
+  let shardPromise = getLruCacheValue(shardCache, prefix);
   if (!shardPromise) {
     shardPromise = readAssetJson(env, `${CROSSWALK_ROOT}/trips-${prefix}.json`).catch((error) => {
       shardCache.delete(prefix);
       throw error;
     });
-    shardCache.set(prefix, shardPromise);
+    setBoundedLruCacheValue(
+      shardCache, prefix, shardPromise, MAX_TRIP_CROSSWALK_SHARD_CACHE_ENTRIES
+    );
   }
   const shard = await shardPromise;
   return { manifest, realtimeTripId: shard?.[numericTripId] ?? null };
@@ -829,13 +859,15 @@ async function getStopAssignmentIndex(env, keys = []) {
   const assignments = Object.create(null);
   await Promise.all(shardNumbers.map(async (shardNumber) => {
     const cacheKey = String(shardNumber);
-    let shardPromise = stopAssignmentShardCache.get(cacheKey);
+    let shardPromise = getLruCacheValue(stopAssignmentShardCache, cacheKey);
     if (!shardPromise) {
       shardPromise = readAssetJson(env, `ndov-stop-crosswalk/shards/stop-assignments-${shardNumber}.json`).catch((error) => {
         stopAssignmentShardCache.delete(cacheKey);
         throw error;
       });
-      stopAssignmentShardCache.set(cacheKey, shardPromise);
+      setBoundedLruCacheValue(
+        stopAssignmentShardCache, cacheKey, shardPromise, MAX_STOP_ASSIGNMENT_SHARD_CACHE_ENTRIES
+      );
     }
     const shard = await shardPromise;
     Object.assign(assignments, shard?.assignments ?? {});
@@ -917,7 +949,7 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
 
   await Promise.all(shardNumbers.map(async (shardNumber) => {
     const cacheKey = String(shardNumber);
-    let shardPromise = openovStopPlaceShardCache.get(cacheKey);
+    let shardPromise = getLruCacheValue(openovStopPlaceShardCache, cacheKey);
 
     if (!shardPromise) {
       shardPromise = readAssetJson(
@@ -928,7 +960,9 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
         throw error;
       });
 
-      openovStopPlaceShardCache.set(cacheKey, shardPromise);
+      setBoundedLruCacheValue(
+        openovStopPlaceShardCache, cacheKey, shardPromise, MAX_OPENOV_STOP_PLACE_SHARD_CACHE_ENTRIES
+      );
     }
 
     const shard = await shardPromise;
