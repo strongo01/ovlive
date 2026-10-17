@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-12T18:52:16.460803+00:00",
+  "sourceGtfs": "openov_gtfs_20261007.zip",
+  "sourceChb": "ExportCHB_2026-10-12.xml.gz",
+  "sourceAnalysisGeneratedAt": "2026-10-12T18:49:32.954539+00:00",
+  "keyFormat": "numeric OpenOV GTFS stop_id; remove nl-OpenOV_ prefix",
+  "shardAlgorithm": "FNV-1a UTF-8, 32-bit",
+  "shardCount": 64,
+  "keyCount": 39730,
+  "matchingRules": {
+    "exactNormalisedNameMatch": true,
+    "uniqueStopPlaceRequired": true,
+    "maximumDistanceMeters": 20,
+    "maximumDistanceForGenericQuayNamesMeters": 10,
+    "ambiguousCandidates": "excluded in source analysis",
+    "unmatchedStops": "no automatic mapping"
+  },
+  "excludedCounts": {
+    "ongeldige_chb_id": 353,
+    "afstand_of_generieke_naam": 1405,
+    "ongeldig_stop_id": 464
+  }
+}

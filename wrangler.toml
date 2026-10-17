@@ -13,7 +13,26 @@ APP_NAME = "OVLive"
 APP_VERSION = "0.3.0-ovapi-crossmatch-test"
 # Set this to a contact email or website before using Transitous in production.
 APP_CONTACT = "newstapper@outlook.com"
+# TEMPORARY CONTROLLED NDOV SOAK TEST
 NDOV_AUTOCOLLECT = "true"
+
+# Publieke API-bescherming: limieten per client-IP en Cloudflare-locatie.
+# Deze limieten zijn aanvullend; ze vervangen geen Cloudflare WAF-monitoring.
+[[ratelimits]]
+name = "API_RATE_LIMITER"
+namespace_id = "202610140001"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "PLAN_RATE_LIMITER"
+namespace_id = "202610140002"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
 
 # Lokale NDOV-diagnosebridge. Deze endpoints accepteren alleen loopback-hosts.
 [[durable_objects.bindings]]

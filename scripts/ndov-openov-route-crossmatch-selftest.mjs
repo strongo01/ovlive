@@ -1,5 +1,25 @@
 import assert from 'node:assert/strict';
-import { matchOpenovRoutePattern, applyNdovCancellationsToPlan } from '../src/ndov-plan-cancellation.js';
+import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue } from '../src/ndov-plan-cancellation.js';
+
+assert.equal(openovTripStartBucket('20261011_11:59_nl-OpenOV_390000001'), '00');
+assert.equal(openovTripStartBucket('20261011_12:00_nl-OpenOV_390000001'), '12');
+assert.equal(openovTripStartBucket('20261011_24:02_nl-OpenOV_390000001'), '24');
+assert.equal(openovTripStartBucket('invalid-trip-id'), null);
+console.log('PASS: service-day trip start selects the correct 00/12/24 route bucket');
+
+// Memory-safety regression: parsed crosswalk shards must not accumulate
+// unboundedly across many different routes in a long-lived Worker isolate.
+{
+  const cache = new Map([["route-a", 1], ["route-b", 2]]);
+  assert.equal(getLruCacheValue(cache, "route-a"), 1);
+  assert.deepEqual([...cache.keys()], ["route-b", "route-a"]);
+  setBoundedLruCacheValue(cache, "route-c", 3, 2);
+  assert.deepEqual([...cache.keys()], ["route-a", "route-c"]);
+  setBoundedLruCacheValue(cache, "route-d", 4, 2);
+  assert.deepEqual([...cache.keys()], ["route-c", "route-d"]);
+  assert.equal(cache.size, 2);
+  console.log("PASS: parsed crosswalk cache uses bounded least-recently-used eviction");
+}
 
 const patterns = [{
   routeId: '146903', realtimeTripId: 'CXX:U073:7054', headsign: 'Maarssenbroek', directionId: '1',
@@ -97,6 +117,27 @@ assert.ok(ambiguous.candidateRealtimeTripIds.includes('CXX:U073:9999'), 'the con
 assert.equal(ambiguous.candidatePatternDetails.length, 2, 'ambiguous pattern summaries should be available');
 assert.ok(ambiguous.candidatePatternDetails.every((item) => Number.isInteger(item.stopCount)), 'each summary reports its stop count');
 assert.ok(ambiguous.candidatePatternDetails.every((item) => Array.isArray(item.segmentStops)), 'each summary reports the matched segment stops');
+
+const exactSourceTripId = "391225406";
+const exactSourceTripLeg = {
+  ...leg,
+  tripId: String(leg.tripId).replace(
+    /nl-OpenOV_\d+$/i,
+    `nl-OpenOV_${exactSourceTripId}`
+  ),
+};
+const exactSourceTripCandidates = [
+  { ...matched.pattern, realtimeTripId: "CXX:U073:44", openovTripId: exactSourceTripId },
+  { ...matched.pattern, realtimeTripId: "CXX:U073:6024", openovTripId: "999999999" },
+];
+const exactSourceTripMatch = matchOpenovRoutePattern(
+  exactSourceTripLeg,
+  exactSourceTripCandidates
+);
+assert.equal(exactSourceTripMatch.realtimeTripId, "CXX:U073:44");
+assert.equal(exactSourceTripMatch.reason, "exact_openov_trip_id_match");
+console.log("PASS: oorspronkelijke GTFS-rit-ID onderscheidt dubbele routepatronen");
+
 console.log('PASS: exact route + full-trip start/end + segment stop sequence resolves CXX:U073:7054');
 console.log('PASS: wrong start time is rejected');
 console.log('PASS: wrong route is rejected');
@@ -120,16 +161,31 @@ const planEnv = {
     async fetch(request) {
       const url = new URL(request.url);
       if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: [] });
-      if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({ generatedAt: now, routes: { '146903': ['route-146903-0.json'] } });
-      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-0.json') return Response.json(patterns);
+      if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({
+        generatedAt: now,
+        serviceCalendarDateCount: 0,
+        routes: { '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json'] },
+        routesByStartBucket: {
+          '146903': {
+            '00': ['route-146903-t00-0.json'],
+            '12': ['route-146903-t12-0.json'],
+          },
+        },
+      });
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t00-0.json') {
+        return new Response('A different start-time bucket must not be loaded.', { status: 500 });
+      }
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t12-0.json') return Response.json(patterns);
       return new Response('not found', { status: 404 });
     },
   },
   NDOV_FEEDS: {
     idFromName(name) { return name; },
-    get(stream) {
+    get(objectName) {
+      assert.equal(objectName, 'ndov-shared-collector-v1', 'NDOV tests must use the shared collector object');
       return { async fetch(input) {
         const url = new URL(input);
+          const stream = url.searchParams.get('stream');
         if (url.pathname === '/status' && stream === 'bison') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/status' && stream === 'kv78') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/mutations' && stream === 'bison') return Response.json({ mutations: [] });

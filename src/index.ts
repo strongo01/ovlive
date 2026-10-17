@@ -1,9 +1,17 @@
+import {
+  findExactVehiclePositionForLeg,
+  findRealtimeStopByScheduledEvent,
+  summarizeRealtimeEvent,
+  findPropagatedRealtimeEvent,
+} from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
 import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 
-import { applyNdovCancellationsToPlan } from "./ndov-plan-cancellation.js";
+import { applyNdovCancellationsToPlan, prepareNsTrainIdentities } from "./ndov-plan-cancellation.js";
+import { enrichNsTrainPlan } from "./ns-train-realtime";
+import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
 interface Env {
   ASSETS: Fetcher;
@@ -12,6 +20,10 @@ interface Env {
   APP_NAME: string;
   APP_VERSION: string;
   APP_CONTACT: string;
+  NS_API_SUBSCRIPTION_KEY?: string;
+  GEOAPIFY_API_KEY?: string;
+  API_RATE_LIMITER?: ApiRateLimitBinding;
+  PLAN_RATE_LIMITER?: ApiRateLimitBinding;
 }
 
 const OPENOV = {
@@ -22,6 +34,341 @@ const OPENOV = {
 };
 
 const TRANSITOUS = "https://api.transitous.org/api/v6";
+
+// NOMINATIM_LOCAL_GEOCODER_V1
+// Cache en wachtrij voor lokale tests. De wachtrij geldt per Worker-isolate.
+const NOMINATIM_CACHE_TTL_MS = 10 * 60 * 1000;
+const NOMINATIM_MIN_INTERVAL_MS = 1100;
+const NOMINATIM_MAX_CACHE_ENTRIES = 200;
+
+const nominatimGeocodeCache = new Map<
+  string,
+  { expiresAtMs: number; data: any }
+>();
+const nominatimGeocodeInflight = new Map<string, Promise<any>>();
+
+let nominatimRequestQueue: Promise<void> = Promise.resolve();
+let nominatimLastRequestAtMs = 0;
+
+async function fetchNominatimSerialized(
+  url: URL,
+  env: Env
+): Promise<Response> {
+  const request = nominatimRequestQueue.then(async () => {
+    const waitMs = Math.max(
+      0,
+      NOMINATIM_MIN_INTERVAL_MS -
+        (Date.now() - nominatimLastRequestAtMs)
+    );
+
+    if (waitMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
+
+    nominatimLastRequestAtMs = Date.now();
+
+    return fetch(url, {
+      headers: {
+        "accept": "application/json",
+        "user-agent":
+          `${env.APP_NAME}/${env.APP_VERSION} (contact: ${env.APP_CONTACT})`
+      },
+      signal: AbortSignal.timeout(10000),
+      cf: { cacheTtl: 600, cacheEverything: true }
+    });
+  });
+
+  nominatimRequestQueue = request.then(
+    () => undefined,
+    () => undefined
+  );
+
+  return request;
+}
+
+async function getNominatimFeatures(
+  query: string,
+  env: Env
+): Promise<any> {
+  const cacheKey = query.trim().toLocaleLowerCase("nl-NL");
+  const now = Date.now();
+  const cached = nominatimGeocodeCache.get(cacheKey);
+
+  if (cached && cached.expiresAtMs > now) {
+    return cached.data;
+  }
+
+  if (cached) nominatimGeocodeCache.delete(cacheKey);
+
+  const inFlight = nominatimGeocodeInflight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const task = (async () => {
+    const upstream = new URL(
+      "https://nominatim.openstreetmap.org/search"
+    );
+    upstream.searchParams.set("q", query);
+    upstream.searchParams.set("format", "jsonv2");
+    upstream.searchParams.set("addressdetails", "1");
+    upstream.searchParams.set("limit", "6");
+    upstream.searchParams.set("accept-language", "nl");
+
+    const response = await fetchNominatimSerialized(upstream, env);
+
+    if (!response.ok) {
+      throw new Error(`Nominatim gaf HTTP ${response.status}.`);
+    }
+
+    const items = await response.json();
+
+    if (!Array.isArray(items)) {
+      throw new Error("Nominatim gaf geen geldige lijst met zoekresultaten.");
+    }
+
+    const features = items.map((item: any) => {
+      const address = item?.address ?? {};
+      const lon = Number(item?.lon);
+      const lat = Number(item?.lat);
+
+      return {
+        type: "Feature",
+        properties: {
+          osm_type: item?.osm_type ?? null,
+          osm_id: item?.osm_id ?? null,
+          osm_key: item?.class ?? null,
+          osm_value: item?.type ?? item?.class ?? "place",
+          type: item?.type ?? item?.class ?? "place",
+          name: item?.name ?? null,
+          street:
+            address.road ??
+            address.pedestrian ??
+            address.residential ??
+            address.footway ??
+            address.path ??
+            null,
+          housenumber: address.house_number ?? null,
+          postcode: address.postcode ?? null,
+          city:
+            address.city ??
+            address.town ??
+            address.village ??
+            address.municipality ??
+            address.hamlet ??
+            null,
+          locality:
+            address.suburb ??
+            address.neighbourhood ??
+            address.quarter ??
+            null,
+          district:
+            address.city_district ??
+            address.borough ??
+            null,
+          state: address.state ?? null,
+          country: address.country ?? null,
+          countrycode: address.country_code
+            ? String(address.country_code).toUpperCase()
+            : null,
+          display_name: item?.display_name ?? null
+        },
+        geometry: {
+          type: "Point",
+          coordinates: [lon, lat]
+        }
+      };
+    }).filter((feature: any) =>
+      feature.geometry.coordinates.every(
+        (coordinate: number) => Number.isFinite(coordinate)
+      )
+    );
+
+    const data = {
+      type: "FeatureCollection",
+      features
+    };
+
+    if (nominatimGeocodeCache.size >= NOMINATIM_MAX_CACHE_ENTRIES) {
+      const oldestKey = nominatimGeocodeCache.keys().next().value;
+      if (oldestKey) nominatimGeocodeCache.delete(oldestKey);
+    }
+
+    nominatimGeocodeCache.set(cacheKey, {
+      expiresAtMs: Date.now() + NOMINATIM_CACHE_TTL_MS,
+      data
+    });
+
+    return data;
+  })();
+
+  nominatimGeocodeInflight.set(cacheKey, task);
+
+  try {
+    return await task;
+  } finally {
+    if (nominatimGeocodeInflight.get(cacheKey) === task) {
+      nominatimGeocodeInflight.delete(cacheKey);
+    }
+  }
+}
+
+
+// GEOAPIFY FALLBACK: alleen aangeroepen als Nominatim een technische fout geeft.
+const GEOAPIFY_CACHE_TTL_MS = 10 * 60 * 1000;
+const GEOAPIFY_MAX_CACHE_ENTRIES = 200;
+
+const geoapifyGeocodeCache = new Map<
+  string,
+  { expiresAtMs: number; data: any }
+>();
+const geoapifyGeocodeInflight = new Map<string, Promise<any>>();
+
+async function getGeoapifyFeatures(
+  query: string,
+  env: Env
+): Promise<any> {
+  const apiKey = env.GEOAPIFY_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Geoapify API-sleutel ontbreekt.");
+  }
+
+  const cacheKey = query.trim().toLocaleLowerCase("nl-NL");
+  const now = Date.now();
+  const cached = geoapifyGeocodeCache.get(cacheKey);
+
+  if (cached && cached.expiresAtMs > now) {
+    return cached.data;
+  }
+  if (cached) geoapifyGeocodeCache.delete(cacheKey);
+
+  const inFlight = geoapifyGeocodeInflight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const task = (async () => {
+    const upstream = new URL(
+      "https://api.geoapify.com/v1/geocode/search"
+    );
+    upstream.searchParams.set("text", query);
+    upstream.searchParams.set("format", "json");
+    upstream.searchParams.set("limit", "6");
+    upstream.searchParams.set("lang", "nl");
+    upstream.searchParams.set("apiKey", apiKey);
+
+    const response = await fetch(upstream, {
+      headers: { "accept": "application/json" },
+      signal: AbortSignal.timeout(10000),
+      cf: { cacheTtl: 600, cacheEverything: true }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Geoapify gaf HTTP ${response.status}.`);
+    }
+
+    const body: any = await response.json();
+    if (!Array.isArray(body?.results)) {
+      throw new Error("Geoapify gaf geen geldige zoekresultaten.");
+    }
+
+    // Normaliseer naar hetzelfde FeatureCollection-formaat als Nominatim.
+    const features = body.results.map((item: any) => {
+      const lon = Number(item?.lon);
+      const lat = Number(item?.lat);
+      const address = item ?? {};
+
+      return {
+        type: "Feature",
+        properties: {
+          osm_type: item?.datasource?.raw?.osm_type ?? null,
+          osm_id: item?.datasource?.raw?.osm_id ?? null,
+          osm_key: item?.category ?? item?.datasource?.sourcename ?? null,
+          osm_value: item?.result_type ?? item?.type ?? "place",
+          type: item?.result_type ?? item?.type ?? "place",
+          name: item?.name ?? item?.address_line1 ?? null,
+          street: address.street ?? null,
+          housenumber: address.housenumber ?? null,
+          postcode: address.postcode ?? null,
+          city:
+            address.city ??
+            address.town ??
+            address.village ??
+            address.municipality ??
+            null,
+          locality: address.suburb ?? address.district ?? null,
+          district: address.county ?? null,
+          state: address.state ?? null,
+          country: address.country ?? null,
+          countrycode: address.country_code
+            ? String(address.country_code).toUpperCase()
+            : null,
+          display_name: address.formatted ?? null
+        },
+        geometry: {
+          type: "Point",
+          coordinates: [lon, lat]
+        }
+      };
+    }).filter((feature: any) =>
+      feature.geometry.coordinates.every(
+        (coordinate: number) => Number.isFinite(coordinate)
+      )
+    );
+
+    const data = {
+      type: "FeatureCollection",
+      features
+    };
+
+    if (geoapifyGeocodeCache.size >= GEOAPIFY_MAX_CACHE_ENTRIES) {
+      const oldestKey = geoapifyGeocodeCache.keys().next().value;
+      if (oldestKey) geoapifyGeocodeCache.delete(oldestKey);
+    }
+
+    geoapifyGeocodeCache.set(cacheKey, {
+      expiresAtMs: Date.now() + GEOAPIFY_CACHE_TTL_MS,
+      data
+    });
+
+    return data;
+  })();
+
+  geoapifyGeocodeInflight.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    if (geoapifyGeocodeInflight.get(cacheKey) === task) {
+      geoapifyGeocodeInflight.delete(cacheKey);
+    }
+  }
+}
+
+async function getGeocodeFeatures(
+  query: string,
+  env: Env
+): Promise<any> {
+  try {
+    // Nominatim blijft altijd de primaire bron.
+    return await getNominatimFeatures(query, env);
+  } catch (primaryError) {
+    console.warn(
+      "[OVLIVE_GEOCODE] Nominatim mislukt; Geoapify-fallback wordt geprobeerd.",
+      primaryError instanceof Error ? primaryError.message : "Onbekende fout"
+    );
+
+    if (!env.GEOAPIFY_API_KEY?.trim()) {
+      throw primaryError;
+    }
+
+    try {
+      return await getGeoapifyFeatures(query, env);
+    } catch (fallbackError) {
+      console.warn(
+        "[OVLIVE_GEOCODE] Ook Geoapify is niet beschikbaar.",
+        fallbackError instanceof Error ? fallbackError.message : "Onbekende fout"
+      );
+      throw new Error("Nominatim en Geoapify zijn tijdelijk niet beschikbaar.");
+    }
+  }
+}
+
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
 const MAX_ROUTE_PARAMS = new Set([
   "fromPlace", "toPlace", "time", "arriveBy", "realtimeMode", "transitModes",
@@ -445,6 +792,9 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
           vehicleId: e.vehicle?.vehicle?.id,
           tripId: e.vehicle?.trip?.tripId,
           routeId: e.vehicle?.trip?.routeId,
+          startDate: e.vehicle?.trip?.startDate,
+          startTime: e.vehicle?.trip?.startTime,
+          directionId: e.vehicle?.trip?.directionId,
           stopId: e.vehicle?.stopId,
           latitude: e.vehicle?.position?.latitude,
           longitude: e.vehicle?.position?.longitude,
@@ -621,11 +971,25 @@ function matchOpenovRealtime(leg: any, records: any[]) {
   // Voorkeursmethode: exacte rit-ID, met routecontrole als de
   // realtimefeed ook een route-ID bevat.
   const exact = records.filter((record: any) => {
-    const recordTripId = parseOpenovTripId(record.tripId).tripId;
+    const recordIdentity = parseOpenovTripId(record.tripId);
+    const recordTripId = recordIdentity.tripId;
     const recordRouteId = normalizeOpenovId(record.routeId);
 
+    // Een numeriek GTFS-rit-ID kan op meerdere exploitatiedagen voorkomen.
+    // Gebruik daarom geen update van morgen voor een reis van vandaag.
+    const expectedDate = String(identity.startDate ?? "")
+      .replace(/\D/g, "")
+      .slice(0, 8);
+    const recordDate = String(record.startDate ?? recordIdentity.startDate ?? "")
+      .replace(/\D/g, "")
+      .slice(0, 8);
+    const serviceDateMatches =
+      !expectedDate ||
+      (recordDate.length > 0 && recordDate === expectedDate);
+
     return recordTripId === identity.tripId &&
-      (!recordRouteId || recordRouteId === routeId);
+      (!recordRouteId || recordRouteId === routeId) &&
+      serviceDateMatches;
   });
 
   // TIJDELIJKE DIAGNOSE: tel kandidaten per matchingstap.
@@ -723,26 +1087,6 @@ function matchOpenovRealtime(leg: any, records: any[]) {
     }
   );
 
-  console.log("[OVLIVE_MATCH_DIAG]", JSON.stringify({
-    routeId: rawRouteId,
-    tripId: leg.tripId ?? null,
-    parsedTripId: identity.tripId,
-    parsedDate: identity.startDate ?? null,
-    parsedStartTime: identity.startTime ?? null,
-    fromStopId: fromId,
-    toStopId: toId,
-    plannedStart: diagnosticPlannedValue ?? null,
-    plannedTimestamp: diagnosticPlannedTimestamp ?? null,
-    recordsChecked: records.length,
-    exactTripIdCount: exact.length,
-    sameRouteCount: diagnosticRouteRecords.length,
-    sameRouteAndDateCount: diagnosticDateRecords.length,
-    sameRouteDateAndDirectionCount: diagnosticDirectionRecords.length,
-    boardingStopCount: diagnosticFromStopRecords.length,
-    orderedStopsCount: diagnosticOrderedStopRecords.length,
-    timeWithinToleranceCount: diagnosticTimeRecords.length,
-    samples: diagnosticSamples
-  }));
 
   if (exact.length === 1) {
     return { record: exact[0], method: "exact_trip_id" };
@@ -892,59 +1236,6 @@ function findRealtimeStop(record: any, stopId: string) {
   );
 }
 
-function summarizeRealtimeEvent(
-  stop: any,
-  kind: "arrival" | "departure",
-  scheduledValue?: unknown
-) {
-  if (!stop) return null;
-
-  const timestamp = stop[`${kind}Time`];
-  const capitalizedKind = kind[0].toUpperCase() + kind.slice(1);
-  const reportedDelay =
-    stop[`effective${capitalizedKind}DelaySeconds`] ??
-    stop[`${kind}DelaySeconds`];
-
-  let scheduledMs = Number.NaN;
-  if (typeof scheduledValue === "string") {
-    scheduledMs = Date.parse(scheduledValue);
-  } else if (typeof scheduledValue === "number") {
-    scheduledMs = scheduledValue > 1e12
-      ? scheduledValue
-      : scheduledValue > 1e9
-        ? scheduledValue * 1000
-        : Number.NaN;
-  }
-  const scheduledSeconds = Number.isFinite(scheduledMs) ? scheduledMs / 1000 : undefined;
-  const validTimestamp =
-    typeof timestamp === "number" && Number.isFinite(timestamp)
-      ? timestamp
-      : undefined;
-
-  const hasReportedDelay =
-    typeof reportedDelay === "number" && Number.isFinite(reportedDelay);
-  const hasAbsolutePrediction =
-    validTimestamp !== undefined && scheduledSeconds !== undefined;
-
-  // GTFS-Realtime: absolute event time takes precedence over delay.
-  const delaySeconds = hasAbsolutePrediction
-    ? Math.round(validTimestamp - scheduledSeconds)
-    : hasReportedDelay
-      ? reportedDelay
-      : null;
-
-  return {
-    time: validTimestamp !== undefined
-      ? new Date(validTimestamp * 1000).toISOString()
-      : null,
-    delaySeconds,
-    delayBasis: hasAbsolutePrediction
-      ? "absolute_prediction_minus_scheduled_time"
-      : hasReportedDelay
-        ? "source_or_gtfs_propagated_delay"
-        : "unknown"
-  };
-}
 function alertIsActive(alert: any, nowSeconds: number): boolean {
   // Nieuwe GTFS-RT-velden hebben voorrang op de oudere active_period.
   const periods = alert.communicationPeriods?.length
@@ -974,37 +1265,14 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
   // Haal de feeds parallel op. Alleen verse feeds worden gebruikt
   // voor actuele reisinformatie.
-  const [tripFeed, trainFeed, alertFeed] = await Promise.all([
+  const [tripFeed, trainFeed, alertFeed, vehicleFeed] = await Promise.all([
     safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates"),
     safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates"),
-    safeOpenovFeed(OPENOV.alerts, "alerts")
+    safeOpenovFeed(OPENOV.alerts, "alerts"),
+    safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")
   ]);
 
   // TIJDELIJKE DIAGNOSE: controleer de daadwerkelijke invoer van de matcher.
-  console.log("[OVLIVE_FEED_DIAG]", JSON.stringify({
-    tripUpdates: {
-      ok: tripFeed.ok ?? null,
-      freshness: tripFeed.freshness ?? null,
-      ageSeconds: tripFeed.ageSeconds ?? null,
-      entityCount: tripFeed.entityCount ?? null,
-      entitiesLength: Array.isArray(tripFeed.entities)
-        ? tripFeed.entities.length : null,
-      recordsWithTripId: Array.isArray(tripFeed.entities)
-        ? tripFeed.entities.filter((item: any) => item?.tripId).length : null,
-      error: tripFeed.error ?? null
-    },
-    trainUpdates: {
-      ok: trainFeed.ok ?? null,
-      freshness: trainFeed.freshness ?? null,
-      ageSeconds: trainFeed.ageSeconds ?? null,
-      entityCount: trainFeed.entityCount ?? null,
-      entitiesLength: Array.isArray(trainFeed.entities)
-        ? trainFeed.entities.length : null,
-      recordsWithTripId: Array.isArray(trainFeed.entities)
-        ? trainFeed.entities.filter((item: any) => item?.tripId).length : null,
-      error: trainFeed.error ?? null
-    }
-  }));
 
   const usableFeeds = [
     tripFeed,
@@ -1075,26 +1343,17 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
   // TIJDELIJKE DIAGNOSE: aantallen binnen dezelfde routeaanvraag.
   const records = [...byIdentity.values()];
-  console.log("[OVLIVE_RECORDS_DIAG]", JSON.stringify({
-    usableFeedCount: usableFeeds.length,
-    usableFeeds: usableFeeds.map((feed: any) => ({
-      freshness: feed.freshness ?? null,
-      entitiesLength: Array.isArray(feed.entities) ? feed.entities.length : null
-    })),
-    uniqueRecordCount: byIdentity.size,
-    recordsLength: records.length,
-    sample: records.slice(0, 3).map((record: any) => ({
-      routeId: record.routeId ?? null,
-      tripId: record.tripId ?? null,
-      startDate: record.startDate ?? null,
-      startTime: record.startTime ?? null,
-      timestamp: record.timestamp ?? null,
-      stopUpdateCount: Array.isArray(record.stopUpdates)
-        ? record.stopUpdates.length : null
-    }))
-  }));
+  // Gebruik alleen posities uit een verse feedheader. De helper controleert
+  // daarnaast de individuele tijdstempel van iedere voertuigpositie.
+  const vehiclePositions =
+    vehicleFeed.ok === true && vehicleFeed.freshness === "fresh"
+      ? (vehicleFeed.entities ?? [])
+      : [];
   let matchedCount = 0;
   let unknownCount = 0;
+  let freshPredictionCount = 0;
+  let unconfirmedPredictionCount = 0;
+  let noPredictionCount = 0;
 
   const relevantRoutes = new Set<string>();
   const relevantStops = new Set<string>();
@@ -1113,31 +1372,41 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     if (identity.tripId) relevantTrips.add(identity.tripId);
 
     const result = matchOpenovRealtime(leg, records);
+    const vehicleObservation = findExactVehiclePositionForLeg(
+      leg,
+      vehiclePositions
+    );
 
-    console.log("[OVLIVE_MATCH_RESULT]", JSON.stringify({
-      routeId: leg.routeId ?? leg.route?.id ?? null,
-      transitousTripId: leg.tripId ?? null,
-      fromStopId: fromId,
-      toStopId: toId,
-      plannedStart: leg.scheduledStartTime ?? leg.startTime ?? null,
-      method: result.method ?? null,
-      reason: result.reason ?? null,
-      candidate: result.record ? {
-        tripId: result.record.tripId ?? null,
-        routeId: result.record.routeId ?? null,
-        startDate: result.record.startDate ?? null,
-        startTime: result.record.startTime ?? null,
-        directionId: result.record.directionId ?? null,
-        scheduleRelationship: result.record.scheduleRelationship ?? null,
-        timestamp: result.record.timestamp ?? null,
-        feedAgeSeconds: result.record.feedAgeSeconds ?? null,
-        stopUpdateCount: Array.isArray(result.record.stopUpdates)
-          ? result.record.stopUpdates.length : null
-      } : null
-    }));
+
+    if (!result.record && vehicleObservation) {
+      // We hebben bewijs dat het voertuig van exact deze rit recent is
+      // waargenomen, ook al is er geen bruikbare halteprognose.
+      matchedCount++;
+      unknownCount++;
+      noPredictionCount++;
+
+      leg.openovRealtime = {
+        source: "OpenOV GTFS-Realtime",
+        status: "vehicle_observed",
+        reason: "vehicle_observed_without_stop_prediction",
+        message: "Voertuig van deze exacte rit recent waargenomen; halteprognose ontbreekt.",
+        timestampBasis: "vehicle_position",
+        updateTimestamp: vehicleObservation.observedAt,
+        updateAgeSeconds: vehicleObservation.ageSeconds,
+        matchMethod: "exact_trip_id_vehicle_position",
+        tripId: vehicleObservation.tripId,
+        routeId: vehicleObservation.routeId,
+        departure: null,
+        arrival: null,
+        vehiclePosition: vehicleObservation
+      };
+
+      continue;
+    }
 
     if (!result.record) {
       unknownCount++;
+      noPredictionCount++;
 
       const anyFeedReachable = tripFeed.ok || trainFeed.ok;
       const anyFreshFeed = usableFeeds.length > 0;
@@ -1193,6 +1462,7 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
     if (!tripUpdateIsFresh) {
       unknownCount++;
+      noPredictionCount++;
       leg.openovRealtime = {
         source: "OpenOV GTFS-Realtime",
         status: "unknown",
@@ -1213,41 +1483,33 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
       continue;
     }
 
-    const fromUpdate = findRealtimeStop(record, fromId);
-    const toUpdate = findRealtimeStop(record, toId);
+    const scheduledDepartureValue =
+      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime;
+    const scheduledArrivalValue =
+      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime;
 
-    console.log("[OVLIVE_STOP_DIAG]", JSON.stringify({
-      tripId: record.tripId ?? null,
-      routeId: record.routeId ?? null,
-      fromId,
-      toId,
-      fromStopFound: Boolean(fromUpdate),
-      toStopFound: Boolean(toUpdate),
-      fromUpdate: fromUpdate ? {
-        stopId: fromUpdate.stopId ?? null,
-        scheduleRelationship: fromUpdate.scheduleRelationship ?? null,
-        arrivalTime: fromUpdate.arrivalTime ?? null,
-        departureTime: fromUpdate.departureTime ?? null,
-        arrivalDelaySeconds: fromUpdate.arrivalDelaySeconds ?? null,
-        departureDelaySeconds: fromUpdate.departureDelaySeconds ?? null,
-        effectiveArrivalDelaySeconds:
-          fromUpdate.effectiveArrivalDelaySeconds ?? null,
-        effectiveDepartureDelaySeconds:
-          fromUpdate.effectiveDepartureDelaySeconds ?? null
-      } : null,
-      toUpdate: toUpdate ? {
-        stopId: toUpdate.stopId ?? null,
-        scheduleRelationship: toUpdate.scheduleRelationship ?? null,
-        arrivalTime: toUpdate.arrivalTime ?? null,
-        departureTime: toUpdate.departureTime ?? null,
-        arrivalDelaySeconds: toUpdate.arrivalDelaySeconds ?? null,
-        departureDelaySeconds: toUpdate.departureDelaySeconds ?? null,
-        effectiveArrivalDelaySeconds:
-          toUpdate.effectiveArrivalDelaySeconds ?? null,
-        effectiveDepartureDelaySeconds:
-          toUpdate.effectiveDepartureDelaySeconds ?? null
-      } : null
-    }));
+    const exactFromUpdate = findRealtimeStop(record, fromId);
+    const exactToUpdate = findRealtimeStop(record, toId);
+
+    const fromStopMatch = exactFromUpdate
+      ? { stop: exactFromUpdate, method: "exact_stop_id", deltaSeconds: 0 }
+      : fromId
+        ? findRealtimeStopByScheduledEvent(
+            record, "departure", scheduledDepartureValue
+          )
+        : null;
+
+    const toStopMatch = exactToUpdate
+      ? { stop: exactToUpdate, method: "exact_stop_id", deltaSeconds: 0 }
+      : toId
+        ? findRealtimeStopByScheduledEvent(
+            record, "arrival", scheduledArrivalValue
+          )
+        : null;
+
+    const fromUpdate = fromStopMatch?.stop;
+    const toUpdate = toStopMatch?.stop;
+
 
     const relationship = String(
       record.scheduleRelationship ?? ""
@@ -1258,29 +1520,104 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
       relationship.includes("CANCEL") ||
       relationship.includes("DELETED");
 
-    const departurePrediction = summarizeRealtimeEvent(
+    const propagationScheduledDeparture =
+      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime;
+    const propagationScheduledArrival =
+      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime;
+
+    let departurePrediction = summarizeRealtimeEvent(
       fromUpdate,
       "departure",
-      leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime
+      propagationScheduledDeparture,
+      { hasPerTripTimestamp: recordTimestamp !== null }
     );
-    const arrivalPrediction = summarizeRealtimeEvent(
+    let arrivalPrediction = summarizeRealtimeEvent(
       toUpdate,
       "arrival",
-      leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime
+      propagationScheduledArrival,
+      { hasPerTripTimestamp: recordTimestamp !== null }
     );
 
+    const usablePrediction = (p: any) =>
+      Boolean(p?.time ||
+        (p?.delaySeconds != null && Number.isFinite(Number(p.delaySeconds))));
+
+    if (!usablePrediction(departurePrediction)) {
+      const propagated = findPropagatedRealtimeEvent(
+        record, "departure", propagationScheduledDeparture,
+        {
+          nowSeconds: Date.now() / 1000,
+          targetStopId: fromId ?? "",
+          maxLookaheadSeconds: 2700,
+          maxSourceEventAgeSeconds: 900
+        }
+      );
+      if (propagated) departurePrediction = propagated;
+    }
+
+    if (!usablePrediction(arrivalPrediction)) {
+      const propagated = findPropagatedRealtimeEvent(
+        record, "arrival", propagationScheduledArrival,
+        {
+          nowSeconds: Date.now() / 1000,
+          targetStopId: toId ?? "",
+          maxLookaheadSeconds: 2700,
+          maxSourceEventAgeSeconds: 900
+        }
+      );
+      if (propagated) arrivalPrediction = propagated;
+    }
+
+    const propagatedNotes: string[] = [];
+    for (const [label, prediction] of [
+      ["vertrek", departurePrediction],
+      ["aankomst", arrivalPrediction]
+    ] as Array<[string, any]>) {
+      if (prediction?.predictionMethod !== "gtfsrt_delay_propagation") continue;
+      propagatedNotes.push(
+        `${label} doorgetrokken vanaf halte ${prediction.sourceStopId ?? "onbekend"}` +
+        (prediction.sourceEventTime ? ` (gebeurtenis ${prediction.sourceEventTime})` : "")
+      );
+    }
+
+    const realtimeFreshnessNotes: string[] = [];
+    if (recordTimestamp === null) {
+      realtimeFreshnessNotes.push(
+        "De timestamp per rit ontbreekt; de versheid is afgeleid van de feed-header."
+      );
+    }
+    if (propagatedNotes.length) {
+      realtimeFreshnessNotes.push(
+        "Vertraging doorgetrokken volgens GTFS-Realtime vanaf een eerdere halte: " +
+        propagatedNotes.join("; ") +
+        ". Dit is geen afzonderlijke voorspelling die de bron rechtstreeks voor de doelhalte meldde."
+      );
+    }
+    const realtimeFreshnessNote = realtimeFreshnessNotes.join(" ") || null;
+
     const hasExplicitStopPrediction = Boolean(
-      departurePrediction?.time || arrivalPrediction?.time
+      departurePrediction?.time ||
+      (departurePrediction?.delaySeconds != null &&
+        Number.isFinite(Number(departurePrediction.delaySeconds))) ||
+      arrivalPrediction?.time ||
+      (arrivalPrediction?.delaySeconds != null &&
+        Number.isFinite(Number(arrivalPrediction.delaySeconds)))
     );
     const hasPerTripTimestamp = recordTimestamp !== null;
 
     // Een exacte ritmatch is niet automatisch een bevestigde halteprognose.
     matchedCount++;
-    if (
-      !cancelled &&
-      (!hasExplicitStopPrediction || !hasPerTripTimestamp)
-    ) {
-      unknownCount++;
+
+    if (!cancelled) {
+      if (!hasExplicitStopPrediction) {
+        unknownCount++;
+        noPredictionCount++;
+      } else if (!hasPerTripTimestamp) {
+        unknownCount++;
+        unconfirmedPredictionCount++;
+      } else {
+        freshPredictionCount++;
+      }
     }
 
     leg.openovRealtime = {
@@ -1291,9 +1628,7 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
         ? null
         : new Date(effectiveTimestamp * 1000).toISOString(),
       updateAgeSeconds: tripUpdateAgeSeconds,
-      freshnessNote: recordTimestamp === null
-        ? "De timestamp per rit ontbreekt; de versheid is afgeleid van de feed-header."
-        : null,
+      freshnessNote: realtimeFreshnessNote,
       matchMethod: result.method,
       tripId: record.tripId,
       routeId: record.routeId ?? null,
@@ -1302,7 +1637,12 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
       directionId: record.directionId ?? null,
       scheduleRelationship: record.scheduleRelationship ?? null,
       departure: departurePrediction,
-      arrival: arrivalPrediction
+      arrival: arrivalPrediction,
+      vehiclePosition: vehicleObservation,
+      departureStopMatchMethod: fromStopMatch?.method ?? null,
+      departureStopMatchDeltaSeconds: fromStopMatch?.deltaSeconds ?? null,
+      arrivalStopMatchMethod: toStopMatch?.method ?? null,
+      arrivalStopMatchDeltaSeconds: toStopMatch?.deltaSeconds ?? null
     };
   }
 
@@ -1343,6 +1683,9 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     checkedAt: new Date().toISOString(),
     matchedLegCount: matchedCount,
     unknownLegCount: unknownCount,
+    freshPredictionLegCount: freshPredictionCount,
+    unconfirmedPredictionLegCount: unconfirmedPredictionCount,
+    noPredictionLegCount: noPredictionCount,
     alertCount: relevantAlerts.length,
     feeds: {
       tripUpdates: {
@@ -1372,6 +1715,15 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
         cacheAgeSeconds: alertFeed.cacheAgeSeconds ?? null,
         error: alertFeed.error ?? alertFeed.refreshWarning ?? null
       },
+      vehiclePositions: {
+        ok: Boolean(vehicleFeed.ok),
+        status: vehicleFeed.httpStatus ?? vehicleFeed.status ?? null,
+        freshness: vehicleFeed.freshness ?? "unavailable",
+        ageSeconds: vehicleFeed.ageSeconds ?? null,
+        servedFromCache: vehicleFeed.servedFromCache ?? false,
+        cacheAgeSeconds: vehicleFeed.cacheAgeSeconds ?? null,
+        error: vehicleFeed.error ?? vehicleFeed.refreshWarning ?? null
+      }
     }
   };
 
@@ -1379,6 +1731,7 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 }
 
 type NdovStreamName = "kv78" | "bison";
+const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
 
 type NdovSnapshot = Record<string, any>;
 
@@ -1395,7 +1748,7 @@ async function callNdovHub(
   waitForCompletion = false,
   includeAllRows = false,
 ): Promise<NdovSnapshot> {
-  const id = env.NDOV_FEEDS.idFromName(stream);
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
   const target = new URL(`https://ndov-hub.local/${action}`);
   target.searchParams.set("stream", stream);
@@ -1539,12 +1892,32 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
       note: "Automatische collector uitgeschakeld." });
   }
 
+  if (url.pathname === "/api/ndov/rows") {
+    const identity = String(url.searchParams.get("identity") ?? "").trim();
+    if (!/^[A-Za-z0-9_-]+\\|(?:\\d{8}|\\d{4}-\\d{2}-\\d{2})\\|[^|]+\\|[^|]+\\|[^|]+$/.test(identity)) {
+      return json({
+        ok: false,
+        error: "Gebruik identity=owner|YYYY-MM-DD|line|journey|reinforcement."
+      }, 400);
+    }
+
+    const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
+    const stub = env.NDOV_FEEDS.get(id);
+    const target = new URL("https://ndov-hub.local/rows");
+    target.searchParams.set("stream", "kv78");
+    target.searchParams.set("identity", identity);
+
+    const response = await stub.fetch(target.toString());
+    const data = await response.json().catch(() => ({})) as Record<string, any>;
+    return json({ ...data, requestedIdentity: identity }, response.ok ? 200 : 502);
+  }
+
   if (url.pathname === "/api/ndov/events") {
     const identity = String(url.searchParams.get("identity") ?? "").trim();
     if (!/^[A-Za-z0-9_-]+\|\d{4}-\d{2}-\d{2}\|[^|]+\|[^|]+\|[^|]+$/.test(identity)) {
       return json({ ok: false, error: "Gebruik identity=owner|YYYY-MM-DD|line|journey|reinforcement." }, 400);
     }
-    const id = env.NDOV_FEEDS.idFromName("bison");
+    const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
     const stub = env.NDOV_FEEDS.get(id);
     const target = new URL("https://ndov-hub.local/events");
     target.searchParams.set("stream", "bison");
@@ -1870,6 +2243,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
   if (request.method !== "GET") return json({ error: "Alleen GET is toegestaan." }, 405, headers);
 
+  const rateLimitResponse = await enforcePublicApiRateLimit(request, env, headers);
+  if (rateLimitResponse) return rateLimitResponse;
+
   if (url.pathname === "/api/health") {
     // Decodeer de echte feeds in plaats van alleen HEAD/HTTP te controleren.
     const entries = Object.entries(OPENOV) as Array<
@@ -2007,28 +2383,207 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (url.pathname === "/api/geocode") {
     const query = (url.searchParams.get("q") ?? "").trim();
+
     if (query.length < 2 || query.length > 160) {
-      return json({ error: "Voer minimaal 2 en maximaal 160 tekens in." }, 400, headers);
+      return json(
+        { error: "Voer minimaal 2 en maximaal 160 tekens in." },
+        400,
+        headers
+      );
     }
+
     try {
-      const upstream = new URL("https://photon.komoot.io/api/");
-      upstream.searchParams.set("q", query);
-      upstream.searchParams.set("limit", "6");
-      const response = await fetch(upstream, {
-        headers: {
-          "accept": "application/geo+json, application/json",
-          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
-        },
-        cf: { cacheTtl: 30, cacheEverything: true },
-        signal: AbortSignal.timeout(10000)
-      });
-      if (!response.ok) return json({ error: `Geocoder gaf HTTP ${response.status}.` }, 502, headers);
-      return new Response(await response.text(), {
-        status: 200,
-        headers: { ...headers, "content-type": "application/geo+json; charset=utf-8", "cache-control": "public, max-age=30" }
+      const data = await getGeocodeFeatures(query, env);
+
+      return json(data, 200, {
+        ...headers,
+        "cache-control": "public, max-age=600"
       });
     } catch (error) {
-      return json({ error: "Plaats zoeken is tijdelijk niet beschikbaar." }, 502, headers);
+      console.warn(
+        "[OVLIVE_GEOCODE]",
+        error instanceof Error ? error.message : "Onbekende geocoderfout"
+      );
+
+      return json(
+        { error: "Plaats zoeken is tijdelijk niet beschikbaar." },
+        502,
+        headers
+      );
+    }
+  }
+
+  if (url.pathname === "/api/ns/departures") {
+    if (request.method !== "GET") {
+      return json({ error: "Alleen GET is toegestaan." }, 405, headers);
+    }
+
+    const subscriptionKey = String(
+      env.NS_API_SUBSCRIPTION_KEY ?? ""
+    ).trim();
+
+    if (!subscriptionKey) {
+      return json({
+        ok: false,
+        source: "NS Reisinformatie API",
+        error: "NS_API_SUBSCRIPTION_KEY is niet ingesteld in de Worker-configuratie."
+      }, 503, headers);
+    }
+
+    const station = String(url.searchParams.get("station") ?? "")
+      .trim()
+      .toUpperCase();
+
+    if (!/^[A-Z0-9]{2,6}$/.test(station)) {
+      return json({
+        ok: false,
+        error: "Geef een geldige NS-stationscode op, bijvoorbeeld GVC of UT."
+      }, 400, headers);
+    }
+
+    const requestedCount = Number(
+      url.searchParams.get("maxJourneys") ?? "8"
+    );
+
+    if (
+      !Number.isInteger(requestedCount) ||
+      requestedCount < 1 ||
+      requestedCount > 10
+    ) {
+      return json({
+        ok: false,
+        error: "maxJourneys moet tussen 1 en 10 liggen."
+      }, 400, headers);
+    }
+
+    const upstream = new URL(
+      "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/departures"
+    );
+    upstream.searchParams.set("station", station);
+    upstream.searchParams.set("maxJourneys", String(requestedCount));
+    upstream.searchParams.set("lang", "nl");
+
+    try {
+      const response = await fetch(upstream, {
+        method: "GET",
+        headers: {
+          "accept": "application/json",
+          "Ocp-Apim-Subscription-Key": subscriptionKey,
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(12000)
+      });
+
+      if (!response.ok) {
+        const status = response.status === 429 ? 429 : 502;
+        const message =
+          response.status === 401 || response.status === 403
+            ? "NS heeft de aanvraag geweigerd. Controleer of de Ns-App-sleutel toegang heeft tot de Reisinformatie API."
+            : response.status === 429
+              ? "De NS API heeft de aanvraaglimiet bereikt."
+              : `De NS API gaf HTTP ${response.status}.`;
+
+        console.warn("[OVLIVE_NS_API]", JSON.stringify({
+          status: response.status,
+          station
+        }));
+
+        return json({
+          ok: false,
+          source: "NS Reisinformatie API",
+          station,
+          upstreamStatus: response.status,
+          error: message,
+          checkedAt: new Date().toISOString()
+        }, status, headers);
+      }
+
+      let data: any;
+      try {
+        data = await response.json();
+      } catch {
+        return json({
+          ok: false,
+          source: "NS Reisinformatie API",
+          error: "NS gaf geen geldige JSON terug.",
+          checkedAt: new Date().toISOString()
+        }, 502, headers);
+      }
+
+      const payload = data?.payload ?? data;
+      const rows = payload?.departures;
+
+      if (!Array.isArray(rows)) {
+        return json({
+          ok: false,
+          source: "NS Reisinformatie API",
+          station,
+          error: "Onverwachte NS-response: het veld payload.departures ontbreekt.",
+          responseFields: Object.keys(data ?? {}),
+          payloadFields: Object.keys(payload ?? {}),
+          checkedAt: new Date().toISOString()
+        }, 502, headers);
+      }
+
+      const departures = rows.slice(0, requestedCount).map((item: any) => {
+        const plannedDateTime = item?.plannedDateTime ?? null;
+        const actualDateTime = item?.actualDateTime ?? null;
+        const plannedMs = typeof plannedDateTime === "string"
+          ? Date.parse(plannedDateTime)
+          : Number.NaN;
+        const actualMs = typeof actualDateTime === "string"
+          ? Date.parse(actualDateTime)
+          : Number.NaN;
+
+        // We berekenen alleen een afwijking als NS beide absolute tijden geeft.
+        const delaySeconds =
+          Number.isFinite(plannedMs) && Number.isFinite(actualMs)
+            ? Math.round((actualMs - plannedMs) / 1000)
+            : null;
+
+        return {
+          trainNumber: item?.product?.number
+            ?? item?.trainNumber
+            ?? null,
+          name: item?.name ?? null,
+          category: item?.trainCategory
+            ?? item?.product?.category
+            ?? item?.product?.longCategoryName
+            ?? null,
+          direction: item?.direction ?? null,
+          plannedDateTime,
+          actualDateTime,
+          delaySeconds,
+          cancelled: item?.cancelled === true,
+          platformChange: item?.platformChange === true,
+          plannedTrack: item?.plannedTrack ?? null,
+          actualTrack: item?.actualTrack ?? null,
+          journeyDetailUri: item?.journeyDetailRef?.uri ?? null,
+          responseFields: Object.keys(item ?? {})
+        };
+      });
+
+      return json({
+        ok: true,
+        source: "NS Reisinformatie API",
+        station,
+        checkedAt: new Date().toISOString(),
+        upstreamStatus: response.status,
+        count: departures.length,
+        departures
+      }, 200, headers);
+    } catch (error) {
+      console.error("[OVLIVE_NS_API]", error instanceof Error
+        ? error.message
+        : "Onbekende fout");
+
+      return json({
+        ok: false,
+        source: "NS Reisinformatie API",
+        station,
+        error: "NS was niet bereikbaar of reageerde niet op tijd.",
+        checkedAt: new Date().toISOString()
+      }, 502, headers);
     }
   }
 
@@ -2088,6 +2643,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       }
 
       try {
+        // Prioritize the exact NS train identity and NS board requests before
+        // OpenOV/NDOV enrichment loads route shards for many bus/tram legs.
+        await prepareNsTrainIdentities(planData, env);
+        await enrichNsTrainPlan(planData, env);
         planData = await enrichTransitousPlan(planData);
         await applyNdovCancellationsToPlan(planData, env);
       } catch (error) {
@@ -2148,19 +2707,80 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
 export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (env.NDOV_AUTOCOLLECT !== "true") return;
+    const disableLegacyCollector = async (stream: NdovStreamName): Promise<Record<string, any>> => {
+      const legacyId = env.NDOV_FEEDS.idFromName(stream);
+      const legacyStub = env.NDOV_FEEDS.get(legacyId);
+      const target = new URL("https://ndov-hub.local/continuous/disable");
+      target.searchParams.set("stream", stream);
+      const response = await legacyStub.fetch(target.toString());
+      const data = await response.json().catch(() => ({})) as Record<string, any>;
+
+      if (!response.ok || data.ok !== true || data.enabled !== false) {
+        throw new Error(
+          `Legacy ${stream}-collector stop mislukt: HTTP ${response.status} ${JSON.stringify(data)}`
+        );
+      }
+      return { stream, legacy: true, ...data };
+    };
+
+    if (env.NDOV_AUTOCOLLECT !== "true") {
+      ctx.waitUntil(Promise.all([
+        callNdovHub(env, "kv78", "continuous/disable"),
+        callNdovHub(env, "bison", "continuous/disable"),
+        disableLegacyCollector("kv78"),
+        disableLegacyCollector("bison"),
+      ]).then((feeds) => {
+        const failed = feeds.filter((feed) => feed.ok !== true || feed.enabled !== false);
+        if (failed.length) {
+          console.error("[NDOV_AUTOCOLLECT] Niet alle gedeelde/legacy collectors konden worden gepauzeerd.", failed);
+        } else {
+          console.log("[NDOV_AUTOCOLLECT] Gedeelde en legacy collectors zijn gepauzeerd.");
+        }
+      }).catch((error) => {
+        console.error("[NDOV_AUTOCOLLECT] Collectorpauze mislukt.", error);
+      }));
+      return;
+    }
+
+    // Nooit twee collectors tegelijk starten: oude object-ID's eerst stoppen.
     ctx.waitUntil(Promise.all([
-      callNdovHub(env, "kv78", "continuous/enable"),
-      callNdovHub(env, "bison", "continuous/enable"),
-    ]).then((feeds) => {
+      disableLegacyCollector("kv78"),
+      disableLegacyCollector("bison"),
+    ]).then(async (legacyFeeds) => {
+      const legacyFailures = legacyFeeds.filter(
+        (feed) => feed.ok !== true || feed.enabled !== false
+      );
+      if (legacyFailures.length) {
+        throw new Error(
+          "Gedeelde collector blijft uit totdat de oude object-ID's gestopt zijn: " +
+          JSON.stringify(legacyFailures)
+        );
+      }
+
+      const feeds = await Promise.all([
+        callNdovHub(env, "kv78", "continuous/enable"),
+        callNdovHub(env, "bison", "continuous/enable"),
+      ]);
       const failed = feeds.filter((feed) => feed.ok !== true || feed.enabled !== true);
-      if (failed.length) console.error("[NDOV_AUTOCOLLECT] Niet alle collectors konden worden ingeschakeld.", failed);
+      if (failed.length) {
+        console.error("[NDOV_AUTOCOLLECT] Niet alle gedeelde collectors konden worden ingeschakeld.", failed);
+      } else {
+        console.log("[NDOV_AUTOCOLLECT] Gedeelde collector ingeschakeld; oude object-ID's gestopt.", feeds);
+      }
     }).catch((error) => {
-      console.error("[NDOV_AUTOCOLLECT] Collectorinitialisatie mislukt.", error);
+      console.error("[NDOV_AUTOCOLLECT] Veilige collectorstart mislukt.", error);
     }));
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Beveilig alle OVAPI-experimentele routes vóór specifieke dispatch,
+    // inclusief match-plan, zodat geen handler deze controle kan overslaan.
+    if (
+      url.pathname.startsWith("/api/ovapi-test/") &&
+      !isLoopbackHost(url.hostname)
+    ) {
+      return new Response("Not found", { status: 404 });
+    }
     if (url.pathname === "/api/ovapi-test/match-plan") {
       const matchResponse = await handleTransitousOvapiMatch(request);
       if (matchResponse) return matchResponse;

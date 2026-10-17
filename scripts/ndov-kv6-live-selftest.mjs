@@ -31,7 +31,20 @@ const kv6Good = {
   punctualitySeconds: 947, punctualityTimestamp: now, punctualityReceivedAt: now, receivedAt: now,
   vehicleNumber: '9625', blockCode: '80659', userStopCode: 'Rijpwetering', passageSequenceNumber: '14',
 };
-const kv6Stale = { ...kv6Good, journeyNumber: '7043', identity: 'CXX|20261012|U073|7043|0', punctualityReceivedAt: stale, punctualitySeconds: 1200 };
+const kv6Stale = { ...kv6Good, journeyNumber: '7043', identity: 'CXX|20261012|U073|7043|0', receivedAt: stale, punctualityReceivedAt: stale, punctualitySeconds: 1200 };
+const kv6Observed = {
+  ...kv6Good,
+  journeyNumber: '7044',
+  identity: 'CXX|20261012|U073|7044|0',
+  eventType: 'ONROUTE',
+  timestamp: now,
+  receivedAt: now,
+  punctualitySeconds: null,
+  punctualityTimestamp: null,
+  punctualityReceivedAt: null,
+  vehicleNumber: '9634',
+  blockCode: '80660',
+};
 const bisonSnapshot = { state: 'complete', latestMessageAt: now };
 const kv78Snapshot = { state: 'complete', latestMessageAt: now };
 const manifest = { generatedAt: now, shards: ['382'] };
@@ -40,6 +53,7 @@ const shard = {
   '382969676': 'EBS:1314:1039',
   '382969680': 'CXX:U073:7042',
   '382969682': 'CXX:U073:7043',
+  '382969684': 'CXX:U073:7044',
 };
 
 const env = {
@@ -53,10 +67,12 @@ const env = {
   },
   NDOV_FEEDS: {
     idFromName(name) { return name; },
-    get(stream) {
+    get(objectName) {
+      assert.equal(objectName, 'ndov-shared-collector-v1', 'NDOV tests must use the shared collector object');
       return {
         async fetch(input) {
           const url = new URL(input);
+          const stream = url.searchParams.get('stream');
           if (url.pathname === '/status' && stream === 'bison') return Response.json(bisonSnapshot);
           if (url.pathname === '/status' && stream === 'kv78') return Response.json(kv78Snapshot);
           if (url.pathname === '/mutations' && stream === 'bison') {
@@ -64,7 +80,7 @@ const env = {
           }
           if (url.pathname === '/events' && stream === 'bison') {
             const ids = url.searchParams.getAll('identity');
-            return Response.json({ events: [kv6Good, kv6Stale].filter((event) => ids.includes(event.identity)) });
+            return Response.json({ events: [kv6Good, kv6Stale, kv6Observed].filter((event) => ids.includes(event.identity)) });
           }
           if (url.pathname === '/rows' && stream === 'kv78') {
             return Response.json({ rows: url.searchParams.get('identity') === 'EBS|20261012|1314|1039|0' ? tripRows : [] });
@@ -82,12 +98,14 @@ const plan = {
     { mode: 'BUS', tripId: '20261012_09:03_nl-OpenOV_382969676', from: { departure: plannedDeparture }, to: { arrival: '2026-10-12T07:29:00Z' } },
     { mode: 'BUS', tripId: '20261012_09:40_nl-OpenOV_382969680', from: { departure: '2026-10-12T07:40:00Z' }, to: { arrival: '2026-10-12T08:10:00Z' } },
     { mode: 'BUS', tripId: '20261012_10:00_nl-OpenOV_382969682', from: { departure: '2026-10-12T08:00:00Z' }, to: { arrival: '2026-10-12T08:30:00Z' } },
+    { mode: 'BUS', tripId: '20261012_10:30_nl-OpenOV_382969684', from: { departure: '2026-10-12T08:30:00Z' }, to: { arrival: '2026-10-12T09:00:00Z' } },
   ] }],
 };
 await applyNdovCancellationsToPlan(plan, env);
-const [cancelledLeg, kv78Leg, kv6Leg, staleLeg] = plan.itineraries[0].legs;
+const [cancelledLeg, kv78Leg, kv6Leg, staleLeg, observedLeg] = plan.itineraries[0].legs;
 assert.equal(plan.ndovRealtimeMeta.kv17MatchedLegCount, plan.ndovRealtimeMeta.matchedLegCount, 'KV17-teller moet expliciet beschikbaar zijn');
 assert.equal(plan.ndovRealtimeMeta.kv78DataLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.kv78ConfirmedStopLegCount, 0, 'time-only KV78 matches must not be counted as confirmed stops');
 assert.equal(cancelledLeg.ndovRealtime.status, 'cancelled');
 assert.equal(cancelledLeg.cancelled, true);
 assert.equal(kv78Leg.ndovRealtime.status, 'kv78_delay');
@@ -100,10 +118,16 @@ assert.equal(kv6Leg.ndovRealtime.kv6.punctualitySeconds, 947, 'KV6 moet ook in h
 assert.equal(kv6Leg.ndovRealtime.vehicleNumber, '9625');
 assert.equal(kv6Leg.ndovRealtime.blockCode, '80659');
 assert.equal(staleLeg.ndovRealtime, undefined, 'stale KV6 observations must not be shown as current');
-assert.equal(plan.ndovRealtimeMeta.kv6MatchedLegCount, 1);
+assert.equal(observedLeg.ndovRealtime.status, 'kv6_observed', 'a fresh ONROUTE event must be displayed even without punctuality');
+assert.equal(observedLeg.ndovRealtime.punctualitySeconds, null, 'missing punctuality must stay unknown rather than become zero');
+assert.equal(observedLeg.ndovRealtime.eventType, 'ONROUTE');
+assert.equal(observedLeg.ndovRealtime.vehicleNumber, '9634');
+assert.equal(plan.ndovRealtimeMeta.kv6ObservedLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.kv6MatchedLegCount, 2, 'KV6 match count includes both live punctuality and fresh activity observations');
 assert.equal(plan.ndovRealtimeMeta.kv6DelayLegCount, 1);
 console.log('PASS: exact KV17 cancellation remains attached only to its trip');
 console.log('PASS: KV78 stop-specific delays remain separate from KV6 trip punctuality');
 console.log('PASS: fresh exact KV6 punctuality displays delay in seconds with vehicle/block data');
-console.log('PASS: stale or unmatched KV6 events do not falsely mark a trip current');
+console.log('PASS: stale KV6 observations are rejected');
+console.log('PASS: fresh exact ONROUTE activity is shown even when punctuality is absent, without implying on-time running');
 console.log('All OVLive KV6 live selftests passed.');

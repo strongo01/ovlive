@@ -11,7 +11,7 @@ from pathlib import Path
 
 DEFAULT_GTFS = Path.home() / "Library/Caches/ovlive-ndov/gtfs-openov-nl.zip"
 DEFAULT_OUT = Path("public/ndov-openov-route-crosswalk")
-MAX_SHARD_BYTES = 8 * 1024 * 1024
+MAX_SHARD_BYTES = 512 * 1024
 MAX_OPEN_FILES = 48
 
 
@@ -42,32 +42,38 @@ def clock(value):
 
 
 class RouteShardWriter:
+    """Write compact route+start-time shards and aligned service-ID sidecars."""
     def __init__(self, out_dir: Path):
         self.out_dir = out_dir
         self.routes_dir = out_dir / "routes"
         self.routes_dir.mkdir(parents=True, exist_ok=True)
-        self.states = {}  # route -> part/count/bytes/files
+        # (route ID, start-time bucket) -> output state
+        self.states = {}
         self.handles = OrderedDict()
         self.signatures = set()
+        self.signature_services = {}
         self.pattern_count = 0
         self.total_bytes = 0
+        self.routes_by_start_bucket = {}
+        self.route_shard_count = 0
 
-    def _path(self, route, part):
-        return self.routes_dir / f"route-{route}-{part}.json"
+    def _path(self, route, bucket, part):
+        return self.routes_dir / f"route-{route}-t{bucket}-{part}.json"
 
     def _close_lru(self):
         while len(self.handles) >= MAX_OPEN_FILES:
             _, fp = self.handles.popitem(last=False)
-            fp.flush(); fp.close()
+            fp.flush()
+            fp.close()
 
-    def _handle(self, route, part, state):
-        key = (route, part)
+    def _handle(self, route, bucket, part, state):
+        key = (route, bucket, part)
         if key in self.handles:
             fp = self.handles.pop(key)
             self.handles[key] = fp
             return fp
         self._close_lru()
-        path = self._path(route, part)
+        path = self._path(route, bucket, part)
         if state["counts"].get(part, 0) == 0 and not path.exists():
             fp = open(path, "wb")
             fp.write(b"[")
@@ -77,13 +83,15 @@ class RouteShardWriter:
         self.handles[key] = fp
         return fp
 
-    def _finalize_part(self, route, part, state):
-        key = (route, part)
+    def _finalize_part(self, route, bucket, part, state):
+        key = (route, bucket, part)
         fp = self.handles.pop(key, None)
         if fp is not None:
-            fp.write(b"]"); fp.flush(); fp.close()
+            fp.write(b"]")
+            fp.flush()
+            fp.close()
         else:
-            with open(self._path(route, part), "ab") as out:
+            with open(self._path(route, bucket, part), "ab") as out:
                 out.write(b"]")
         state["closed"].add(part)
 
@@ -94,6 +102,15 @@ class RouteShardWriter:
         route = str(trip_meta["routeId"])
         if not parts or not route or not route.isdigit():
             return
+
+        first = stops[0]
+        first_clock = str(first.get("departureTime") or first.get("arrivalTime") or "").strip()
+        start_seconds = clock(first_clock)
+        if start_seconds is None:
+            return
+        start_hour = start_seconds // 3600
+        bucket = "24" if start_hour >= 24 else "12" if start_hour >= 12 else "00"
+
         pattern = {
             "routeId": route,
             "realtimeTripId": trip_meta["realtimeTripId"],
@@ -103,50 +120,171 @@ class RouteShardWriter:
         }
         compact = json.dumps(pattern, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         signature = hashlib.sha256(compact).digest()
+        service_id = str(trip_meta.get("serviceId") or "").strip()
         if signature in self.signatures:
+            if service_id:
+                self.signature_services[signature].add(service_id)
             return
         self.signatures.add(signature)
-        state = self.states.setdefault(route, {"part": 0, "counts": {}, "bytes": {}, "files": [], "closed": set()})
+        self.signature_services[signature] = {service_id} if service_id else set()
+
+        state_key = (route, bucket)
+        state = self.states.setdefault(
+            state_key,
+            {"part": 0, "counts": {}, "bytes": {}, "closed": set(), "signatureLists": {}},
+        )
         part = state["part"]
         count = state["counts"].get(part, 0)
         byte_count = state["bytes"].get(part, 0)
         extra = len(compact) + (1 if count else 0)
         if count > 0 and byte_count + extra > MAX_SHARD_BYTES:
-            self._finalize_part(route, part, state)
+            self._finalize_part(route, bucket, part, state)
             part += 1
             state["part"] = part
             state["counts"][part] = 0
             state["bytes"][part] = 0
             count = 0
-            byte_count = 0
-        fp = self._handle(route, part, state)
+
+        fp = self._handle(route, bucket, part, state)
         if count:
             fp.write(b",")
             self.total_bytes += 1
         fp.write(compact)
         state["counts"][part] = count + 1
+        state["signatureLists"].setdefault(part, []).append(signature)
         state["bytes"][part] = state["bytes"].get(part, 0) + extra
-        if state["bytes"][part] == 0:
-            state["bytes"][part] = 1 + len(compact)
-        filename = self._path(route, part).name
-        if filename not in state["files"]:
-            state["files"].append(filename)
         self.pattern_count += 1
         self.total_bytes += len(compact)
 
     def finish(self):
         for fp in self.handles.values():
-            fp.flush(); fp.close()
+            fp.flush()
+            fp.close()
         self.handles.clear()
+
         routes_manifest = {}
-        for route, state in sorted(self.states.items(), key=lambda kv: int(kv[0])):
+        routes_by_start_bucket = {}
+        for (route, bucket), state in sorted(
+            self.states.items(), key=lambda item: (int(item[0][0]), int(item[0][1]))
+        ):
+            filenames = []
             for part in range(state["part"] + 1):
+                path = self._path(route, bucket, part)
                 if part not in state["closed"]:
-                    with open(self._path(route, part), "ab") as out:
+                    with open(path, "ab") as out:
                         out.write(b"]")
                     state["closed"].add(part)
-            routes_manifest[route] = state["files"]
+
+                signatures = state["signatureLists"].get(part, [])
+                services_path = path.with_name(path.stem + "-services.json")
+                services_path.write_text(
+                    json.dumps(
+                        [sorted(self.signature_services.get(sig, set())) for sig in signatures],
+                        separators=(",", ":"),
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                filenames.append(path.name)
+
+            routes_manifest.setdefault(route, []).extend(filenames)
+            routes_by_start_bucket.setdefault(route, {})[bucket] = filenames
+
+        self.routes_by_start_bucket = routes_by_start_bucket
+        self.route_shard_count = sum(len(names) for names in routes_manifest.values())
         return routes_manifest
+
+
+def _optional_gtfs_rows(zf, basename):
+    member = next(
+        (name for name in zf.namelist()
+         if name.rsplit("/", 1)[-1].lower() == basename.lower()),
+        None,
+    )
+    if member is None:
+        return []
+    with zf.open(member) as raw:
+        return list(csv.DictReader(
+            io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+        ))
+
+
+def build_service_calendar(zf):
+    """Build active service IDs by date from GTFS calendar files."""
+    calendars = _optional_gtfs_rows(zf, "calendar.txt")
+    exceptions = _optional_gtfs_rows(zf, "calendar_dates.txt")
+    dates = []
+
+    for row in calendars:
+        for field in ("start_date", "end_date"):
+            try:
+                dates.append(dt.datetime.strptime(
+                    row.get(field, ""), "%Y%m%d"
+                ).date())
+            except (ValueError, TypeError):
+                pass
+
+    for row in exceptions:
+        try:
+            dates.append(dt.datetime.strptime(
+                row.get("date", ""), "%Y%m%d"
+            ).date())
+        except (ValueError, TypeError):
+            pass
+
+    if not dates:
+        return {}
+
+    first, last = min(dates), max(dates)
+    active = {}
+    current = first
+
+    while current <= last:
+        active[current.strftime("%Y%m%d")] = set()
+        current += dt.timedelta(days=1)
+
+    weekdays = (
+        "monday", "tuesday", "wednesday", "thursday",
+        "friday", "saturday", "sunday",
+    )
+
+    for row in calendars:
+        service = str(row.get("service_id") or "").strip()
+        if not service:
+            continue
+        try:
+            start = dt.datetime.strptime(
+                row.get("start_date", ""), "%Y%m%d"
+            ).date()
+            end = dt.datetime.strptime(
+                row.get("end_date", ""), "%Y%m%d"
+            ).date()
+        except (ValueError, TypeError):
+            continue
+
+        current = max(start, first)
+        end = min(end, last)
+
+        while current <= end:
+            if row.get(weekdays[current.weekday()], "0") == "1":
+                active[current.strftime("%Y%m%d")].add(service)
+            current += dt.timedelta(days=1)
+
+    for row in exceptions:
+        key = str(row.get("date") or "").strip()
+        service = str(row.get("service_id") or "").strip()
+        kind = str(row.get("exception_type") or "").strip()
+
+        if key not in active or not service:
+            continue
+        if kind == "1":
+            active[key].add(service)
+        elif kind == "2":
+            active[key].discard(service)
+
+    return {
+        key: sorted(services)
+        for key, services in active.items()
+    }
 
 
 def main():
@@ -177,7 +315,7 @@ def main():
                     rid = (row.get("route_id") or "").strip()
                     rt = (row.get("realtime_trip_id") or "").strip()
                     if tid and rid.isdigit() and realtime_parts(rt):
-                        trip_meta[tid] = {"routeId": rid, "realtimeTripId": rt, "headsign": (row.get("trip_headsign") or "").strip(), "directionId": (row.get("direction_id") or "").strip()}
+                        trip_meta[tid] = {"routeId": rid, "serviceId": (row.get("service_id") or "").strip(), "realtimeTripId": rt, "headsign": (row.get("trip_headsign") or "").strip(), "directionId": (row.get("direction_id") or "").strip()}
             if not trip_meta:
                 raise ValueError("Geen trips met route_id en owner:line:journey realtime_trip_id gevonden.")
             if build_dir.exists():
@@ -230,7 +368,14 @@ def main():
             routes_manifest = writer.finish()
             if not routes_manifest:
                 raise ValueError("Geen routepatronen geschreven; controleer de GTFS-feed.")
+            service_calendar = build_service_calendar(zf)
+            if not service_calendar:
+                raise ValueError("Geen bruikbare GTFS-dienstkalender gevonden.")
             build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / "service-calendar.json").write_text(
+                json.dumps(service_calendar, ensure_ascii=False, separators=(",", ":")) + chr(10),
+                encoding="utf-8",
+            )
             manifest = {
                 "format": 1,
                 "source": archive.name,
@@ -241,8 +386,20 @@ def main():
                 "groupedTripsFinalized": completed_count,
                 "uniqueRoutePatterns": writer.pattern_count,
                 "routeCount": len(routes_manifest),
+                "serviceCalendarDateCount": len(service_calendar),
                 "routes": routes_manifest,
-                "note": "OpenOV GTFS route and full-stop-time crossmatch; static schedule only. Runtime still requires fresh exact BISON KV6 event.",
+                "routesByStartBucket": writer.routes_by_start_bucket,
+                "timeBucketHours": 12,
+                "routeShardCount": writer.route_shard_count,
+                "indexPartitioning": {
+                    "strategy": "full-trip-start-time",
+                    "bucketHours": 12,
+                    "maxPatternShardBytes": MAX_SHARD_BYTES,
+                    "timeBucketHours": 12,
+                },
+                "serviceIdsEmbedded": False,
+                "maxPatternShardBytes": MAX_SHARD_BYTES,
+                "note": "OpenOV GTFS route and full-stop-time crossmatch, partitioned by trip start time; service IDs are in aligned sidecars. Runtime still requires a fresh exact BISON KV6 event.",
             }
             (build_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
             total_file_bytes = sum(p.stat().st_size for p in build_dir.rglob("*.json"))
