@@ -1867,6 +1867,7 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
   let kv78DelayLegCount = 0;
   let kv78FeedAgeSeconds = null;
   let kv78FeedState = "unknown";
+  let kv78CollectorDiagnostics = null;
   for (const item of candidates) {
     if (!item.identityKey) continue;
     const result = chooseLatestMutation(mutations, item.identityKey);
@@ -2103,6 +2104,28 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     const kv78LatestMs = timestampMs(valueOf(kv78Snapshot, "latestMessageAt"));
     const kv78AgeMs = kv78LatestMs === null ? null : Date.now() - kv78LatestMs;
     kv78FeedAgeSeconds = kv78AgeMs === null ? null : Math.round(kv78AgeMs / 1000);
+    if (includeIdentityDiagnostics) {
+      const finiteCount = (value) => {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : null;
+      };
+      kv78CollectorDiagnostics = {
+        state: kv78Snapshot.state ?? "unknown",
+        latestMessageAt: kv78Snapshot.latestMessageAt ?? null,
+        feedAgeSeconds: kv78FeedAgeSeconds,
+        messageCount: finiteCount(kv78Snapshot.messageCount),
+        envelopeCounts: kv78Snapshot.envelopeCounts ?? {},
+        storedRowCount: finiteCount(kv78Snapshot.storedKv78RowCount),
+        sampledRowCount: kv78CachedRows.length,
+        passtimeMessageCount: finiteCount(kv78Snapshot.kv78PasstimeMessageCount),
+        parsedRowCount: finiteCount(kv78Snapshot.kv78ParsedRowCount),
+        lastPasstimeMessageAt: kv78Snapshot.kv78LastPasstimeMessageAt ?? null,
+        lastNonemptyPasstimeAt: kv78Snapshot.kv78LastNonemptyPasstimeAt ?? null,
+        lastPasstimeBatchSize: finiteCount(kv78Snapshot.kv78LastPasstimeBatchSize),
+        lastPasstimePayloadBytes: finiteCount(kv78Snapshot.kv78LastPasstimePayloadBytes),
+        rowCacheStats: kv78IdentityDiagnosticSource?.rowCacheStats ?? null,
+      };
+    }
     if (kv78Snapshot.state !== "error" && kv78AgeMs !== null && kv78AgeMs >= -30_000 && kv78AgeMs <= MAX_BISON_AGE_MS) {
       const delayItems = candidates.filter((item) =>
         item.leg.ndovRealtime?.status !== "cancelled" &&
@@ -2432,6 +2455,9 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     ndovPredictionLegCount,
     combinedPredictionLegCount,
     kv6ProjectionDiagnostics,
+    ...(includeIdentityDiagnostics && kv78CollectorDiagnostics
+      ? { kv78CollectorDiagnostics }
+      : {}),
     status: "ok",
     feedState: snapshot.state ?? "unknown",
     feedAgeSeconds: Math.round(feedAgeMs / 1000),
