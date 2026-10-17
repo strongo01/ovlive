@@ -167,6 +167,28 @@ console.log('PASS: fresh exact KV6 punctuality displays delay in seconds with ve
 console.log('PASS: stale KV6 observations are rejected');
 console.log('PASS: fresh exact ONROUTE activity is shown even when punctuality is absent, without implying on-time running');
 
+const partialMatchPlan = {
+  itineraries: [{
+    legs: [
+      { mode: 'BUS', tripId: '20261012_09:03_nl-OpenOV_382969676', from: { departure: plannedDeparture }, to: { arrival: '2026-10-12T07:29:00Z' } },
+      { mode: 'BUS', tripId: '20261012_09:40_nl-OpenOV_382969680', from: { departure: '2026-10-12T07:40:00Z' }, to: { arrival: '2026-10-12T08:10:00Z' } },
+      { mode: 'BUS', tripId: '20261012_10:00_nl-OpenOV_382969682', from: { departure: '2026-10-12T08:00:00Z' }, to: { arrival: '2026-10-12T08:30:00Z' } },
+    ],
+  }],
+};
+await applyNdovCancellationsToPlan(partialMatchPlan, env, { includeIdentityDiagnostics: true });
+assert.equal(partialMatchPlan.ndovRealtimeMeta.kv6MatchedLegCount, 1, 'partial exact KV6 successes must not hide the unmatched trip');
+assert.equal(partialMatchPlan.ndovRealtimeMeta.kv78DataLegCount, 1, 'the partial test should retain its exact KV78 match');
+const partialKv6Audit = partialMatchPlan.ndovRealtimeMeta.kv6IdentityDiagnostics;
+assert.ok(partialKv6Audit, 'partial KV6 matches must expose diagnostics for unmatched identities');
+assert.deepEqual(partialKv6Audit.requestedIdentities, ['EBS|20261012|1314|1039|0', 'CXX|20261012|U073|7043|0']);
+assert.ok(partialKv6Audit.comparisons.find((item) => item.requestedIdentity === 'CXX|20261012|U073|7043|0')?.sameOwnerDateLineSamples.some((sample) => sample.identity === 'CXX|20261012|U073|7044|0'));
+const partialKv78Audit = partialMatchPlan.ndovRealtimeMeta.kv78IdentityDiagnostics;
+assert.ok(partialKv78Audit, 'partial KV78 matches must expose diagnostics for trips without usable stop rows');
+assert.deepEqual(partialKv78Audit.requestedIdentities, ['CXX|20261012|U073|7042|0', 'CXX|20261012|U073|7043|0']);
+assert.ok(partialKv78Audit.comparisons.find((item) => item.requestedIdentity === 'CXX|20261012|U073|7042|0')?.sameOwnerDateLineSamples.some((sample) => sample.identity === 'CXX|20261012|U073|7042|1'));
+console.log('PASS: partial KV6/KV78 matches keep identity diagnostics for unmatched planned trips');
+
 suppressKv6Events = true;
 const noMatchPlan = {
   itineraries: [{
@@ -178,7 +200,7 @@ const noMatchPlan = {
     }],
   }],
 };
-await applyNdovCancellationsToPlan(noMatchPlan, env);
+await applyNdovCancellationsToPlan(noMatchPlan, env, { includeIdentityDiagnostics: true });
 assert.equal(noMatchPlan.ndovRealtimeMeta.kv6MatchedLegCount, 0);
 assert.equal(noMatchPlan.ndovRealtimeMeta.kv78MatchedLegCount, 0);
 const kv6IdentityAudit = noMatchPlan.ndovRealtimeMeta.kv6IdentityDiagnostics;

@@ -2648,7 +2648,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         await prepareNsTrainIdentities(planData, env);
         await enrichNsTrainPlan(planData, env);
         planData = await enrichTransitousPlan(planData);
-        await applyNdovCancellationsToPlan(planData, env);
+        await applyNdovCancellationsToPlan(planData, env, {
+          includeIdentityDiagnostics: url.searchParams.get("ndovIdentityDiagnostics") === "1",
+        });
       } catch (error) {
         console.error(
           "[OVLIVE_ENRICHMENT_ERROR]",

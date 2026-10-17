@@ -794,11 +794,15 @@ async function getBisonSnapshot(env) {
   return snapshot;
 }
 
-async function getBisonIdentityDiagnostics(env) {
+async function getBisonIdentityDiagnostics(env, identities = []) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison&identityDiagnostics=1`);
+  const target = new URL(`${ASSET_ORIGIN}/status`);
+  target.searchParams.set("stream", "bison");
+  target.searchParams.set("identityDiagnostics", "1");
+  for (const identity of [...new Set(identities)].slice(0, 8)) target.searchParams.append("identity", identity);
+  const response = await stub.fetch(target.toString());
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `BISON-identiteitsdiagnose gaf HTTP ${response.status}.`);
   return snapshot.bisonIdentityDiagnostics ?? null;
@@ -878,7 +882,22 @@ function summarizeRealtimeIdentityDiagnostics(requestedIdentities, diagnostics, 
       : undefined,
   }));
 
+  const suppliedComparisons = new Map(
+    (Array.isArray(diagnostics?.requestedIdentityComparisons) ? diagnostics.requestedIdentityComparisons : [])
+      .map((comparison) => [String(comparison?.requestedIdentity ?? "").trim(), comparison])
+  );
   const comparisons = requestedParts.slice(0, 8).map(({ identity, parts }) => {
+    const supplied = suppliedComparisons.get(identity);
+    if (supplied) {
+      return {
+        requestedIdentity: identity,
+        exactIdentityInReturnedSample: supplied.exactIdentityFound === true,
+        sameOwnerDateSampleCount: Number.isFinite(supplied.sameOwnerDateSampleCount) ? supplied.sameOwnerDateSampleCount : null,
+        sameOwnerDateLineSamples: (Array.isArray(supplied.sameOwnerDateLineSamples) ? supplied.sameOwnerDateLineSamples : []).slice(0, 5).map(compactIdentityDiagnosticTrip),
+        sameOwnerDateJourneySamples: (Array.isArray(supplied.sameOwnerDateJourneySamples) ? supplied.sameOwnerDateJourneySamples : []).slice(0, 5).map(compactIdentityDiagnosticTrip),
+        sameOwnerDateOtherSamples: (Array.isArray(supplied.sameOwnerDateOtherSamples) ? supplied.sameOwnerDateOtherSamples : []).slice(0, 3).map(compactIdentityDiagnosticTrip),
+      };
+    }
     const sameOwnerDate = parsedTrips.filter(({ parts: sample }) =>
       sample.owner === parts.owner && sample.date === parts.date
     );
@@ -959,11 +978,15 @@ async function getCurrentBisonMutations(env, identities) {
 }
 
 
-async function getKv78Snapshot(env) {
+async function getKv78Snapshot(env, identities = []) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=kv78&identityDiagnostics=1`);
+  const target = new URL(`${ASSET_ORIGIN}/status`);
+  target.searchParams.set("stream", "kv78");
+  target.searchParams.set("identityDiagnostics", "1");
+  for (const identity of [...new Set(identities)].slice(0, 8)) target.searchParams.append("identity", identity);
+  const response = await stub.fetch(target.toString());
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `KV78-status gaf HTTP ${response.status}.`);
   return snapshot;
@@ -1649,7 +1672,8 @@ export async function prepareNsTrainIdentities(plan, env) {
 }
 
 /** Mutates plan legs only for an exact, current KV17 cancellation. */
-export async function applyNdovCancellationsToPlan(plan, env) {
+export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
+  const includeIdentityDiagnostics = options?.includeIdentityDiagnostics === true;
   const candidates = legsWithTransitousId(plan);
   const baseMeta = {
     status: "unknown",
@@ -1861,6 +1885,9 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv6ReturnedEventCount = null;
   let kv6IdentityAudit = null;
   let kv78IdentityAudit = null;
+  const kv6UnmatchedIdentityKeys = new Set();
+  const kv78UnmatchedIdentityKeys = new Set();
+  let kv78IdentityDiagnosticSource = null;
   try {
     const liveItems = candidates.filter((item) => item.identityKey && item.leg.ndovRealtime?.status !== "cancelled");
     kv6RequestedIdentityKeys = [...new Set(liveItems.map((item) => item.identityKey))];
@@ -1872,7 +1899,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     ]));
     for (const item of liveItems) {
       const event = eventByIdentity.get(item.identityKey);
-      if (!event) continue;
+      if (!event) {
+        kv6UnmatchedIdentityKeys.add(item.identityKey);
+        continue;
+      }
       const nowMs = Date.now();
       const punctualitySeconds = numericDelay(event.punctualitySeconds);
       const punctualityReceivedMs = timestampMs(event.punctualityReceivedAt);
@@ -1918,7 +1948,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         }
       }
 
-      if (!hasFreshPunctuality && !hasFreshActivity) continue;
+      if (!hasFreshPunctuality && !hasFreshActivity) {
+        kv6UnmatchedIdentityKeys.add(item.identityKey);
+        continue;
+      }
 
       const delaySeconds = hasFreshPunctuality
         ? Math.trunc(punctualitySeconds)
@@ -1980,48 +2013,51 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv6Error = error instanceof Error ? error.message : "KV6-actuele ritgegevens niet beschikbaar.";
   }
 
-  // Log alleen een begrensde identiteitsdiagnose als geen enkele geplande rit
-  // een KV6-event matcht. Geen voertuigpositie, haltecode of voertuignummer loggen.
+  // Run the richer identity scan only when requested by the diagnostic endpoint,
+  // or at the existing low-frequency log interval. Partial KV6 success must not
+  // hide other planned identities that did not receive a fresh exact match.
+  const requestedKv6Misses = [...kv6UnmatchedIdentityKeys].slice(0, 8);
+  const kv6IdentityLogDue = Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000;
   if (
-    kv6MatchedLegCount === 0 &&
+    requestedKv6Misses.length > 0 &&
     kv6RequestedIdentityKeys.length > 0 &&
-    Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000
+    (includeIdentityDiagnostics || kv6IdentityLogDue)
   ) {
-    lastKv6NoExactMatchDiagnosticAt = Date.now();
-    const bisonIdentityDiagnostics = await getBisonIdentityDiagnostics(env).catch((error) => ({
+    const bisonIdentityDiagnostics = await getBisonIdentityDiagnostics(env, requestedKv6Misses).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     }));
-    kv6IdentityAudit = summarizeRealtimeIdentityDiagnostics(
-      kv6RequestedIdentityKeys,
-      bisonIdentityDiagnostics,
-      "bison"
-    );
-    const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
-    const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
-      identity: toIdentity(
-        valueOf(event, "dataOwnerCode", "DataOwnerCode"),
-        valueOf(event, "operationDate", "OperationDate"),
-        valueOf(event, "linePlanningNumber", "LinePlanningNumber"),
-        valueOf(event, "journeyNumber", "JourneyNumber"),
-        valueOf(event, "reinforcementNumber", "ReinforcementNumber") ?? "0"
-      ),
-      eventType: valueOf(event, "eventType", "EventType") ?? null,
-      receivedAt: valueOf(event, "receivedAt") ?? null,
-    }));
-    console.log("[OVLIVE_KV6_NO_EXACT_MATCH_DIAG]", JSON.stringify({
-      feedState: snapshot.state ?? null,
-      latestMessageAt: snapshot.latestMessageAt ?? null,
-      messageCount: snapshot.messageCount ?? null,
-      rawBytes: snapshot.rawBytes ?? null,
-      envelopeCounts: snapshot.envelopeCounts ?? {},
-      storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
-      bisonIdentityDiagnostics,
-      storedEventSampleCount: storedEventIdentitySamples.length,
-      requestedIdentityKeys: kv6RequestedIdentityKeys.slice(0, 8),
-      returnedExactEventCount: kv6ReturnedEventCount,
-      storedEventIdentitySamples,
-      kv6Error,
-    }));
+    if (includeIdentityDiagnostics) {
+      kv6IdentityAudit = summarizeRealtimeIdentityDiagnostics(requestedKv6Misses, bisonIdentityDiagnostics, "bison");
+    }
+    if (kv6IdentityLogDue) {
+      lastKv6NoExactMatchDiagnosticAt = Date.now();
+      const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
+      const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
+        identity: toIdentity(
+          valueOf(event, "dataOwnerCode", "DataOwnerCode"),
+          valueOf(event, "operationDate", "OperationDate"),
+          valueOf(event, "linePlanningNumber", "LinePlanningNumber"),
+          valueOf(event, "journeyNumber", "JourneyNumber"),
+          valueOf(event, "reinforcementNumber", "ReinforcementNumber") ?? "0"
+        ),
+        eventType: valueOf(event, "eventType", "EventType") ?? null,
+        receivedAt: valueOf(event, "receivedAt") ?? null,
+      }));
+      console.log("[OVLIVE_KV6_UNMATCHED_IDENTITY_DIAG]", JSON.stringify({
+        feedState: snapshot.state ?? null,
+        latestMessageAt: snapshot.latestMessageAt ?? null,
+        messageCount: snapshot.messageCount ?? null,
+        rawBytes: snapshot.rawBytes ?? null,
+        envelopeCounts: snapshot.envelopeCounts ?? {},
+        storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
+        bisonIdentityDiagnostics,
+        storedEventSampleCount: storedEventIdentitySamples.length,
+        requestedIdentityKeys: requestedKv6Misses,
+        returnedExactEventCount: kv6ReturnedEventCount,
+        storedEventIdentitySamples,
+        kv6Error,
+      }));
+    }
   }
 
   // Delay enrichment is independent of the KV17 state: it reads already-collected
@@ -2032,12 +2068,11 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let stopAssignmentIndexAttempted = false;
   let openovStopPlaceIndexAttempted = false;
   try {
-    const kv78Snapshot = await getKv78Snapshot(env);
-    kv78IdentityAudit = summarizeRealtimeIdentityDiagnostics(
-      candidates.map((item) => item.identityKey).filter(Boolean),
-      kv78Snapshot.kv78IdentityDiagnostics,
-      "kv78"
+    const kv78Snapshot = await getKv78Snapshot(
+      env,
+      includeIdentityDiagnostics ? candidates.map((item) => item.identityKey).filter(Boolean) : []
     );
+    kv78IdentityDiagnosticSource = kv78Snapshot.kv78IdentityDiagnostics ?? null;
     const kv78CachedRows = Array.isArray(kv78Snapshot.latestRows)
       ? kv78Snapshot.latestRows
       : [];
@@ -2182,6 +2217,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
 
       for (const { item, rows, vehicleLookup } of rowResults) {
         if (!rows.length) {
+          if (item.identityKey) kv78UnmatchedIdentityKeys.add(item.identityKey);
           continue;
         }
         const scheduledDeparture = valueOf(item.leg.from, "departure") ?? valueOf(item.leg, "startTime", "departureTime");
@@ -2202,7 +2238,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           departure = null;
           arrival = null;
         }
-        if (!departureMatch && !arrivalMatch) continue;
+        if (!departureMatch && !arrivalMatch) {
+          if (item.identityKey) kv78UnmatchedIdentityKeys.add(item.identityKey);
+          continue;
+        }
         kv78MatchedLegCount += 1;
         if (!departure && !arrival) continue;
         kv78DataLegCount += 1;
@@ -2261,6 +2300,14 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     }
   } catch (error) {
     kv78Error = error instanceof Error ? error.message : "KV78-gegevens niet beschikbaar.";
+  }
+
+  if (includeIdentityDiagnostics && kv78UnmatchedIdentityKeys.size > 0 && kv78IdentityDiagnosticSource) {
+    kv78IdentityAudit = summarizeRealtimeIdentityDiagnostics(
+      [...kv78UnmatchedIdentityKeys],
+      kv78IdentityDiagnosticSource,
+      "kv78"
+    );
   }
 
   const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
@@ -2353,10 +2400,8 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv78VehicleFallbackLegCount,
     kv78DelayLegCount,
     kv78Error,
-    ...(kv6IdentityAudit ? { kv6IdentityDiagnostics: kv6IdentityAudit } : {}),
-    ...(kv78MatchedLegCount === 0 && kv78IdentityAudit
-      ? { kv78IdentityDiagnostics: kv78IdentityAudit }
-      : {}),
+    ...(includeIdentityDiagnostics && kv6IdentityAudit ? { kv6IdentityDiagnostics: kv6IdentityAudit } : {}),
+    ...(includeIdentityDiagnostics && kv78IdentityAudit ? { kv78IdentityDiagnostics: kv78IdentityAudit } : {}),
     message: cancelled
       ? `${cancelled} exacte KV17-annulering(en) aan een reisdeel gekoppeld.`
       : kv78DataLegCount

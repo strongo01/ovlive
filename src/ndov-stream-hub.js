@@ -79,6 +79,57 @@ function currentOperatingDateAmsterdam() {
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
 }
+
+function normalizedIdentityDiagnosticParts(value) {
+  const lookup = normalizeTripLookupIdentity(value);
+  if (!lookup) return null;
+  const owner = String(lookup.owner ?? "").trim().toUpperCase();
+  const date = normalizeOperatingDate(lookup.date);
+  const line = String(lookup.line ?? "").trim().toUpperCase();
+  const journey = String(lookup.journey ?? "").trim();
+  const reinforcement = String(lookup.reinforcement ?? "0").trim() || "0";
+  if (!owner || !/^\\d{8}$/.test(date) || !line || !journey) return null;
+  return { owner, date, line, journey, reinforcement, identity: [owner, date, line, journey, reinforcement].join("|") };
+}
+
+function compactIdentityDiagnosticRecord(trip) {
+  return {
+    identity: String(trip?.identity ?? ""),
+    eventType: trip?.eventType ?? null,
+    receivedAt: trip?.receivedAt ?? null,
+    punctualityPresent: typeof trip?.punctualityPresent === "boolean" ? trip.punctualityPresent : undefined,
+    punctualityAgeSeconds: Number.isFinite(trip?.punctualityAgeSeconds) ? trip.punctualityAgeSeconds : undefined,
+    rowCount: Number.isFinite(trip?.rowCount) ? trip.rowCount : undefined,
+    uniqueStopCount: Number.isFinite(trip?.uniqueStopCount) ? trip.uniqueStopCount : undefined,
+    sampleStopCodes: Array.isArray(trip?.sampleStopCodes) ? trip.sampleStopCodes.slice(0, 6) : undefined,
+  };
+}
+
+function buildRequestedIdentityComparisons(url, trips) {
+  const requested = [...new Map(
+    url.searchParams.getAll("identity").map(normalizedIdentityDiagnosticParts).filter(Boolean)
+      .map((identity) => [identity.identity, identity])
+  ).values()].slice(0, 8);
+  if (!requested.length) return [];
+  const records = (Array.isArray(trips) ? trips : [])
+    .map((trip) => ({ trip, parts: normalizedIdentityDiagnosticParts(trip?.identity) }))
+    .filter((item) => item.parts);
+  return requested.map((target) => {
+    const sameOwnerDate = records.filter(({ parts }) => parts.owner === target.owner && parts.date === target.date);
+    const sameOwnerDateLine = sameOwnerDate.filter(({ parts }) => parts.line === target.line);
+    const sameOwnerDateJourney = sameOwnerDate.filter(({ parts }) => parts.journey === target.journey);
+    return {
+      requestedIdentity: target.identity,
+      exactIdentityFound: sameOwnerDate.some(({ parts }) => parts.identity === target.identity),
+      sameOwnerDateSampleCount: sameOwnerDate.length,
+      sameOwnerDateLineSamples: sameOwnerDateLine.slice(0, 5).map(({ trip }) => compactIdentityDiagnosticRecord(trip)),
+      sameOwnerDateJourneySamples: sameOwnerDateJourney.slice(0, 5).map(({ trip }) => compactIdentityDiagnosticRecord(trip)),
+      sameOwnerDateOtherSamples: sameOwnerDate
+        .filter(({ parts }) => parts.line !== target.line && parts.journey !== target.journey)
+        .slice(0, 3).map(({ trip }) => compactIdentityDiagnosticRecord(trip)),
+    };
+  });
+}
 function b64(bytes) {
   let out = '';
   for (const b of bytes) out += String.fromCharCode(b);
@@ -783,6 +834,7 @@ export class NdovFeedHub extends DurableObject {
                 identityCount: trips.length,
                 byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.rowCount - a.rowCount).slice(0, 80),
                 trips: trips.slice(0, 80),
+                requestedIdentityComparisons: buildRequestedIdentityComparisons(url, trips),
               };
             })()
           : null;
@@ -837,6 +889,7 @@ export class NdovFeedHub extends DurableObject {
                 byLine: Object.fromEntries([...byLineMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 80)),
                 byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.tripCount - a.tripCount).slice(0, 80),
                 trips: trips.slice(0, 80),
+                requestedIdentityComparisons: buildRequestedIdentityComparisons(url, trips),
               };
             })()
           : null;

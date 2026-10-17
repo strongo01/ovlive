@@ -54,6 +54,7 @@ async function main() {
   planUrl.searchParams.set("time", new Date(Date.now() + 120_000).toISOString());
   planUrl.searchParams.set("numItineraries", "5");
   planUrl.searchParams.set("maxItineraries", "5");
+  planUrl.searchParams.set("ndovIdentityDiagnostics", "1");
 
   const planResult = await get(planUrl.pathname + planUrl.search, 65000);
   if (!planResult.ok || !planResult.json) {
