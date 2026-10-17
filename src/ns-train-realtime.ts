@@ -337,7 +337,9 @@ function getLegs(plan: any): any[] {
 
 function isRail(leg: any): boolean {
   return [
-    "RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL", "TRAIN"
+    "RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL",
+    "HIGHSPEED_RAIL", "NIGHT_RAIL", "REGIONAL_FAST_RAIL", "SUBURBAN",
+    "TRAIN"
   ].includes(String(leg?.mode ?? "").toUpperCase());
 }
 
