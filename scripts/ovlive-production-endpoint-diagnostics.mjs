@@ -64,10 +64,26 @@ async function main() {
 
   const legs = collectLegs(planResult.json);
   const openovLegs = legs.filter((leg) => /^nl-OpenOV_/i.test(String(leg.routeId ?? leg.route?.id ?? "")));
+  const transitLegs = legs.filter((leg) => {
+    const mode = String(leg?.mode ?? leg?.transitMode ?? "").trim().toUpperCase();
+    const tripId = String(leg?.tripId ?? leg?.trip?.id ?? "").trim();
+    const route = String(leg?.routeId ?? leg?.route?.id ?? "").trim();
+    return mode !== "WALK" && mode !== "TRANSFER" && Boolean(tripId || route);
+  });
   const ndovStatusCounts = {};
-  for (const leg of legs) {
+  for (const leg of transitLegs) {
     const status = String(leg.ndovRealtime?.status ?? "no_ndov_match");
     ndovStatusCounts[status] = (ndovStatusCounts[status] ?? 0) + 1;
+  }
+  const openovStatusCounts = {};
+  const openovReasonCounts = {};
+  for (const leg of openovLegs) {
+    const status = String(leg.openovRealtime?.status ?? "no_openov_match");
+    openovStatusCounts[status] = (openovStatusCounts[status] ?? 0) + 1;
+    if (leg.openovRealtime?.reason) {
+      const reason = String(leg.openovRealtime.reason);
+      openovReasonCounts[reason] = (openovReasonCounts[reason] ?? 0) + 1;
+    }
   }
 
   console.log(JSON.stringify({
@@ -76,8 +92,12 @@ async function main() {
     httpStatus: planResult.status,
     itineraries: Array.isArray(planResult.json.itineraries) ? planResult.json.itineraries.length : null,
     totalLegs: legs.length,
+    transitLegs: transitLegs.length,
     openovLegs: openovLegs.length,
+    ndovStatusScope: "transit legs only; walking and transfer legs are excluded",
     ndovStatusCounts,
+    openovStatusCounts,
+    openovReasonCounts,
     ndovRealtimeMeta: planResult.json.ndovRealtimeMeta ?? null,
     legs: legs.map((leg) => ({
       routeId: leg.routeId ?? leg.route?.id ?? null,
