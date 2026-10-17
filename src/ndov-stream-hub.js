@@ -27,8 +27,11 @@ const KV6_ACTIVE_EVENT_TYPES = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIV
 const KV78_ROW_LIMIT = 30000; // rolling, durable row cache; still bounded by design
 const KV78_STATUS_SAMPLE_LIMIT = 5000;
 const KV17_STATE_LIMIT = 5000;
-const ROW_RETENTION_MS = 10 * 60 * 1000;
+// KV78 rows older than this are rejected by /rows and cannot enrich a live plan.
 const FRESH_ROW_MS = 180 * 1000;
+const ROW_RETENTION_MS = FRESH_ROW_MS;
+// Periodically prune stale rows before the 30k cap forces eviction of potentially fresh rows.
+const KV78_ROW_PRUNE_INTERVAL_MS = 30 * 1000;
 // Near-continuous streaming; reconnect before the long-lived TCP/request ceiling.
 const AUTO_SESSION_SECONDS = 600;
 const AUTO_REST_MS = 5 * 1000;
@@ -256,7 +259,7 @@ export class NdovFeedHub extends DurableObject {
     this.streamStates = new Map(Object.keys(CONFIG).map((stream) => [stream, {
       snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
       running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
-      socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0,
+      socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
     }]));
     this.ready = ctx.blockConcurrencyWhile(async () => {
       // Eerst de oude opslag veiligstellen, pas daarna state laden.
@@ -1611,6 +1614,13 @@ export class NdovFeedHub extends DurableObject {
           state.snapshot.rawBytes += payload.length;
           state.snapshot.latestMessageAt = new Date().toISOString();
           state.snapshot.envelopeCounts[envelope] = (state.snapshot.envelopeCounts[envelope] || 0) + 1;
+          if (
+            stream === 'kv78' &&
+            Date.now() - state.lastRowPruneAt >= KV78_ROW_PRUNE_INTERVAL_MS
+          ) {
+            this.pruneRows(stream);
+            state.lastRowPruneAt = Date.now();
+          }
           if (stream === 'kv78' && /\/KV8passtimes\//.test(envelope)) {
             for (const row of parseKv78Payload(text, envelope)) {
               // Keep every line during this bounded diagnostic run. Filtering to
