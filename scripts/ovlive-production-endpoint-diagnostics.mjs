@@ -52,8 +52,12 @@ async function main() {
   planUrl.searchParams.set("fromPlace", process.env.OVLIVE_FROM_PLACE ?? "nl-OpenOV_3924329");
   planUrl.searchParams.set("toPlace", process.env.OVLIVE_TO_PLACE ?? "nl-OpenOV_3924355");
   planUrl.searchParams.set("time", new Date(Date.now() + 120_000).toISOString());
-  planUrl.searchParams.set("numItineraries", "5");
-  planUrl.searchParams.set("maxItineraries", "5");
+  const parsedItineraryCount = Number.parseInt(process.env.OVLIVE_NUM_ITINERARIES ?? "3", 10);
+  const itineraryCount = Number.isFinite(parsedItineraryCount)
+    ? Math.min(5, Math.max(1, parsedItineraryCount))
+    : 3;
+  planUrl.searchParams.set("numItineraries", String(itineraryCount));
+  planUrl.searchParams.set("maxItineraries", String(itineraryCount));
   planUrl.searchParams.set("ndovIdentityDiagnostics", "1");
 
   const planResult = await get(planUrl.pathname + planUrl.search, 65000);
@@ -89,6 +93,7 @@ async function main() {
   console.log(JSON.stringify({
     check: "production-plan",
     baseUrl,
+    requestedItineraries: itineraryCount,
     httpStatus: planResult.status,
     itineraries: Array.isArray(planResult.json.itineraries) ? planResult.json.itineraries.length : null,
     totalLegs: legs.length,
