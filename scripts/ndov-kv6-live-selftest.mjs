@@ -83,7 +83,7 @@ const env = {
             return Response.json({ events: [kv6Good, kv6Stale, kv6Observed].filter((event) => ids.includes(event.identity)) });
           }
           if (url.pathname === '/rows' && stream === 'kv78') {
-            return Response.json({ rows: url.searchParams.get('identity') === 'EBS|20261012|1314|1039|0' ? tripRows : [] });
+            return Response.json({ rows: url.searchParams.getAll('identity').includes('EBS|20261012|1314|1039|0') ? tripRows : [] });
           }
           return new Response('unexpected mock request', { status: 404 });
         },
