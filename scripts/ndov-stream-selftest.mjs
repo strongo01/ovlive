@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
+import { isKv78RowScheduleRelevant, kv78RowCacheKey } from '../src/ndov-live-state.mjs';
 
 const header = String.raw`\GKV8turbo_passtimes|KV8turbo_passtimes|OpenOV|||UTF-8|0.1|2026-10-11T09:53:01+02:00|
 \TDATEDPASSTIME|DATEDPASSTIME|start object
@@ -13,6 +14,26 @@ assert.equal(kv.length, 1);
 assert.equal(kv[0].linePlanningNumber, 'U011');
 assert.equal(kv[0].departureDelaySeconds, -8);
 assert.equal(kv[0].identity, 'CXX|2026-10-11|2947354|U011|7004|0');
+
+// Canonical cache keys must collapse LocalServiceLevelCode-only duplicates.
+const sameStopOtherServiceLevel = { ...kv[0], localServiceLevelCode: 'another-service-level' };
+assert.equal(kv78RowCacheKey(kv[0]), kv78RowCacheKey(sameStopOtherServiceLevel));
+assert.notEqual(
+  kv78RowCacheKey(kv[0]),
+  kv78RowCacheKey({ ...kv[0], userStopCode: 'DIFFERENT_STOP' }),
+);
+
+// Current time 14:00 Amsterdam on the fixed test date.
+const cacheNow = Date.parse('2026-10-17T12:00:00.000Z');
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '13:59:00' }, cacheNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetArrivalTime: '13:56:59' }, cacheNow), false);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '14:05:00' }, cacheNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: null, targetArrivalTime: null }, cacheNow), true);
+
+// Midnight must be interpreted conservatively as wall-clock schedule time.
+const midnightNow = Date.parse('2026-10-17T21:55:00.000Z'); // 23:55 Amsterdam
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '00:05:00' }, midnightNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '23:51:00' }, midnightNow), false);
 
 // Ensure non-sample planning lines can be represented and correlated.
 const l014Payload = header.replace('|U011|7004|', '|L014|7006|');
@@ -59,6 +80,10 @@ assert.match(hubSource, /const KV78_ROW_LIMIT = 30000/);
 assert.match(hubSource, /const FRESH_ROW_MS = 180 \* 1000/);
 assert.match(hubSource, /const ROW_RETENTION_MS = FRESH_ROW_MS/);
 assert.match(hubSource, /const KV78_ROW_PRUNE_INTERVAL_MS = 30 \* 1000/);
+assert.match(hubSource, /const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180/);
+assert.match(hubSource, /isKv78RowScheduleRelevant\(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS\)/);
+assert.match(hubSource, /kv78RowCacheKey\(row\)/);
+assert.match(hubSource, /rowCacheStats: \{ stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 \}/);
 assert.match(hubSource, /lastRowPruneAt: 0/);
 assert.match(hubSource, /Date\.now\(\) - state\.lastRowPruneAt >= KV78_ROW_PRUNE_INTERVAL_MS/);
 assert.match(hubSource, /const AUTO_SESSION_SECONDS = 600/);

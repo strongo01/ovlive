@@ -115,6 +115,73 @@ export function rowMatchesIdentity(row, lookup) {
     && String(row.fortifyOrderNumber ?? row.reinforcementNumber ?? '0') === lookup.reinforcement;
 }
 
+function kv78ClockSeconds(value) {
+  const match = String(value ?? '').trim().match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] ?? 0);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return null;
+  return hour * 3600 + minute * 60 + second;
+}
+
+function amsterdamClockSeconds(nowMs) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Amsterdam',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(nowMs));
+  const part = (type) => Number(parts.find((item) => item.type === type)?.value);
+  const hour = part('hour'), minute = part('minute'), second = part('second');
+  if (![hour, minute, second].every(Number.isFinite)) return null;
+  return hour * 3600 + minute * 60 + second;
+}
+
+/**
+ * KV78 cache key uses the same exact trip identity as live matching.
+ * LocalServiceLevelCode is source metadata, not part of the journey identity
+ * used downstream, so it must not create duplicate copies of the same stop.
+ */
+export function kv78RowCacheKey(row) {
+  if (!row || typeof row !== 'object') return null;
+  const owner = String(row.dataOwnerCode ?? row.DataOwnerCode ?? '').trim().toUpperCase();
+  const date = normalizeOperatingDate(row.operationDate ?? row.OperationDate);
+  const line = String(row.linePlanningNumber ?? row.LinePlanningNumber ?? '').trim().toUpperCase();
+  const journey = String(row.journeyNumber ?? row.JourneyNumber ?? '').trim();
+  const reinforcement = String(row.fortifyOrderNumber ?? row.reinforcementNumber ?? row.FortifyOrderNumber ?? row.ReinforcementNumber ?? '0').trim() || '0';
+  if (!owner || !/^\d{8}$/.test(date) || !line || !journey) return null;
+  const stopOrder = String(row.userStopOrderNumber ?? row.UserStopOrderNumber ?? '').trim();
+  const stopCode = String(row.userStopCode ?? row.UserStopCode ?? '').trim();
+  const targetArrival = String(row.targetArrivalTime ?? row.TargetArrivalTime ?? '').trim();
+  const targetDeparture = String(row.targetDepartureTime ?? row.TargetDepartureTime ?? '').trim();
+  const fallbackTime = !stopOrder && !stopCode ? `|${targetArrival}|${targetDeparture}` : '';
+  return [owner, date, line, journey, reinforcement, stopOrder, stopCode].join('|') + fallbackTime;
+}
+
+/**
+ * A stop record is only useful for upcoming-plan matching while at least one
+ * target event is still in the schedule matching window. Keep unknown times
+ * conservatively so they can still support exact-trip cancellation correlation.
+ */
+export function isKv78RowScheduleRelevant(row, nowMs = Date.now(), maxPastSeconds = 180) {
+  const nowSeconds = amsterdamClockSeconds(nowMs);
+  if (nowSeconds === null) return true;
+  const eventTimes = [
+    kv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime),
+    kv78ClockSeconds(row?.targetArrivalTime ?? row?.TargetArrivalTime),
+  ].filter((value) => value !== null);
+  if (!eventTimes.length) return true;
+  return eventTimes.some((targetSeconds) => {
+    let delta = targetSeconds - nowSeconds;
+    // Only wrap close to midnight; otherwise an old morning stop could appear future.
+    if (delta > 64800) delta -= 86400;
+    else if (delta < -64800) delta += 86400;
+    return delta >= -Math.max(0, maxPastSeconds);
+  });
+}
+
 export function isRecentIsoTime(value, now = Date.now(), maxAgeMs = 180_000) {
   if (!value) return false;
   const ms = Date.parse(String(value));

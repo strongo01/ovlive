@@ -12,7 +12,7 @@ import {
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
-import { eventsForIdentities, flattenCurrentMutations, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, upsertCurrentMutationState } from './ndov-live-state.mjs';
+import { eventsForIdentities, flattenCurrentMutations, isKv78RowScheduleRelevant, kv78RowCacheKey, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
 const OWNER_PREFIXES = ['/ARR/', '/RIG/', '/GVB/', '/CXX/', '/EBS/', '/QBUZZ/', '/KEOLIS/', '/IVU/', '/OPENOV/'];
@@ -32,6 +32,9 @@ const FRESH_ROW_MS = 180 * 1000;
 const ROW_RETENTION_MS = FRESH_ROW_MS;
 // Periodically prune stale rows before the 30k cap forces eviction of potentially fresh rows.
 const KV78_ROW_PRUNE_INTERVAL_MS = 30 * 1000;
+// Match logic compares target stop times within +/- 180 seconds; older stop rows
+// cannot match any current/future itinerary and should not consume cache capacity.
+const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180;
 // Near-continuous streaming; reconnect before the long-lived TCP/request ceiling.
 const AUTO_SESSION_SECONDS = 600;
 const AUTO_REST_MS = 5 * 1000;
@@ -260,6 +263,7 @@ export class NdovFeedHub extends DurableObject {
       snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
       running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
+      rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
     }]));
     this.ready = ctx.blockConcurrencyWhile(async () => {
       // Eerst de oude opslag veiligstellen, pas daarna state laden.
@@ -298,6 +302,20 @@ export class NdovFeedHub extends DurableObject {
       const chunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(key('rows:' + i))));
       state.rows = new Map(chunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
     } else state.rows = new Map(savedRows ?? []);
+
+    // Re-key legacy snapshots by canonical trip + stop identity. This collapses
+    // duplicate rows that differed only by LocalServiceLevelCode without losing
+    // any fields needed for exact trip/stop/time matching.
+    if (stream === 'kv78') {
+      const canonicalRows = new Map();
+      for (const [savedKey, row] of state.rows.entries()) {
+        const cacheKey = kv78RowCacheKey(row) ?? String(savedKey);
+        if (canonicalRows.has(cacheKey)) state.rowCacheStats.duplicateRowsCollapsed += 1;
+        canonicalRows.delete(cacheKey);
+        canonicalRows.set(cacheKey, row);
+      }
+      state.rows = canonicalRows;
+    }
 
     state.events = new Map();
     if (compressedEventCount > 0) {
@@ -833,6 +851,8 @@ export class NdovFeedHub extends DurableObject {
                 currentDate,
                 cacheSize: state.rows.size,
                 cacheLimit: KV78_ROW_LIMIT,
+                rowCacheStats: { ...state.rowCacheStats },
+                stopTimePastRetentionSeconds: KV78_STOP_TIME_PAST_RETENTION_SECONDS,
                 matchingRowCount,
                 identityCount: trips.length,
                 byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.rowCount - a.rowCount).slice(0, 80),
@@ -1311,12 +1331,27 @@ export class NdovFeedHub extends DurableObject {
 
   pruneRows(stream) {
     const state = this.stateFor(stream);
-    const cutoff = Date.now() - ROW_RETENTION_MS;
+    const now = Date.now();
+    const cutoff = now - ROW_RETENTION_MS;
     for (const [key, row] of state.rows.entries()) {
       const captured = Date.parse(row?.receivedAt ?? '');
-      if (!Number.isFinite(captured) || captured < cutoff) state.rows.delete(key);
+      if (!Number.isFinite(captured) || captured < cutoff) {
+        state.rows.delete(key);
+        if (stream === 'kv78') state.rowCacheStats.stalePrunedRows += 1;
+        continue;
+      }
+      if (
+        stream === 'kv78' &&
+        !isKv78RowScheduleRelevant(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS)
+      ) {
+        state.rows.delete(key);
+        state.rowCacheStats.schedulePrunedRows += 1;
+      }
     }
-    while (state.rows.size > KV78_ROW_LIMIT) state.rows.delete(state.rows.keys().next().value);
+    while (state.rows.size > KV78_ROW_LIMIT) {
+      state.rows.delete(state.rows.keys().next().value);
+      if (stream === 'kv78') state.rowCacheStats.limitEvictedRows += 1;
+    }
   }
 
   async persist(stream, force = false, bulk = false) {
@@ -1626,10 +1661,15 @@ export class NdovFeedHub extends DurableObject {
               // Keep every line during this bounded diagnostic run. Filtering to
               // U005/U011/U073/24 hid mutations such as CXX L014 and ARR 26010.
               row.receivedAt = new Date().toISOString();
-              const key = `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+              const key = kv78RowCacheKey(row) ?? `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
               state.rows.delete(key);
               state.rows.set(key, row);
-              if (state.rows.size > KV78_ROW_LIMIT) state.rows.delete(state.rows.keys().next().value);
+            }
+            // Prune after processing a complete feed message so expired/past
+            // stop rows are removed before capacity eviction can discard fresh rows.
+            if (state.rows.size > KV78_ROW_LIMIT) {
+              this.pruneRows(stream);
+              state.lastRowPruneAt = Date.now();
             }
           } else if (stream === 'bison' && /KV6posinfo/.test(envelope)) {
             const receivedAt = new Date().toISOString();
