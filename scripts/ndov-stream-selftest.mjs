@@ -45,6 +45,10 @@ assert.equal(gvbTramCorrelation.length, 1);
 assert.equal(gvbTramCorrelation[0].matchedKv78StopCount, 1);
 
 const hubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
+assert.ok(
+  hubSource.includes('!/^\\d{8}$/.test(date)'),
+  'targeted realtime identity diagnostics must normalize YYYYMMDD dates correctly',
+);
 assert.match(hubSource, /function ndovCollectionWindow/);
 assert.match(hubSource, /AUTO_ACTIVE_START_UTC_HOUR = 4/);
 assert.match(hubSource, /setAlarm\(window\.nextAlarmAt\)/);

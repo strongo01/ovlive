@@ -88,7 +88,7 @@ function normalizedIdentityDiagnosticParts(value) {
   const line = String(lookup.line ?? "").trim().toUpperCase();
   const journey = String(lookup.journey ?? "").trim();
   const reinforcement = String(lookup.reinforcement ?? "0").trim() || "0";
-  if (!owner || !/^\\d{8}$/.test(date) || !line || !journey) return null;
+  if (!owner || !/^\d{8}$/.test(date) || !line || !journey) return null;
   return { owner, date, line, journey, reinforcement, identity: [owner, date, line, journey, reinforcement].join("|") };
 }
 
