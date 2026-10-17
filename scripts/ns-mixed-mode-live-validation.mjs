@@ -39,7 +39,7 @@ function amsterdamDateTime(dateKey, hour, minute) {
   return new Date(candidateMs);
 }
 
-function nextAmsterdamNightRequestTime() {
+function nextAmsterdamFridayNightRequestTime() {
   const dateFormatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/Amsterdam",
     year: "numeric",
@@ -48,16 +48,27 @@ function nextAmsterdamNightRequestTime() {
   });
   const now = new Date();
   const dateKey = dateFormatter.format(now);
-  let candidate = amsterdamDateTime(dateKey, 23, 30);
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const localDateAsUtc = new Date(Date.UTC(year, month - 1, day));
+  const weekday = localDateAsUtc.getUTCDay();
+  let daysUntilFriday = (5 - weekday + 7) % 7;
+  let candidateDate = new Date(Date.UTC(year, month - 1, day + daysUntilFriday));
+  let candidateKey = [
+    String(candidateDate.getUTCFullYear()).padStart(4, "0"),
+    String(candidateDate.getUTCMonth() + 1).padStart(2, "0"),
+    String(candidateDate.getUTCDate()).padStart(2, "0")
+  ].join("-");
+  let candidate = amsterdamDateTime(candidateKey, 23, 30);
+
+  // If this Friday's 23:30 has passed, test next Friday instead.
   if (candidate.getTime() <= now.getTime()) {
-    const [year, month, day] = dateKey.split("-").map(Number);
-    const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
-    const tomorrowKey = [
-      String(tomorrow.getUTCFullYear()).padStart(4, "0"),
-      String(tomorrow.getUTCMonth() + 1).padStart(2, "0"),
-      String(tomorrow.getUTCDate()).padStart(2, "0")
+    candidateDate = new Date(Date.UTC(year, month - 1, day + daysUntilFriday + 7));
+    candidateKey = [
+      String(candidateDate.getUTCFullYear()).padStart(4, "0"),
+      String(candidateDate.getUTCMonth() + 1).padStart(2, "0"),
+      String(candidateDate.getUTCDate()).padStart(2, "0")
     ].join("-");
-    candidate = amsterdamDateTime(tomorrowKey, 23, 30);
+    candidate = amsterdamDateTime(candidateKey, 23, 30);
   }
   return candidate.toISOString();
 }
@@ -85,10 +96,10 @@ function collectLegs(plan) {
 const planUrl = new URL("/api/plan", baseUrl);
 planUrl.searchParams.set("fromPlace", fromPlace);
 planUrl.searchParams.set("toPlace", toPlace);
-// The original regression occurred during the late-evening connection
-// window (bus 5 vs. Sprinter). Reuse that local time to avoid a test that
-// returns five faster daytime buses and never exercises the NS enrich path.
-const requestTime = process.env.OVLIVE_TEST_TIME ?? nextAmsterdamNightRequestTime();
+// The original regression was on a Friday late evening (bus 5 vs. Sprinter).
+// The Saturday timetable returned only buses, even with five alternatives.
+// Use the next Friday 23:30 in Europe/Amsterdam to recreate that service window.
+const requestTime = process.env.OVLIVE_TEST_TIME ?? nextAmsterdamFridayNightRequestTime();
 planUrl.searchParams.set("time", requestTime);
 planUrl.searchParams.set("numItineraries", "5");
 planUrl.searchParams.set("maxItineraries", "5");
