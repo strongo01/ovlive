@@ -1222,6 +1222,59 @@ function legsWithTransitousId(plan) {
   return found;
 }
 
+const NS_RAIL_MODES_FOR_IDENTITY = new Set([
+  "RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL",
+  "HIGHSPEED_RAIL", "NIGHT_RAIL", "REGIONAL_FAST_RAIL", "SUBURBAN", "TRAIN",
+]);
+
+/**
+ * Resolve exact NS train identities before the larger bus/tram crosswalk pass.
+ * On Cloudflare Workers, static-asset reads count toward the per-invocation
+ * subrequest budget. A mixed-mode plan with many bus routes must not consume
+ * that budget before NS station/board lookups can run.
+ */
+export async function prepareNsTrainIdentities(plan, env) {
+  const railCandidates = legsWithTransitousId(plan).filter(({ leg }) =>
+    NS_RAIL_MODES_FOR_IDENTITY.has(String(leg?.mode ?? "").toUpperCase())
+  );
+  const outcomes = [];
+
+  for (const item of railCandidates) {
+    let resolution;
+    try {
+      resolution = await resolveRealtimeTripForLeg(env, item);
+    } catch (error) {
+      // Identity preparation is best-effort; one unavailable asset must not
+      // stop OpenOV feed enrichment or the later full NDOV pass.
+      resolution = {
+        parsed: null,
+        source: "openov-route-crossmatch",
+        reason: "identity_preparation_failed",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    outcomes.push({
+      tripId: item.identity.originalTripId,
+      source: resolution.source,
+      reason: resolution.reason ?? null,
+      realtimeTripId: resolution.realtimeTripId ?? null,
+      parsedIdentity: resolution.parsed ?? null,
+    });
+  }
+
+  if (!plan.ndovRealtimeMeta || typeof plan.ndovRealtimeMeta !== "object" ||
+      Array.isArray(plan.ndovRealtimeMeta)) {
+    plan.ndovRealtimeMeta = {};
+  }
+  plan.ndovRealtimeMeta.nsTrainIdentities = buildNsTrainIdentities(outcomes);
+  plan.ndovRealtimeMeta.nsTrainIdentityPreparation = {
+    candidateLegCount: railCandidates.length,
+    identityCount: plan.ndovRealtimeMeta.nsTrainIdentities.length,
+  };
+  return plan;
+}
+
 /** Mutates plan legs only for an exact, current KV17 cancellation. */
 export async function applyNdovCancellationsToPlan(plan, env) {
   const candidates = legsWithTransitousId(plan);
