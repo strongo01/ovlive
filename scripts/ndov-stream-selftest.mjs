@@ -25,6 +25,25 @@ const l014Correlation = correlateKv17MutationsToKv78Rows(l014Rows, [{
 }]);
 assert.equal(l014Correlation[0].matchedKv78StopCount, 1);
 
+// A GVB tram uses the exact same neutral KV78 parser and exact trip-cancellation path.
+const gvbTramPayload = header.replace(
+  "CXX|2026-10-11|U011|7004|0|14|51111531|2947354|",
+  "GVB|2026-10-11|24|56057|0|14|08001|3107751|"
+);
+const gvbTramRows = parseKv78Payload(gvbTramPayload, "/GOVI/KV8passtimes/GVB");
+assert.equal(gvbTramRows.length, 1);
+assert.equal(gvbTramRows[0].dataOwnerCode, "GVB");
+assert.equal(gvbTramRows[0].linePlanningNumber, "24");
+assert.equal(gvbTramRows[0].journeyNumber, "56057");
+assert.equal(gvbTramRows[0].identity, "GVB|2026-10-11|3107751|24|56057|0");
+const gvbTramCorrelation = correlateKv17MutationsToKv78Rows(gvbTramRows, [{
+  dataOwnerCode: "GVB", operationDate: "2026-10-11", linePlanningNumber: "24",
+  journeyNumber: "56057", reinforcementNumber: "0", eventType: "CANCEL",
+  timestamp: "2026-10-11T11:05:13+02:00", allJourneysOfLine: false, allLines: false,
+}]);
+assert.equal(gvbTramCorrelation.length, 1);
+assert.equal(gvbTramCorrelation[0].matchedKv78StopCount, 1);
+
 const hubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
 assert.match(hubSource, /function ndovCollectionWindow/);
 assert.match(hubSource, /AUTO_ACTIVE_START_UTC_HOUR = 4/);
@@ -133,7 +152,8 @@ assert.ok(makeReadyFrame(1).length > 0);
 assert.ok(makeSubscribeFrame('/GOVI/KV8passtimes/', 1).length > 0);
 
 console.log('PASS: KV78 table parser reads route/stop identity and delay');
-console.log('PASS: KV78 capture includes non-sample lines such as CXX L014 for exact KV17 correlation');
+console.log('PASS: KV78 capture includes non-sample bus lines for exact KV17 correlation');
+console.log('PASS: GVB tram KV78 parsing and exact cancellation correlation');
 console.log('PASS: namespaced BISON XML parser reads punctuality and coordinates');
 console.log('PASS: KV17 parser identifies cancellations, recoveries, and all-line-trip mutations');
 console.log('PASS: KV17 CANCEL matches KV78 only by exact owner/date/line/journey/reinforcement');
