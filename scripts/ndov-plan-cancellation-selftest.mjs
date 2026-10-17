@@ -17,8 +17,12 @@ assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
 assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 7,
   'snapshot, mutation, event, KV78 snapshot/exact-row/vehicle-row, and on-demand identity diagnostic reads must all use the shared collector object');
-assert.match(planCancellationSource, /status\?stream=bison&identityDiagnostics=1/,
-  'no-match diagnostics must include the targeted current CXX journey identities');
+assert.match(planCancellationSource, /target\.searchParams\.set\("stream", "bison"\)/,
+  'BISON identity diagnostics must select the shared BISON stream');
+assert.match(planCancellationSource, /target\.searchParams\.set\("identityDiagnostics", "1"\)/,
+  'BISON identity diagnostics must explicitly enable the targeted identity scan');
+assert.match(planCancellationSource, /target\.searchParams\.append\("identity", identity\)/,
+  'BISON identity diagnostics must query the targeted current journey identities');
 
 const mutationFailureAt = planCancellationSource.indexOf('status: "mutation_lookup_unavailable"');
 const mutationFailureStart = planCancellationSource.lastIndexOf("plan.ndovRealtimeMeta = {", mutationFailureAt);
