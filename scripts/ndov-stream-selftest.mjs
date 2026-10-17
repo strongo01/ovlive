@@ -98,7 +98,7 @@ assert.match(hubSource, /const FRESH_ROW_MS = 180 \* 1000/);
 assert.match(hubSource, /const ROW_RETENTION_MS = FRESH_ROW_MS/);
 assert.match(hubSource, /const KV78_ROW_PRUNE_INTERVAL_MS = 30 \* 1000/);
 assert.match(hubSource, /const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180/);
-assert.match(hubSource, /const KV78_STOP_TIME_FUTURE_RETENTION_SECONDS = 4 \\* 60 \\* 60/);
+assert.ok(hubSource.includes('const KV78_STOP_TIME_FUTURE_RETENTION_SECONDS = 4 * 60 * 60;'));
 assert.match(hubSource, /kv78RowScheduleInfo\(/);
 assert.match(hubSource, /selectKv78RowEvictionKeys\(/);
 assert.match(hubSource, /kv78RowCacheKey\(row\)/);
