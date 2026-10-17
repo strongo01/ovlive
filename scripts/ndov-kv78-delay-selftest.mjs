@@ -105,18 +105,68 @@ const vehicleTripRows = [
     userStopOrderNumber: '20', userStopCode: 'WRONG-TIME',
   }),
 ];
+
+const plusClockSeconds = (clock, seconds) => {
+  const parts = clock.split(":").map(Number);
+  const total = parts[0] * 3600 + parts[1] * 60 + parts[2] + seconds;
+  return [Math.floor(total / 3600) % 24, Math.floor((total % 3600) / 60), total % 60]
+    .map((part) => String(part).padStart(2, "0")).join(":");
+};
+const makeModeRows = (owner, line, journey, departureDelaySeconds, arrivalDelaySeconds) => [
+  row({
+    dataOwnerCode: owner, operationDate: "2026-10-12", linePlanningNumber: line,
+    journeyNumber: journey, fortifyOrderNumber: "0",
+    targetDepartureTime: "09:03:00",
+    expectedDepartureTime: plusClockSeconds("09:03:00", departureDelaySeconds),
+    departureDelaySeconds, targetArrivalTime: null, expectedArrivalTime: null,
+    arrivalDelaySeconds: null, userStopOrderNumber: "1",
+    userStopCode: owner + "-" + line + "-START", vehicleNumber: null,
+  }),
+  row({
+    dataOwnerCode: owner, operationDate: "2026-10-12", linePlanningNumber: line,
+    journeyNumber: journey, fortifyOrderNumber: "0",
+    targetDepartureTime: null, expectedDepartureTime: null,
+    departureDelaySeconds: null, targetArrivalTime: "09:29:00",
+    expectedArrivalTime: plusClockSeconds("09:29:00", arrivalDelaySeconds),
+    arrivalDelaySeconds, userStopOrderNumber: "19",
+    userStopCode: owner + "-" + line + "-END", vehicleNumber: null,
+  }),
+];
+const alternateModeRows = {
+  "GVB|20261012|24|56057|0": makeModeRows("GVB", "24", "56057", 120, 180),
+  "GVB|20261012|52|66051|0": makeModeRows("GVB", "52", "66051", 60, 60),
+  "GVB|20261012|50|56059|0": makeModeRows("GVB", "50", "56059", 240, 300),
+};
 const mutation = {
   source: 'BISON', protocol: 'KV17', eventType: 'CANCEL',
   dataOwnerCode: 'EBS', operationDate: '2026-10-12',
   linePlanningNumber: '1314', journeyNumber: '1037', reinforcementNumber: '0',
   timestamp: now, reasonContent: 'test cancellation',
 };
+const tramMutation = {
+  source: "BISON", protocol: "KV17", eventType: "CANCEL",
+  dataOwnerCode: "GVB", operationDate: "2026-10-12",
+  linePlanningNumber: "24", journeyNumber: "56058", reinforcementNumber: "0",
+  timestamp: now, reasonContent: "test tram cancellation",
+};
+const metroMutation = {
+  source: "BISON", protocol: "KV17", eventType: "CANCEL",
+  dataOwnerCode: "GVB", operationDate: "2026-10-12",
+  linePlanningNumber: "50", journeyNumber: "56060", reinforcementNumber: "0",
+  timestamp: now, reasonContent: "test metro cancellation",
+};
+const mutations = [mutation, tramMutation, metroMutation];
 const bisonSnapshot = { state: 'complete', latestMessageAt: now };
 const kv78Snapshot = { state: 'complete', latestMessageAt: now };
 const manifest = { generatedAt: now, shards: ['382'] };
 const shard = {
   '382969674': 'EBS:1314:1037',
   '382969676': 'EBS:1314:1039',
+  '382969677': 'GVB:24:56057',
+  '382969678': 'GVB:24:56058',
+  '382969679': 'GVB:52:66051',
+  '382969680': 'GVB:50:56059',
+  '382969681': 'GVB:50:56060',
 };
 
 const env = {
@@ -153,22 +203,25 @@ const env = {
           if (url.pathname === '/status' && stream === 'bison') return Response.json(bisonSnapshot);
           if (url.pathname === '/status' && stream === 'kv78') return Response.json(kv78Snapshot);
           if (url.pathname === '/mutations' && stream === 'bison') {
-            return Response.json({ mutations: url.searchParams.getAll('identity').includes('EBS|20261012|1314|1037|0') ? [mutation] : [] });
+            const identities = new Set(url.searchParams.getAll("identity"));
+            const matching = mutations.filter((entry) => identities.has([
+              entry.dataOwnerCode, entry.operationDate.replace(/-/g, ""),
+              entry.linePlanningNumber, entry.journeyNumber, entry.reinforcementNumber,
+            ].join("|")));
+            return Response.json({ mutations: matching });
           }
           if (url.pathname === '/events' && stream === 'bison') {
             return Response.json({ events: [] });
           }
           if (url.pathname === '/rows' && stream === 'kv78') {
-            if (url.searchParams.get('identity') === 'EBS|20261012|1314|1039|0') {
-              return Response.json({ rows: tripRows });
-            }
+            const identity = url.searchParams.get("identity");
+            if (identity === "EBS|20261012|1314|1039|0") return Response.json({ rows: tripRows });
+            if (Object.hasOwn(alternateModeRows, identity)) return Response.json({ rows: alternateModeRows[identity] });
             if (
               url.searchParams.get('vehicleNumber') === '2281' &&
               url.searchParams.get('owner') === 'CXX' &&
               url.searchParams.get('date') === '20261012'
-            ) {
-              return Response.json({ rows: vehicleTripRows });
-            }
+            ) return Response.json({ rows: vehicleTripRows });
             return Response.json({ rows: [] });
           }
           return new Response('unexpected mock request', { status: 404 });
@@ -201,10 +254,18 @@ const plan = {
         vehiclePosition: { vehicleId: 'CXX:2281', observedAt: now, ageSeconds: 0 },
       },
     },
+    { mode: "TRAM", tripId: "20261012_09:03_nl-OpenOV_382969677", from: { departure: plannedDeparture }, to: { arrival: "2026-10-12T07:29:00Z" } },
+    { mode: "TRAM", tripId: "20261012_09:03_nl-OpenOV_382969678", from: { departure: plannedDeparture }, to: { arrival: "2026-10-12T07:29:00Z" } },
+    { mode: "SUBWAY", tripId: "20261012_09:03_nl-OpenOV_382969679", from: { departure: plannedDeparture }, to: { arrival: "2026-10-12T07:29:00Z" } },
+    { mode: "METRO", tripId: "20261012_09:03_nl-OpenOV_382969680", from: { departure: plannedDeparture }, to: { arrival: "2026-10-12T07:29:00Z" } },
+    { mode: "METRO", tripId: "20261012_09:03_nl-OpenOV_382969681", from: { departure: plannedDeparture }, to: { arrival: "2026-10-12T07:29:00Z" } },
   ] }],
 };
 await applyNdovCancellationsToPlan(plan, env);
-const [cancelledLeg, delayedLeg, vehicleFallbackLeg] = plan.itineraries[0].legs;
+const [
+  cancelledLeg, delayedLeg, vehicleFallbackLeg,
+  tramDelayedLeg, tramCancelledLeg, subwayDelayedLeg, metroDelayedLeg, metroCancelledLeg,
+] = plan.itineraries[0].legs;
 assert.equal(cancelledLeg.ndovRealtime.status, 'cancelled');
 assert.equal(cancelledLeg.cancelled, true);
 assert.equal(delayedLeg.ndovRealtime.status, 'kv78_delay');
@@ -220,7 +281,30 @@ assert.equal(vehicleFallbackLeg.ndovRealtime.observedVehicleId, 'CXX:2281');
 assert.ok(vehicleFallbackLeg.ndovRealtime.freshnessNote.includes('De exacte NDOV-ritidentiteit en PSA/CHB-haltebevestiging ontbreken'),
   'vehicle fallback must disclose that the exact NDOV trip ID was not crossmatched and stop assignment is unconfirmed');
 assert.equal(plan.ndovRealtimeMeta.kv78VehicleFallbackLegCount, 1);
-console.log('PASS: exact KV17 cancellation remains attached only to its trip');
-console.log('PASS: fresh KV78 delays attach to a separate exact trip identity');
-console.log('PASS: exact OpenOV vehicle + target stop/time recovers a direct KV78 stop delay without guessing an NDOV trip ID');
-console.log('All KV78 delay selftests passed.');
+assert.equal(tramDelayedLeg.ndovRealtime.status, "kv78_delay");
+assert.equal(tramDelayedLeg.ndovRealtime.departure.delaySeconds, 120);
+assert.equal(tramDelayedLeg.ndovRealtime.arrival.delaySeconds, 180);
+assert.equal(tramCancelledLeg.ndovRealtime.status, "cancelled");
+assert.equal(tramCancelledLeg.cancelled, true);
+assert.equal(subwayDelayedLeg.ndovRealtime.status, "kv78_delay");
+assert.equal(subwayDelayedLeg.ndovRealtime.departure.delaySeconds, 60);
+assert.equal(subwayDelayedLeg.ndovRealtime.arrival.delaySeconds, 60);
+assert.equal(metroDelayedLeg.ndovRealtime.status, "kv78_delay");
+assert.equal(metroDelayedLeg.ndovRealtime.departure.delaySeconds, 240);
+assert.equal(metroDelayedLeg.ndovRealtime.arrival.delaySeconds, 300);
+assert.equal(metroCancelledLeg.ndovRealtime.status, "cancelled");
+assert.equal(metroCancelledLeg.cancelled, true);
+assert.equal(plan.ndovRealtimeMeta.kv78DataLegCount, 5);
+assert.equal(plan.ndovRealtimeMeta.kv78DelayLegCount, 5);
+assert.equal(plan.ndovRealtimeMeta.coverageByMode.BUS.candidateLegCount, 3);
+assert.equal(plan.ndovRealtimeMeta.coverageByMode.TRAM.candidateLegCount, 2);
+assert.equal(plan.ndovRealtimeMeta.coverageByMode.TRAM.kv78DataLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.coverageByMode.TRAM.cancelledLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv78DataLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.coverageByMode.METRO.kv78DataLegCount, 1);
+assert.equal(plan.ndovRealtimeMeta.coverageByMode.METRO.cancelledLegCount, 1);
+console.log("PASS: exact KV17 cancellations attach only to their own bus/tram/metro trip");
+console.log("PASS: KV78 departure/arrival delays are tested for BUS/TRAM/SUBWAY/METRO");
+console.log("PASS: same planned time cannot cause another operator/trip's delay to be copied");
+console.log("PASS: per-mode realtime coverage counters report data separately");
+console.log("All bus/tram/metro KV78 integration selftests passed.");
