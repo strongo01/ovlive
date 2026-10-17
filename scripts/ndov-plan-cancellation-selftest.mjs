@@ -23,6 +23,10 @@ assert.match(planCancellationSource, /target\.searchParams\.set\("identityDiagno
   'BISON identity diagnostics must explicitly enable the targeted identity scan');
 assert.match(planCancellationSource, /target\.searchParams\.append\("identity", identity\)/,
   'BISON identity diagnostics must query the targeted current journey identities');
+assert.match(planCancellationSource, /kv78CollectorDiagnostics/,
+  'targeted plan diagnostics must expose the KV78 collection state without opening the protected status endpoint');
+assert.match(planCancellationSource, /lastNonemptyPasstimeAt/,
+  'targeted plan diagnostics must distinguish fresh transport messages from fresh parsed KV78 rows');
 
 const mutationFailureAt = planCancellationSource.indexOf('status: "mutation_lookup_unavailable"');
 const mutationFailureStart = planCancellationSource.lastIndexOf("plan.ndovRealtimeMeta = {", mutationFailureAt);
