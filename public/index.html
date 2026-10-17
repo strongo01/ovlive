@@ -1585,14 +1585,68 @@ q.set('pedestrianSpeed', '1.5');
 
     q.set('numItineraries', '5');
 
-    const data = await api('/api/plan?' + q);
-    window.__ovliveLastTransitousPlan = data;
-    window.__ovliveLastTransitousPlanAt = new Date().toISOString();
-    const journeys = Array.isArray(data.itineraries)
+    let data = await api('/api/plan?' + q);
+    let journeys = Array.isArray(data.itineraries)
       ? data.itineraries
       : Array.isArray(data.journeys)
         ? data.journeys
         : [];
+    let trainSupplementAdded = false;
+
+    const railModeNames = new Set([
+      'RAIL', 'REGIONAL_RAIL', 'LONG_DISTANCE', 'HIGH_SPEED_RAIL',
+      'HIGHSPEED_RAIL', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL',
+      'SUBURBAN', 'TRAIN'
+    ]);
+    const containsTrainJourney = list => list.some(journey => {
+      const legs = Array.isArray(journey.legs) ? journey.legs
+        : Array.isArray(journey.transitLegs) ? journey.transitLegs : [];
+      return legs.some(leg => railModeNames.has(String(leg.mode || '').toUpperCase()));
+    });
+
+    // Transitous returns only its first five mixed-mode options. If buses
+    // crowd every train out, fetch a small rail-only supplement in a separate
+    // Worker request so it has its own subrequest budget and can be shown too.
+    if (selectedModes.includes('train') &&
+        selectedModes.some(mode => mode !== 'train') &&
+        !containsTrainJourney(journeys)) {
+      try {
+        const railQuery = new URLSearchParams(q);
+        railQuery.set('transitModes', modeEnumByChoice.train.join(','));
+        railQuery.set('numItineraries', '3');
+        const railData = await api('/api/plan?' + railQuery);
+        const railJourneys = Array.isArray(railData.itineraries)
+          ? railData.itineraries
+          : Array.isArray(railData.journeys)
+            ? railData.journeys
+            : [];
+
+        if (railJourneys.length > 0) {
+          journeys = [...railJourneys, ...journeys];
+          data = { ...data, itineraries: journeys };
+          if (Number(railData?.nsRealtimeMeta?.candidateLegCount ?? 0) > 0) {
+            data.nsRealtimeMeta = railData.nsRealtimeMeta;
+          }
+          const alertRows = [
+            ...(Array.isArray(data.openovAlerts) ? data.openovAlerts : []),
+            ...(Array.isArray(railData.openovAlerts) ? railData.openovAlerts : [])
+          ];
+          const alertsById = new Map();
+          for (const alert of alertRows) {
+            const key = String(alert?.id ?? alert?.entityId ?? alert?.header ?? JSON.stringify(alert));
+            if (!alertsById.has(key)) alertsById.set(key, alert);
+          }
+          data.openovAlerts = [...alertsById.values()];
+          trainSupplementAdded = true;
+        }
+      } catch (error) {
+        console.warn('[OVLIVE_TRAIN_SUPPLEMENT] Geen aparte treinopties opgehaald.',
+          error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    window.__ovliveLastTransitousPlan = data;
+    window.__ovliveLastTransitousPlanAt = new Date().toISOString();
 
     const meta = data.openovRealtimeMeta;
     const nsMeta = data.nsRealtimeMeta;
@@ -1629,6 +1683,10 @@ q.set('pedestrianSpeed', '1.5');
       $('planStatus').textContent =
         `Plannerantwoord ontvangen · ${journeys.length} opties. ` +
         'Geen realtime-overzicht ontvangen.' + nsSummary;
+    }
+    if (trainSupplementAdded) {
+      $('planStatus').textContent +=
+        ' Treinalternatieven apart opgehaald en vooraan getoond, omdat de eerste gemengde resultaten geen trein bevatten.';
     }
 
     const feedInfo = meta?.feeds
