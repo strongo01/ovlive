@@ -10,8 +10,8 @@ assert.deepEqual(
   'crosswalk shard budgets deduplicate values and preserve first-in-order priorities',
 );
 assert.deepEqual(selectCrosswalkShardNumbers([4, 3], 0), []);
-assert.match(planCancellationSource, /MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 6/);
-assert.match(planCancellationSource, /MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 8/);
+assert.match(planCancellationSource, /MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 2/);
+assert.match(planCancellationSource, /MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 2/);
 assert.match(planCancellationSource, /AMSTERDAM_CLOCK_FORMATTER\.formatToParts/);
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
