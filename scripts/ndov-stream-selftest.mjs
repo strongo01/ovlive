@@ -69,6 +69,8 @@ assert.match(hubSource, /url\.pathname === '\/continuous\/enable'/);
 assert.match(hubSource, /url\.pathname === '\/continuous\/disable'/);
 assert.match(hubSource, /url\.pathname === '\/mutations'/);
 assert.match(hubSource, /url\.pathname === '\/rows'/);
+assert.match(hubSource, /const rawIdentities = url\.searchParams\.getAll\('identity'\)/,
+  'KV78 row reads must support batching exact trip identities into one Durable Object call');
 assert.match(hubSource, /url\.pathname === '\/events'/);
 assert.match(hubSource, /bisonIdentityDiagnostics/);
 assert.match(hubSource, /identityDiagnostics.*=== "1"/);
