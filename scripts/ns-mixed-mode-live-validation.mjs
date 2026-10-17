@@ -38,8 +38,8 @@ planUrl.searchParams.set("toPlace", toPlace);
  // rather than only the immediately departing bus options.
 const requestTime = new Date(Date.now() + 15 * 60_000).toISOString();
 planUrl.searchParams.set("time", requestTime);
-planUrl.searchParams.set("numItineraries", "3");
-planUrl.searchParams.set("maxItineraries", "3");
+planUrl.searchParams.set("numItineraries", "5");
+planUrl.searchParams.set("maxItineraries", "5");
 planUrl.searchParams.set("maxPreTransitTime", "900");
 planUrl.searchParams.set("maxPostTransitTime", "900");
 planUrl.searchParams.set("pedestrianSpeed", "1.5");
