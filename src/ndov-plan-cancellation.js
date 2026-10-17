@@ -1196,9 +1196,9 @@ function clockDistanceSeconds(a, b) {
  * only use a unique scheduled-time match within an exact trip identity. Ambiguous
  * matches intentionally return null; this is not advertised as exact stop-ID matching.
  */
-export function matchKv78RowByScheduleTime(rows, scheduledInstant, targetField, maxDistanceSeconds = 180, stopContext = null) {
+function getKv78RowsNearScheduledTime(rows, scheduledInstant, targetField, maxDistanceSeconds = 180) {
   const targetSeconds = wallClockSeconds(scheduledInstant);
-  if (targetSeconds === null) return null;
+  if (targetSeconds === null) return [];
   const candidates = [];
   for (const row of Array.isArray(rows) ? rows : []) {
     const rowSeconds = wallClockSeconds(row?.[targetField]);
@@ -1218,17 +1218,27 @@ export function matchKv78RowByScheduleTime(rows, scheduledInstant, targetField, 
         if (sourceAgeMs < -30_000 || sourceAgeMs > MAX_BISON_AGE_MS) continue;
       }
     }
-    const stopResolution = resolveKv78StopAssignment(row, stopContext);
+    candidates.push({ row, distanceSeconds });
+  }
+  candidates.sort((a, b) => a.distanceSeconds - b.distanceSeconds);
+  return candidates;
+}
+
+export function matchKv78RowByScheduleTime(rows, scheduledInstant, targetField, maxDistanceSeconds = 180, stopContext = null) {
+  const timeCandidates = getKv78RowsNearScheduledTime(
+    rows, scheduledInstant, targetField, maxDistanceSeconds
+  );
+  const candidates = [];
+  for (const timeCandidate of timeCandidates) {
+    const stopResolution = resolveKv78StopAssignment(timeCandidate.row, stopContext);
     if (!stopResolution.matched) continue;
     candidates.push({
-      row,
-      distanceSeconds,
+      ...timeCandidate,
       stopAssignment: stopResolution.assignment ?? null,
       stopAssignmentStatus: stopResolution.status ?? "time_only_unverified",
       matchMethod: stopResolution.matchMethod ?? "unique-scheduled-time-only (PSA mapping unavailable)",
     });
   }
-  candidates.sort((a, b) => a.distanceSeconds - b.distanceSeconds);
   if (!candidates.length) return null;
   if (candidates.length > 1 && candidates[1].distanceSeconds - candidates[0].distanceSeconds < 30) return null;
   return candidates[0];
@@ -1463,7 +1473,16 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     routeCrosswalkOutcomes: routeCrosswalkOutcomes.slice(0, 12),
   });
   try {
-    for (const item of candidates) {
+    // Resolve each route+time bucket together. The parsed route-cache stays
+    // deliberately small for Worker memory safety, so itinerary order could
+    // otherwise evict a route and fetch its large shards again later in the
+    // same request. Grouping equivalent cache keys avoids those duplicate reads.
+    const routeResolutionOrder = [...candidates].sort((a, b) => {
+      const keyFor = (item) =>
+        `${routeNumericId(item?.leg) ?? ""}:${openovTripStartBucket(item?.identity?.originalTripId) ?? ""}`;
+      return keyFor(a).localeCompare(keyFor(b));
+    });
+    for (const item of routeResolutionOrder) {
       const resolution = await resolveRealtimeTripForLeg(env, item);
       if (resolution.generatedAt) routeCrosswalkGeneratedAt = resolution.generatedAt;
       if (resolution.error) routeCrosswalkError = resolution.error;
@@ -1865,6 +1884,20 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           }`,
         ].filter(Boolean).join("; ");
       }
+      // PSA/CHB data is only needed for halterijen that could match a leg's
+      // planned departure/arrival window. Loading every stop along every trip
+      // can fan out to all 16 assignment shards and exhaust the Worker subrequest
+      // budget even though only the endpoint haltes are relevant to this plan.
+      const assignmentCandidateRows = rowResults.flatMap(({ item, rows }) => {
+        const scheduledDeparture = valueOf(item?.leg?.from, "departure") ??
+          valueOf(item?.leg, "startTime", "departureTime");
+        const scheduledArrival = valueOf(item?.leg?.to, "arrival") ??
+          valueOf(item?.leg, "endTime", "arrivalTime");
+        return [
+          ...getKv78RowsNearScheduledTime(rows, scheduledDeparture, "targetDepartureTime", 180),
+          ...getKv78RowsNearScheduledTime(rows, scheduledArrival, "targetArrivalTime", 180),
+        ].map((candidate) => candidate.row);
+      });
       const kv6AssignmentKeys = kv6PredictionItems.map((item) => {
         const event = item.kv6PredictionContext?.event;
         const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
@@ -1872,11 +1905,11 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         return owner && stopCode ? `${owner}|${stopCode}` : null;
       }).filter(Boolean);
       const assignmentKeys = [...new Set([
-        ...rowResults.flatMap((entry) => entry.rows.map((row) => {
+        ...assignmentCandidateRows.map((row) => {
           const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
           const stopCode = String(row?.userStopCode ?? "").trim();
           return owner && stopCode ? `${owner}|${stopCode}` : null;
-        }).filter(Boolean)),
+        }).filter(Boolean),
         ...kv6AssignmentKeys,
       ])];
       try {
