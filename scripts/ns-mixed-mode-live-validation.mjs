@@ -168,19 +168,50 @@ const summary = {
     stationListError: nsMeta.stationListError ?? null,
     message: nsMeta.message ?? null
   },
-  railResults: railLegs.map(leg => ({
-    mode: leg.mode ?? null,
-    routeId: leg.routeId ?? leg.route?.id ?? null,
-    tripId: leg.tripId ?? leg.trip?.id ?? null,
-    trainNumber: leg.nsRealtime?.trainNumber ?? null,
-    nsStatus: leg.nsRealtime?.status ?? null,
-    boardError: leg.nsRealtime?.boardError ?? null,
-    stationLookupSource: leg.nsRealtime?.stationLookupSource ?? null,
-    stationListError: leg.nsRealtime?.stationListError ?? null,
-    message: leg.nsRealtime?.message ?? null,
-    departureDelaySeconds: leg.nsRealtime?.departure?.delaySeconds ?? null,
-    arrivalDelaySeconds: leg.nsRealtime?.arrival?.delaySeconds ?? null
-  }))
+  railResults: railLegs.map(leg => {
+    const tripId = leg.tripId ?? leg.trip?.id ?? null;
+    const outcome = (plan?.ndovRealtimeMeta?.routeCrosswalkOutcomes ?? [])
+      .find(item => item?.tripId === tripId) ?? null;
+    const identity = (plan?.ndovRealtimeMeta?.nsTrainIdentities ?? [])
+      .find(item => item?.tripId === tripId) ?? null;
+    const stopSummary = stop => stop ? ({
+      name: stop.name ?? stop.stopName ?? stop.stationName ?? null,
+      stationCode: stop.stationCode ?? stop.station?.code ?? null,
+      uicCode: stop.uicCode ?? stop.UICCode ?? stop.station?.uicCode ?? null,
+      stopId: stop.stopId ?? stop.id ?? null,
+      scheduledDeparture: stop.scheduledDeparture ?? stop.departure ?? null,
+      scheduledArrival: stop.scheduledArrival ?? stop.arrival ?? null
+    }) : null;
+    return {
+      mode: leg.mode ?? null,
+      routeId: leg.routeId ?? leg.route?.id ?? null,
+      routeShortName: leg.routeShortName ?? leg.route?.shortName ?? null,
+      routeLongName: leg.routeLongName ?? leg.route?.longName ?? null,
+      tripShortName: leg.tripShortName ?? null,
+      headsign: leg.headsign ?? leg.direction ?? null,
+      tripId,
+      scheduledStartTime: leg.scheduledStartTime ?? leg.startTime ?? null,
+      scheduledEndTime: leg.scheduledEndTime ?? leg.endTime ?? null,
+      from: stopSummary(leg.from),
+      to: stopSummary(leg.to),
+      crosswalk: outcome ? {
+        source: outcome.source ?? null,
+        reason: outcome.reason ?? null,
+        realtimeTripId: outcome.realtimeTripId ?? null,
+        parsedIdentity: outcome.parsedIdentity ?? null
+      } : null,
+      compactNsIdentity: identity,
+      trainNumber: leg.nsRealtime?.trainNumber ?? null,
+      nsStatus: leg.nsRealtime?.status ?? null,
+      matchMethod: leg.nsRealtime?.matchMethod ?? null,
+      boardError: leg.nsRealtime?.boardError ?? null,
+      stationLookupSource: leg.nsRealtime?.stationLookupSource ?? null,
+      stationListError: leg.nsRealtime?.stationListError ?? null,
+      message: leg.nsRealtime?.message ?? null,
+      departureDelaySeconds: leg.nsRealtime?.departure?.delaySeconds ?? null,
+      arrivalDelaySeconds: leg.nsRealtime?.arrival?.delaySeconds ?? null
+    };
+  })
 };
 console.log(JSON.stringify(summary, null, 2));
 
