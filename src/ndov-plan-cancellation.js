@@ -7,6 +7,16 @@ const CROSSWALK_ROOT = "/ndov-trip-crosswalk";
 const OPENOV_ROUTE_CROSSWALK_ROOT = "/ndov-openov-route-crosswalk";
 const ASSET_ORIGIN = "https://ovlive-assets.local";
 const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
+// Leave room for Transitous/OpenOV requests and route-shard reads on a Free Worker.
+const MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 6;
+const MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 8;
+const AMSTERDAM_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Amsterdam",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
 
 let manifestPromise = null;
 const shardCache = new Map();
@@ -43,6 +53,11 @@ export function setBoundedLruCacheValue(cache, key, value, maxEntries) {
     cache.delete(oldestKey);
   }
   return value;
+}
+
+export function selectCrosswalkShardNumbers(shardNumbers, maxShards) {
+  const limit = Number.isInteger(maxShards) ? Math.max(0, maxShards) : 0;
+  return [...new Set(Array.isArray(shardNumbers) ? shardNumbers : [])].slice(0, limit);
 }
 
 // Keep exact NS train identities separate from the bounded diagnostic list of
@@ -968,6 +983,18 @@ function stopAssignmentShardNumber(key, shardCount) {
 }
 
 async function getStopAssignmentIndex(env, keys = []) {
+  const validKeys = [...new Set((Array.isArray(keys) ? keys : [])
+    .filter((key) => typeof key === "string" && key.includes("|")))];
+  if (!validKeys.length) {
+    return {
+      assignments: Object.create(null),
+      requestedShardCount: 0,
+      loadedShardCount: 0,
+      partial: false,
+      generatedAt: null,
+    };
+  }
+
   if (!stopAssignmentManifestPromise) {
     stopAssignmentManifestPromise = readAssetJson(env, "ndov-stop-crosswalk/manifest.json").catch((error) => {
       stopAssignmentManifestPromise = null;
@@ -979,11 +1006,15 @@ async function getStopAssignmentIndex(env, keys = []) {
   if (!Number.isInteger(shardCount) || shardCount < 1 || shardCount > 256) {
     throw new Error("Ongeldige PSA/CHB crosswalk-manifest (shardCount).");
   }
-  const shardNumbers = [...new Set((Array.isArray(keys) ? keys : [])
-    .filter((key) => typeof key === "string" && key.includes("|"))
-    .map((key) => stopAssignmentShardNumber(key, shardCount)))];
+  const shardNumbers = [...new Set(validKeys.map((key) => stopAssignmentShardNumber(key, shardCount)))];
+  // The public plan endpoint shares its subrequest budget with route shards and live feeds.
+  // Unloaded assignment records remain explicitly unverified instead of exhausting the Worker.
+  const selectedShardNumbers = selectCrosswalkShardNumbers(
+    shardNumbers,
+    MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST
+  );
   const assignments = Object.create(null);
-  await Promise.all(shardNumbers.map(async (shardNumber) => {
+  await Promise.all(selectedShardNumbers.map(async (shardNumber) => {
     const cacheKey = String(shardNumber);
     let shardPromise = getLruCacheValue(stopAssignmentShardCache, cacheKey);
     if (!shardPromise) {
@@ -998,7 +1029,13 @@ async function getStopAssignmentIndex(env, keys = []) {
     const shard = await shardPromise;
     Object.assign(assignments, shard?.assignments ?? {});
   }));
-  return { ...manifest, assignments };
+  return {
+    ...manifest,
+    assignments,
+    requestedShardCount: shardNumbers.length,
+    loadedShardCount: selectedShardNumbers.length,
+    partial: selectedShardNumbers.length < shardNumbers.length,
+  };
 }
 
 function normalizeStopPlaceIdentity(value) {
@@ -1039,6 +1076,21 @@ function openovStopPlaceShardNumber(key, shardCount) {
 }
 
 async function getOpenovStopPlaceIndex(env, stopIds = []) {
+  const keys = [...new Set(
+    (Array.isArray(stopIds) ? stopIds : [])
+      .map(openovStopPlaceKey)
+      .filter(Boolean),
+  )];
+  if (!keys.length) {
+    return {
+      generatedAt: null,
+      stopPlaces: Object.create(null),
+      requestedShardCount: 0,
+      loadedShardCount: 0,
+      partial: false,
+    };
+  }
+
   if (!openovStopPlaceManifestPromise) {
     openovStopPlaceManifestPromise = readAssetJson(
       env,
@@ -1061,19 +1113,17 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
     throw new Error("Ongeldig OpenOV/CHB-stopcrosswalkmanifest.");
   }
 
-  const keys = [...new Set(
-    (Array.isArray(stopIds) ? stopIds : [])
-      .map(openovStopPlaceKey)
-      .filter(Boolean),
-  )];
-
   const shardNumbers = [...new Set(
     keys.map((key) => openovStopPlaceShardNumber(key, shardCount)),
   )];
-
+  // Unrelated stops do not justify more asset reads. Unloaded mappings stay unknown.
+  const selectedShardNumbers = selectCrosswalkShardNumbers(
+    shardNumbers,
+    MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST
+  );
   const stopPlaces = Object.create(null);
 
-  await Promise.all(shardNumbers.map(async (shardNumber) => {
+  await Promise.all(selectedShardNumbers.map(async (shardNumber) => {
     const cacheKey = String(shardNumber);
     let shardPromise = getLruCacheValue(openovStopPlaceShardCache, cacheKey);
 
@@ -1095,7 +1145,13 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
     Object.assign(stopPlaces, shard?.stopPlaces ?? {});
   }));
 
-  return { ...manifest, stopPlaces };
+  return {
+    ...manifest,
+    stopPlaces,
+    requestedShardCount: shardNumbers.length,
+    loadedShardCount: selectedShardNumbers.length,
+    partial: selectedShardNumbers.length < shardNumbers.length,
+  };
 }
 
 function expectedStopWithOpenovStopPlaceCrosswalk(stop, index) {
@@ -1198,10 +1254,7 @@ function wallClockSeconds(value) {
   }
   const ms = timestampMs(text);
   if (ms === null) return null;
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit",
-    second: "2-digit", hourCycle: "h23",
-  }).formatToParts(new Date(ms));
+  const parts = AMSTERDAM_CLOCK_FORMATTER.formatToParts(new Date(ms));
   const part = (type) => Number(parts.find((p) => p.type === type)?.value);
   const h = part("hour"), min = part("minute"), sec = part("second");
   if (![h, min, sec].every(Number.isFinite)) return null;
@@ -1901,12 +1954,31 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         const kv6RouteStopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
           item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
         ));
+        const kv78EndpointStopIds = [];
+        for (const { item, rows } of rowResults) {
+          const scheduledDeparture = valueOf(item?.leg?.from, "departure") ??
+            valueOf(item?.leg, "startTime", "departureTime");
+          const scheduledArrival = valueOf(item?.leg?.to, "arrival") ??
+            valueOf(item?.leg, "endTime", "arrivalTime");
+          if (getKv78RowsNearScheduledTime(rows, scheduledDeparture, "targetDepartureTime", 180).length) {
+            kv78EndpointStopIds.push(item?.leg?.from?.stopId);
+          }
+          if (getKv78RowsNearScheduledTime(rows, scheduledArrival, "targetArrivalTime", 180).length) {
+            kv78EndpointStopIds.push(item?.leg?.to?.stopId);
+          }
+        }
         const plannedStopIds = [
-          ...rowResults.flatMap(({ item }) => [item?.leg?.from?.stopId, item?.leg?.to?.stopId]),
+          ...kv78EndpointStopIds,
           ...kv6RouteStopIds,
         ];
         openovStopPlaceIndexAttempted = true;
         openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, plannedStopIds);
+        if (openovStopPlaceIndex.partial) {
+          kv78Error = [
+            kv78Error,
+            `OpenOV/CHB-stopcrosswalk gedeeltelijk geladen (${openovStopPlaceIndex.loadedShardCount}/${openovStopPlaceIndex.requestedShardCount} shards); overige haltes blijven onbevestigd.`,
+          ].filter(Boolean).join("; ");
+        }
       } catch (error) {
         kv78Error = [
           kv78Error,
@@ -1936,18 +2008,27 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         return owner && stopCode ? `${owner}|${stopCode}` : null;
       }).filter(Boolean);
       const assignmentKeys = [...new Set([
+        ...kv6AssignmentKeys,
         ...assignmentCandidateRows.map((row) => {
           const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
           const stopCode = String(row?.userStopCode ?? "").trim();
           return owner && stopCode ? `${owner}|${stopCode}` : null;
         }).filter(Boolean),
-        ...kv6AssignmentKeys,
       ])];
       try {
         stopAssignmentIndexAttempted = true;
         stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
+        if (stopAssignmentIndex.partial) {
+          kv78Error = [
+            kv78Error,
+            `PSA/CHB-haltecrosswalk gedeeltelijk geladen (${stopAssignmentIndex.loadedShardCount}/${stopAssignmentIndex.requestedShardCount} shards); niet-geladen haltecodes blijven onbevestigd.`,
+          ].filter(Boolean).join("; ");
+        }
       } catch (error) {
-        kv78Error = `PSA/CHB-haltecrosswalk niet beschikbaar; tijdmatching blijft ongeverifieerd: ${error instanceof Error ? error.message : "onbekende fout"}`;
+        kv78Error = [
+          kv78Error,
+          `PSA/CHB-haltecrosswalk niet beschikbaar; tijdmatching blijft ongeverifieerd: ${error instanceof Error ? error.message : "onbekende fout"}`,
+        ].filter(Boolean).join("; ");
       }
 
       for (const { item, rows, vehicleLookup } of rowResults) {
