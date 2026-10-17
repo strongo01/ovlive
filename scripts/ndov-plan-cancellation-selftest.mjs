@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { applyNdovCancellationsToPlan, buildNsTrainIdentities, selectCrosswalkShardNumbers } from '../src/ndov-plan-cancellation.js';
 
 const planCancellationSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
+const ndovStreamHubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
 
 assert.deepEqual(
   selectCrosswalkShardNumbers([7, 2, 7, 4, 1, 9], 3),
@@ -27,6 +28,10 @@ assert.match(planCancellationSource, /kv78CollectorDiagnostics/,
   'targeted plan diagnostics must expose the KV78 collection state without opening the protected status endpoint');
 assert.match(planCancellationSource, /lastNonemptyPasstimeAt/,
   'targeted plan diagnostics must distinguish fresh transport messages from fresh parsed KV78 rows');
+assert.match(ndovStreamHubSource, /kv78PasstimeMessageCount/,
+  'collector must count KV78 passtime envelopes independently of generic stream messages');
+assert.match(ndovStreamHubSource, /kv78ParsedRowCount/,
+  'collector must count parsed KV78 stop rows independently of envelope activity');
 
 const mutationFailureAt = planCancellationSource.indexOf('status: "mutation_lookup_unavailable"');
 const mutationFailureStart = planCancellationSource.lastIndexOf("plan.ndovRealtimeMeta = {", mutationFailureAt);
