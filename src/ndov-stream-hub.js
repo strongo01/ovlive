@@ -12,7 +12,7 @@ import {
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
-import { eventsForIdentities, flattenCurrentMutations, isKv78RowScheduleRelevant, kv78RowCacheKey, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, upsertCurrentMutationState } from './ndov-live-state.mjs';
+import { amsterdamClockSeconds, eventsForIdentities, flattenCurrentMutations, isKv78RowScheduleRelevant, kv78RowCacheKey, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
 const OWNER_PREFIXES = ['/ARR/', '/RIG/', '/GVB/', '/CXX/', '/EBS/', '/QBUZZ/', '/KEOLIS/', '/IVU/', '/OPENOV/'];
@@ -1332,6 +1332,7 @@ export class NdovFeedHub extends DurableObject {
   pruneRows(stream) {
     const state = this.stateFor(stream);
     const now = Date.now();
+    const nowSeconds = amsterdamClockSeconds(now);
     const cutoff = now - ROW_RETENTION_MS;
     for (const [key, row] of state.rows.entries()) {
       const captured = Date.parse(row?.receivedAt ?? '');
@@ -1342,7 +1343,7 @@ export class NdovFeedHub extends DurableObject {
       }
       if (
         stream === 'kv78' &&
-        !isKv78RowScheduleRelevant(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS)
+        !isKv78RowScheduleRelevant(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS, nowSeconds)
       ) {
         state.rows.delete(key);
         state.rowCacheStats.schedulePrunedRows += 1;

@@ -81,7 +81,7 @@ assert.match(hubSource, /const FRESH_ROW_MS = 180 \* 1000/);
 assert.match(hubSource, /const ROW_RETENTION_MS = FRESH_ROW_MS/);
 assert.match(hubSource, /const KV78_ROW_PRUNE_INTERVAL_MS = 30 \* 1000/);
 assert.match(hubSource, /const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180/);
-assert.match(hubSource, /isKv78RowScheduleRelevant\(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS\)/);
+assert.match(hubSource, /isKv78RowScheduleRelevant\(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS, nowSeconds\)/);
 assert.match(hubSource, /kv78RowCacheKey\(row\)/);
 assert.match(hubSource, /rowCacheStats: \{ stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 \}/);
 assert.match(hubSource, /lastRowPruneAt: 0/);

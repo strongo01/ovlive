@@ -125,7 +125,7 @@ function kv78ClockSeconds(value) {
   return hour * 3600 + minute * 60 + second;
 }
 
-function amsterdamClockSeconds(nowMs) {
+export function amsterdamClockSeconds(nowMs) {
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/Amsterdam',
     hour: '2-digit',
@@ -165,8 +165,10 @@ export function kv78RowCacheKey(row) {
  * target event is still in the schedule matching window. Keep unknown times
  * conservatively so they can still support exact-trip cancellation correlation.
  */
-export function isKv78RowScheduleRelevant(row, nowMs = Date.now(), maxPastSeconds = 180) {
-  const nowSeconds = amsterdamClockSeconds(nowMs);
+export function isKv78RowScheduleRelevant(
+  row, nowMs = Date.now(), maxPastSeconds = 180,
+  nowSeconds = amsterdamClockSeconds(nowMs),
+) {
   if (nowSeconds === null) return true;
   const eventTimes = [
     kv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime),
