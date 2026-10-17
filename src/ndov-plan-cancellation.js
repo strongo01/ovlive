@@ -2106,6 +2106,7 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     kv78FeedAgeSeconds = kv78AgeMs === null ? null : Math.round(kv78AgeMs / 1000);
     if (includeIdentityDiagnostics) {
       const finiteCount = (value) => {
+        if (value === null || value === undefined || value === "") return null;
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
       };
