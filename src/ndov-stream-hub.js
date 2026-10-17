@@ -928,8 +928,12 @@ export class NdovFeedHub extends DurableObject {
             })()
           : null;
       const currentMutations = flattenCurrentMutations(state.mutations, 300);
+      // Persisted snapshots retain a small lastRows preview for local diagnostics.
+      // Strip it here so includeRows=0 truly omits every cached-row array.
+      const statusBase = { ...base };
+      delete statusBase.latestRows;
       return Response.json({
-        ...base,
+        ...statusBase,
         // The planner asks for a lightweight status snapshot. It retrieves
         // exact KV78 rows separately by trip identity, so serializing 5,000
         // unrelated cached rows into every plan request is needless memory/CPU.
