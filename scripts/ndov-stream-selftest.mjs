@@ -76,6 +76,8 @@ assert.match(hubSource, /matchingTripCount: trips\.length/);
 assert.match(hubSource, /byOwnerLine/);
 assert.doesNotMatch(hubSource, /owner !== "CXX"/);
 assert.doesNotMatch(hubSource, /"U005", "U011", "U073"/);
+assert.match(hubSource, /const OWNER_PREFIXES = \[[\s\S]*?'\/GVB\/'[\s\S]*?'\/RIG\/'[\s\S]*?\];/);
+assert.match(hubSource, /kv78: \{ port: 7817, name: 'KV78Turbo', prefixes: \['\/GOVI\/KV8passtimes\/'\] \}/);
 assert.match(hubSource, /KV6_EVENT_LIMIT = 30000/);
 assert.match(hubSource, /persistFullBisonEvents/);
 assert.doesNotMatch(hubSource, /TARGET_LINES/);

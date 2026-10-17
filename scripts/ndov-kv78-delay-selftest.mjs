@@ -133,7 +133,7 @@ const makeModeRows = (owner, line, journey, departureDelaySeconds, arrivalDelayS
   }),
 ];
 const alternateModeRows = {
-  "GVB|20261012|24|56057|0": makeModeRows("GVB", "24", "56057", 120, 180),
+  "RIG|20261012|3|56057|0": makeModeRows("RIG", "3", "56057", 120, 180),
   "GVB|20261012|52|66051|0": makeModeRows("GVB", "52", "66051", 60, 60),
   "GVB|20261012|50|56059|0": makeModeRows("GVB", "50", "56059", 240, 300),
 };
@@ -145,8 +145,8 @@ const mutation = {
 };
 const tramMutation = {
   source: "BISON", protocol: "KV17", eventType: "CANCEL",
-  dataOwnerCode: "GVB", operationDate: "2026-10-12",
-  linePlanningNumber: "24", journeyNumber: "56058", reinforcementNumber: "0",
+  dataOwnerCode: "RIG", operationDate: "2026-10-12",
+  linePlanningNumber: "3", journeyNumber: "56058", reinforcementNumber: "0",
   timestamp: now, reasonContent: "test tram cancellation",
 };
 const metroMutation = {
@@ -162,8 +162,8 @@ const manifest = { generatedAt: now, shards: ['382'] };
 const shard = {
   '382969674': 'EBS:1314:1037',
   '382969676': 'EBS:1314:1039',
-  '382969677': 'GVB:24:56057',
-  '382969678': 'GVB:24:56058',
+  '382969677': 'RIG:3:56057',
+  '382969678': 'RIG:3:56058',
   '382969679': 'GVB:52:66051',
   '382969680': 'GVB:50:56059',
   '382969681': 'GVB:50:56060',

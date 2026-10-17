@@ -164,16 +164,16 @@ const makeModeEvent = (owner, line, journey, punctualitySeconds, vehicleNumber) 
   punctualitySeconds, punctualityTimestamp: now, punctualityReceivedAt: now, receivedAt: now,
   vehicleNumber, blockCode: null, userStopCode: owner + "-STOP", passageSequenceNumber: "1",
 });
-const tramIdentity = "GVB|20261011|24|56057|0";
+const tramIdentity = "RIG|20261011|3|56057|0";
 const subwayIdentity = "GVB|20261011|52|66051|0";
 const metroIdentity = "GVB|20261011|50|56059|0";
 const modeEvents = [
   event,
-  makeModeEvent("GVB", "24", "56057", 180, "2201"),
+  makeModeEvent("RIG", "3", "56057", 180, "2201"),
   makeModeEvent("GVB", "52", "66051", -15, "3001"),
   makeModeEvent("GVB", "50", "56059", 45, "3002"),
 ];
-const tramPattern = { ...patterns[0], routeId: "120024", realtimeTripId: "GVB:24:56057" };
+const tramPattern = { ...patterns[0], routeId: "120024", realtimeTripId: "RIG:3:56057" };
 const subwayPattern = { ...patterns[0], routeId: "120052", realtimeTripId: "GVB:52:66051" };
 const metroPattern = { ...patterns[0], routeId: "120050", realtimeTripId: "GVB:50:56059" };
 const makeModeLeg = (mode, routeId, sourceTripId) => ({
