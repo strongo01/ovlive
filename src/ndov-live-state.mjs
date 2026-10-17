@@ -161,27 +161,71 @@ export function kv78RowCacheKey(row) {
 }
 
 /**
- * A stop record is only useful for upcoming-plan matching while at least one
- * target event is still in the schedule matching window. Keep unknown times
- * conservatively so they can still support exact-trip cancellation correlation.
+ * Evaluate schedule relevance against a single precomputed Amsterdam wall clock.
+ * KV78 target times are local clock values rather than absolute instants.
  */
-export function isKv78RowScheduleRelevant(
-  row, nowMs = Date.now(), maxPastSeconds = 180,
-  nowSeconds = amsterdamClockSeconds(nowMs),
+export function kv78RowScheduleInfo(
+  row, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
 ) {
-  if (nowSeconds === null) return true;
+  if (!Number.isFinite(nowSeconds)) {
+    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
+  }
   const eventTimes = [
     kv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime),
     kv78ClockSeconds(row?.targetArrivalTime ?? row?.TargetArrivalTime),
   ].filter((value) => value !== null);
-  if (!eventTimes.length) return true;
-  return eventTimes.some((targetSeconds) => {
+  if (!eventTimes.length) {
+    // Unknown times are kept until capacity pressure; they cannot be ranked
+    // confidently, so the cache-eviction helper will discard them first.
+    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
+  }
+  const deltas = eventTimes.map((targetSeconds) => {
     let delta = targetSeconds - nowSeconds;
     // Only wrap close to midnight; otherwise an old morning stop could appear future.
     if (delta > 64800) delta -= 86400;
     else if (delta < -64800) delta += 86400;
-    return delta >= -Math.max(0, maxPastSeconds);
+    return delta;
   });
+  const distanceSeconds = Math.min(...deltas.map((delta) => Math.abs(delta)));
+  return {
+    relevant: deltas.some((delta) =>
+      delta >= -Math.max(0, maxPastSeconds) &&
+      delta <= Math.max(0, maxFutureSeconds)
+    ),
+    hasScheduleTime: true,
+    distanceSeconds,
+  };
+}
+
+export function isKv78RowScheduleRelevant(
+  row, nowMs = Date.now(), maxPastSeconds = 180,
+  nowSeconds = amsterdamClockSeconds(nowMs), maxFutureSeconds = 4 * 60 * 60,
+) {
+  return kv78RowScheduleInfo(row, nowSeconds, maxPastSeconds, maxFutureSeconds).relevant;
+}
+
+/**
+ * If capacity is reached, prefer stop rows closest to the current time and
+ * evict unknown-time/farthest-future rows first. This is safer than FIFO, which
+ * can discard a just-received near-term row before an irrelevant later run.
+ */
+export function selectKv78RowEvictionKeys(
+  entries, limit, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
+) {
+  const allEntries = entries instanceof Map ? [...entries.entries()] : Array.from(entries ?? []);
+  const excess = Math.max(0, allEntries.length - Math.max(0, limit));
+  if (!excess) return [];
+  const ranked = allEntries.map(([key, row], index) => {
+    const info = kv78RowScheduleInfo(row, nowSeconds, maxPastSeconds, maxFutureSeconds);
+    return {
+      key,
+      index,
+      // Unknown scheduled times are least useful for stop-time predictions.
+      distanceSeconds: info.hasScheduleTime ? info.distanceSeconds : Number.POSITIVE_INFINITY,
+    };
+  });
+  ranked.sort((a, b) => b.distanceSeconds - a.distanceSeconds || a.index - b.index);
+  return ranked.slice(0, excess).map((item) => item.key);
 }
 
 export function isRecentIsoTime(value, now = Date.now(), maxAgeMs = 180_000) {

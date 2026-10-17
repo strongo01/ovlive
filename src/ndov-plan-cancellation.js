@@ -955,6 +955,12 @@ function summarizeRealtimeIdentityDiagnostics(requestedIdentities, diagnostics, 
     storedRecordCount: stream === "kv78"
       ? (Number.isFinite(diagnostics?.cacheSize) ? diagnostics.cacheSize : null)
       : (Number.isFinite(diagnostics?.storedTripCount) ? diagnostics.storedTripCount : null),
+    cacheLimit: Number.isFinite(diagnostics?.cacheLimit) ? diagnostics.cacheLimit : null,
+    rowCacheStats: stream === "kv78" ? diagnostics?.rowCacheStats ?? null : undefined,
+    stopTimePastRetentionSeconds: stream === "kv78" && Number.isFinite(diagnostics?.stopTimePastRetentionSeconds)
+      ? diagnostics.stopTimePastRetentionSeconds : null,
+    stopTimeFutureRetentionSeconds: stream === "kv78" && Number.isFinite(diagnostics?.stopTimeFutureRetentionSeconds)
+      ? diagnostics.stopTimeFutureRetentionSeconds : null,
     currentDateRecordCount: Number.isFinite(diagnostics?.matchingRowCount)
       ? diagnostics.matchingRowCount
       : Number.isFinite(diagnostics?.matchingTripCount)

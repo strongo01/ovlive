@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
-import { isKv78RowScheduleRelevant, kv78RowCacheKey } from '../src/ndov-live-state.mjs';
+import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
 
 const header = String.raw`\GKV8turbo_passtimes|KV8turbo_passtimes|OpenOV|||UTF-8|0.1|2026-10-11T09:53:01+02:00|
 \TDATEDPASSTIME|DATEDPASSTIME|start object
@@ -28,7 +28,23 @@ const cacheNow = Date.parse('2026-10-17T12:00:00.000Z');
 assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '13:59:00' }, cacheNow), true);
 assert.equal(isKv78RowScheduleRelevant({ targetArrivalTime: '13:56:59' }, cacheNow), false);
 assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '14:05:00' }, cacheNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '18:01:00' }, cacheNow), false);
 assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: null, targetArrivalTime: null }, cacheNow), true);
+assert.equal(kv78RowScheduleInfo({ targetDepartureTime: '15:00:00' }, 14 * 3600).distanceSeconds, 3600);
+assert.deepEqual(
+  selectKv78RowEvictionKeys(new Map([
+    ['near', { targetDepartureTime: '14:01:00' }],
+    ['far', { targetDepartureTime: '17:30:00' }],
+  ]), 1, 14 * 3600),
+  ['far'],
+);
+assert.deepEqual(
+  selectKv78RowEvictionKeys(new Map([
+    ['untimed', {}],
+    ['near', { targetDepartureTime: '14:01:00' }],
+  ]), 1, 14 * 3600),
+  ['untimed'],
+);
 
 // Midnight must be interpreted conservatively as wall-clock schedule time.
 const midnightNow = Date.parse('2026-10-17T21:55:00.000Z'); // 23:55 Amsterdam
@@ -66,6 +82,7 @@ assert.equal(gvbTramCorrelation.length, 1);
 assert.equal(gvbTramCorrelation[0].matchedKv78StopCount, 1);
 
 const hubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
+const planSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
 assert.ok(
   hubSource.includes('!/^\\d{8}$/.test(date)'),
   'targeted realtime identity diagnostics must normalize YYYYMMDD dates correctly',
@@ -81,9 +98,13 @@ assert.match(hubSource, /const FRESH_ROW_MS = 180 \* 1000/);
 assert.match(hubSource, /const ROW_RETENTION_MS = FRESH_ROW_MS/);
 assert.match(hubSource, /const KV78_ROW_PRUNE_INTERVAL_MS = 30 \* 1000/);
 assert.match(hubSource, /const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180/);
-assert.match(hubSource, /isKv78RowScheduleRelevant\(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS, nowSeconds\)/);
+assert.match(hubSource, /const KV78_STOP_TIME_FUTURE_RETENTION_SECONDS = 4 \\* 60 \\* 60/);
+assert.match(hubSource, /kv78RowScheduleInfo\(/);
+assert.match(hubSource, /selectKv78RowEvictionKeys\(/);
 assert.match(hubSource, /kv78RowCacheKey\(row\)/);
 assert.match(hubSource, /rowCacheStats: \{ stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 \}/);
+assert.ok(planSource.includes('rowCacheStats: stream === "kv78" ? diagnostics?.rowCacheStats ?? null : undefined'));
+assert.match(planSource, /stopTimeFutureRetentionSeconds/);
 assert.match(hubSource, /lastRowPruneAt: 0/);
 assert.match(hubSource, /Date\.now\(\) - state\.lastRowPruneAt >= KV78_ROW_PRUNE_INTERVAL_MS/);
 assert.match(hubSource, /const AUTO_SESSION_SECONDS = 600/);

@@ -12,7 +12,7 @@ import {
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
-import { amsterdamClockSeconds, eventsForIdentities, flattenCurrentMutations, isKv78RowScheduleRelevant, kv78RowCacheKey, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, upsertCurrentMutationState } from './ndov-live-state.mjs';
+import { amsterdamClockSeconds, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
 const OWNER_PREFIXES = ['/ARR/', '/RIG/', '/GVB/', '/CXX/', '/EBS/', '/QBUZZ/', '/KEOLIS/', '/IVU/', '/OPENOV/'];
@@ -35,6 +35,9 @@ const KV78_ROW_PRUNE_INTERVAL_MS = 30 * 1000;
 // Match logic compares target stop times within +/- 180 seconds; older stop rows
 // cannot match any current/future itinerary and should not consume cache capacity.
 const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180;
+// Keep upcoming stop predictions up to four hours ahead; farther future rows
+// cannot serve immediate plans and otherwise crowd out trips starting sooner.
+const KV78_STOP_TIME_FUTURE_RETENTION_SECONDS = 4 * 60 * 60;
 // Near-continuous streaming; reconnect before the long-lived TCP/request ceiling.
 const AUTO_SESSION_SECONDS = 600;
 const AUTO_REST_MS = 5 * 1000;
@@ -853,6 +856,7 @@ export class NdovFeedHub extends DurableObject {
                 cacheLimit: KV78_ROW_LIMIT,
                 rowCacheStats: { ...state.rowCacheStats },
                 stopTimePastRetentionSeconds: KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+                stopTimeFutureRetentionSeconds: KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
                 matchingRowCount,
                 identityCount: trips.length,
                 byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.rowCount - a.rowCount).slice(0, 80),
@@ -1341,12 +1345,28 @@ export class NdovFeedHub extends DurableObject {
         if (stream === 'kv78') state.rowCacheStats.stalePrunedRows += 1;
         continue;
       }
-      if (
-        stream === 'kv78' &&
-        !isKv78RowScheduleRelevant(row, now, KV78_STOP_TIME_PAST_RETENTION_SECONDS, nowSeconds)
-      ) {
-        state.rows.delete(key);
-        state.rowCacheStats.schedulePrunedRows += 1;
+      if (stream === 'kv78') {
+        const scheduleInfo = kv78RowScheduleInfo(
+          row, nowSeconds,
+          KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+          KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
+        );
+        if (!scheduleInfo.relevant) {
+          state.rows.delete(key);
+          state.rowCacheStats.schedulePrunedRows += 1;
+        }
+      }
+    }
+    if (state.rows.size > KV78_ROW_LIMIT && stream === 'kv78') {
+      // Drop farthest/untimed stops first so recent and soon-departing journeys
+      // survive cache pressure, rather than relying on stream-message order.
+      const evictions = selectKv78RowEvictionKeys(
+        state.rows, KV78_ROW_LIMIT, nowSeconds,
+        KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+        KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
+      );
+      for (const key of evictions) {
+        if (state.rows.delete(key)) state.rowCacheStats.limitEvictedRows += 1;
       }
     }
     while (state.rows.size > KV78_ROW_LIMIT) {
