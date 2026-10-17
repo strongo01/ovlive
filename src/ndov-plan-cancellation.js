@@ -848,7 +848,8 @@ async function getCurrentKv78RowsByIdentities(env, identities) {
         row?.journeyNumber,
         row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? "0"
       );
-      if (rowsByIdentity.has(rowIdentity)) rowsByIdentity.get(rowIdentity).push(row);
+      const matchingRows = rowsByIdentity.get(rowIdentity);
+      if (matchingRows) matchingRows.push(row);
     }
   }
   return rowsByIdentity;
