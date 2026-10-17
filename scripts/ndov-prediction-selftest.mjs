@@ -41,6 +41,8 @@ const stopPlaceIndex = { stopPlaces: {
   const ids = getNdovPredictionStopIds(leg, pattern, event, 20);
   assert.ok(ids.includes("3924354"));
   assert.ok(ids.includes("3924355"));
+  assert.ok(!ids.includes("3924353"), "a stop 10 minutes away from the measured timestamp must not expand the lookup window");
+  assert.ok(!ids.includes("3924356"), "a stop 10 minutes away from the measured timestamp must not expand the lookup window");
   assert.ok(ids.length < pattern.stops.length, "crosswalk reads must be bounded to target and nearby timetable stops");
   const prediction = deriveNdovKv6Prediction({
     leg, pattern, event, assignmentIndex, stopPlaceIndex, operationDate: "20261012", nowMs,
