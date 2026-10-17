@@ -180,30 +180,46 @@ const makeModeLeg = (mode, routeId, sourceTripId) => ({
   ...leg, mode, routeId: "nl-OpenOV_" + routeId,
   tripId: "20261011_15:21_nl-OpenOV_" + sourceTripId,
 });
+const assetFetchPaths = [];
 const planEnv = {
   ASSETS: {
     async fetch(request) {
       const url = new URL(request.url);
+      assetFetchPaths.push(url.pathname);
       if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: [] });
       if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({
-        generatedAt: now, serviceCalendarDateCount: 0,
+        generatedAt: now, serviceCalendarDateCount: 1, serviceIdsEmbedded: false,
         routes: {
-          '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json'],
+          '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json', 'route-146903-t12-1.json'],
           '120024': ['route-120024-t12-0.json'],
           '120052': ['route-120052-t12-0.json'],
           '120050': ['route-120050-t12-0.json'],
         },
         routesByStartBucket: {
-          '146903': { '00': ['route-146903-t00-0.json'], '12': ['route-146903-t12-0.json'] },
+          '146903': { '00': ['route-146903-t00-0.json'], '12': ['route-146903-t12-0.json', 'route-146903-t12-1.json'] },
           '120024': { '12': ['route-120024-t12-0.json'] },
           '120052': { '12': ['route-120052-t12-0.json'] },
           '120050': { '12': ['route-120050-t12-0.json'] },
         },
       });
+      if (url.pathname === '/ndov-openov-route-crosswalk/service-calendar.json') {
+        return Response.json({ '20261011': ['TEST-SERVICE'] });
+      }
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t00-0.json') {
         return new Response('A different start-time bucket must not be loaded.', { status: 500 });
       }
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t12-0.json') return Response.json(patterns);
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t12-1.json') {
+        return Response.json([{ ...patterns[0], headsign: 'This shard must not match', realtimeTripId: 'CXX:U073:unmatched' }]);
+      }
+      if (url.pathname.endsWith('-services.json')) {
+        const routeShard = url.pathname.split('/').pop().replace(/-services\.json$/i, '.json');
+        if (routeShard === 'route-146903-t12-0.json') return Response.json([['TEST-SERVICE']]);
+        if (routeShard === 'route-146903-t12-1.json') return Response.json([['INACTIVE-SERVICE']]);
+        if (routeShard === 'route-120024-t12-0.json') return Response.json([['TEST-SERVICE']]);
+        if (routeShard === 'route-120052-t12-0.json') return Response.json([['TEST-SERVICE']]);
+        if (routeShard === 'route-120050-t12-0.json') return Response.json([['TEST-SERVICE']]);
+      }
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120024-t12-0.json') return Response.json([tramPattern]);
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120052-t12-0.json') return Response.json([subwayPattern]);
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120050-t12-0.json') return Response.json([metroPattern]);
@@ -255,5 +271,12 @@ assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.BUS.kv6MatchedLegCount
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.TRAM.kv6MatchedLegCount, 1);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv6MatchedLegCount, 1);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.METRO.kv6MatchedLegCount, 1);
+assert.ok(assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t12-0-services.json'),
+  'the exact matching route shard must have its service IDs checked');
+assert.ok(!assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t12-1-services.json'),
+  'a route shard with no exact route/time/stop candidate must not fetch its sidecar');
+assert.ok(!assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t00-0-services.json'),
+  'a different start-time bucket must not fetch its sidecar');
+console.log("PASS: route/time/stop matching fetches service sidecars only for exact candidate shards");
 console.log("PASS: exact route/time/stop crossmatch attaches fresh KV6 to BUS/TRAM/SUBWAY/METRO");
 console.log("PASS: per-mode coverage counters preserve each operator and exact trip identity");

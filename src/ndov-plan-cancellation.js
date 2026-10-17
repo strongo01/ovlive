@@ -22,6 +22,8 @@ const MAX_OPENOV_ROUTE_CACHE_ENTRIES = 2;
 const MAX_TRIP_CROSSWALK_SHARD_CACHE_ENTRIES = 4;
 const MAX_STOP_ASSIGNMENT_SHARD_CACHE_ENTRIES = 4;
 const MAX_OPENOV_STOP_PLACE_SHARD_CACHE_ENTRIES = 4;
+const MAX_OPENOV_SERVICE_SIDECAR_CACHE_ENTRIES = 8;
+const openovServiceSidecarCache = new Map();
 
 export function getLruCacheValue(cache, key) {
   if (!cache.has(key)) return undefined;
@@ -261,21 +263,15 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
           Number(manifest?.serviceCalendarDateCount ?? 0) > 0 &&
           manifest?.serviceIdsEmbedded !== true
         ) {
-          const servicesName = name.replace(/\.json$/i, "-services.json");
-          const serviceRows = await readAssetJson(
-            env,
-            OPENOV_ROUTE_CROSSWALK_ROOT + "/routes/" + servicesName
-          );
-          if (!Array.isArray(serviceRows) || serviceRows.length !== rows.length) {
-            throw new Error(
-              "OpenOV-service-sidecar " + servicesName + " ontbreekt of is niet uitgelijnd."
-            );
-          }
+          // The route shard is needed to find a timetable candidate, but its
+          // aligned service sidecar is needed only for patterns that actually
+          // match this trip. Loading every sidecar up front doubles the asset
+          // requests for large routes and can exceed Workers Free's 50 limit.
           all.push(...rows.map((row, index) => ({
             ...row,
-            serviceIds: Array.isArray(serviceRows[index])
-              ? serviceRows[index].map(String)
-              : [],
+            __ovliveServiceSidecar: name.replace(/\.json$/i, "-services.json"),
+            __ovliveServiceIndex: index,
+            __ovliveServiceRowCount: rows.length,
           })));
         } else {
           all.push(...rows);
@@ -298,6 +294,7 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
       patterns,
       generatedAt: manifest?.generatedAt ?? null,
       serviceCalendarDateCount: Number(manifest?.serviceCalendarDateCount ?? 0),
+      serviceIdsEmbedded: manifest?.serviceIdsEmbedded === true,
       error: null,
     };
   } catch (error) {
@@ -310,6 +307,74 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
     };
   }
 }
+
+async function getOpenovRouteServiceSidecar(env, filename) {
+  let promise = getLruCacheValue(openovServiceSidecarCache, filename);
+  if (!promise) {
+    promise = readAssetJson(
+      env,
+      OPENOV_ROUTE_CROSSWALK_ROOT + "/routes/" + filename
+    ).catch((error) => {
+      openovServiceSidecarCache.delete(filename);
+      throw error;
+    });
+    setBoundedLruCacheValue(
+      openovServiceSidecarCache,
+      filename,
+      promise,
+      MAX_OPENOV_SERVICE_SIDECAR_CACHE_ENTRIES
+    );
+  }
+  return promise;
+}
+
+async function hydrateOpenovPatternServiceIds(env, crosswalk, matchedPatterns) {
+  if (
+    crosswalk?.serviceIdsEmbedded === true ||
+    Number(crosswalk?.serviceCalendarDateCount ?? 0) <= 0
+  ) {
+    return;
+  }
+
+  const patterns = [...new Set(Array.isArray(matchedPatterns) ? matchedPatterns : [])]
+    .filter((pattern) => pattern && typeof pattern === "object");
+  const requestedFiles = [...new Set(patterns
+    .map((pattern) => String(pattern.__ovliveServiceSidecar ?? "").trim())
+    .filter(Boolean))];
+  if (!requestedFiles.length) return;
+
+  const sidecarEntries = await Promise.all(requestedFiles.map(async (filename) => {
+    const rows = await getOpenovRouteServiceSidecar(env, filename);
+    if (!Array.isArray(rows)) {
+      throw new Error("OpenOV-service-sidecar " + filename + " is geen JSON-array.");
+    }
+    return [filename, rows];
+  }));
+  const sidecars = new Map(sidecarEntries);
+
+  for (const pattern of patterns) {
+    const filename = String(pattern.__ovliveServiceSidecar ?? "").trim();
+    if (!filename) continue;
+    const rows = sidecars.get(filename);
+    const index = Number(pattern.__ovliveServiceIndex);
+    const expectedLength = Number(pattern.__ovliveServiceRowCount);
+    if (
+      !Array.isArray(rows) ||
+      rows.length !== expectedLength ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= rows.length
+    ) {
+      throw new Error(
+        "OpenOV-service-sidecar " + filename + " ontbreekt of is niet uitgelijnd."
+      );
+    }
+    pattern.serviceIds = Array.isArray(rows[index])
+      ? rows[index].map(String)
+      : [];
+  }
+}
+
 function stopTimeValue(stop, kind) {
   if (!stop) return null;
   if (kind === "departure") return valueOf(stop, "departureTime", "departure", "arrivalTime", "arrival");
@@ -432,6 +497,7 @@ export function matchOpenovRoutePattern(leg, patterns, activeServiceIds = null) 
         reason: "exact_openov_trip_id_match",
         candidateCount: exactMatches.length,
         pattern: exactMatches[0],
+        candidatePatterns: matches,
       };
     }
   }
@@ -479,9 +545,16 @@ export function matchOpenovRoutePattern(leg, patterns, activeServiceIds = null) 
       candidateCount: matches.length,
       candidateRealtimeTripIds: ids,
       candidatePatternDetails,
+      candidatePatterns: matches,
     };
   }
-  return { realtimeTripId: ids[0], reason: "exact_route_time_stop_match", candidateCount: matches.length, pattern: matches[0] };
+  return {
+    realtimeTripId: ids[0],
+    reason: "exact_route_time_stop_match",
+    candidateCount: matches.length,
+    pattern: matches[0],
+    candidatePatterns: matches,
+  };
 }
 
 async function resolveRealtimeTripForLeg(env, item) {
@@ -491,8 +564,20 @@ async function resolveRealtimeTripForLeg(env, item) {
     if (crosswalk.indexedRoute) {
       if (crosswalk.error) return { parsed: null, source: "openov-route-crosswalk", generatedAt: crosswalk.generatedAt, error: crosswalk.error, indexedRoute: true };
       let activeServiceIds = null;
+      let match = matchOpenovRoutePattern(item.leg, crosswalk.patterns);
+      const preliminaryCandidates = Array.isArray(match.candidatePatterns)
+        ? match.candidatePatterns
+        : match.pattern
+          ? [match.pattern]
+          : [];
 
-      if (Number(crosswalk.serviceCalendarDateCount ?? 0) > 0) {
+      // Most route shards contain hundreds of patterns. Do not fetch their
+      // aligned service-ID sidecars wholesale: hydrate only the patterns that
+      // already match this trip's exact route, times and stop sequence.
+      if (
+        Number(crosswalk.serviceCalendarDateCount ?? 0) > 0 &&
+        preliminaryCandidates.length > 0
+      ) {
         const serviceDate = String(item?.identity?.serviceDate ?? "")
           .replace(/\D/g, "")
           .slice(0, 8);
@@ -503,6 +588,24 @@ async function resolveRealtimeTripForLeg(env, item) {
             realtimeTripId: null,
             source: "openov-route-crossmatch",
             reason: "missing_service_date_for_calendar_filter",
+            generatedAt: crosswalk.generatedAt,
+            indexedRoute: true
+          };
+        }
+
+        try {
+          await hydrateOpenovPatternServiceIds(
+            env,
+            crosswalk,
+            preliminaryCandidates
+          );
+        } catch (error) {
+          return {
+            parsed: null,
+            realtimeTripId: null,
+            source: "openov-route-crossmatch",
+            reason: "service_sidecar_unavailable",
+            error: error instanceof Error ? error.message : String(error),
             generatedAt: crosswalk.generatedAt,
             indexedRoute: true
           };
@@ -536,13 +639,12 @@ async function resolveRealtimeTripForLeg(env, item) {
         }
 
         activeServiceIds = new Set(activeForDate.map((id) => String(id)));
+        match = matchOpenovRoutePattern(
+          item.leg,
+          crosswalk.patterns,
+          activeServiceIds
+        );
       }
-
-      const match = matchOpenovRoutePattern(
-        item.leg,
-        crosswalk.patterns,
-        activeServiceIds
-      );
 
       // If the full route pattern is ambiguous, use the exact original
       // Transitous/OpenOV trip-ID crosswalk only as a validated tie-breaker.
