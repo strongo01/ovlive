@@ -7,6 +7,18 @@ const CROSSWALK_ROOT = "/ndov-trip-crosswalk";
 const OPENOV_ROUTE_CROSSWALK_ROOT = "/ndov-openov-route-crosswalk";
 const ASSET_ORIGIN = "https://ovlive-assets.local";
 const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
+// Leave room for Transitous/OpenOV requests and route-shard reads on a Free Worker.
+// Share the Free Worker subrequest budget with Transitous, realtime feeds, route
+// shards, service calendars and Durable Object calls. Partial maps stay unconfirmed.
+const MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 2;
+const MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 2;
+const AMSTERDAM_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Amsterdam",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
 
 let manifestPromise = null;
 const shardCache = new Map();
@@ -22,6 +34,8 @@ const MAX_OPENOV_ROUTE_CACHE_ENTRIES = 2;
 const MAX_TRIP_CROSSWALK_SHARD_CACHE_ENTRIES = 4;
 const MAX_STOP_ASSIGNMENT_SHARD_CACHE_ENTRIES = 4;
 const MAX_OPENOV_STOP_PLACE_SHARD_CACHE_ENTRIES = 4;
+const MAX_OPENOV_SERVICE_SIDECAR_CACHE_ENTRIES = 8;
+const openovServiceSidecarCache = new Map();
 
 export function getLruCacheValue(cache, key) {
   if (!cache.has(key)) return undefined;
@@ -41,6 +55,26 @@ export function setBoundedLruCacheValue(cache, key, value, maxEntries) {
     cache.delete(oldestKey);
   }
   return value;
+}
+
+export function selectCrosswalkShardNumbers(shardNumbers, maxShards) {
+  const limit = Number.isInteger(maxShards) ? Math.max(0, maxShards) : 0;
+  return [...new Set(Array.isArray(shardNumbers) ? shardNumbers : [])].slice(0, limit);
+}
+
+/**
+ * Reuse shard promises already in the isolate cache and spend the per-request
+ * asset-read budget only on missing shards. Without this, slicing the requested
+ * shard list always chooses the same first two shards and can starve the rest.
+ */
+export function selectCachedCrosswalkShardNumbers(shardNumbers, cache, maxNewShards) {
+  const unique = [...new Set(Array.isArray(shardNumbers) ? shardNumbers : [])];
+  const limit = Number.isInteger(maxNewShards) ? Math.max(0, maxNewShards) : 0;
+  const hasCache = cache && typeof cache.has === "function";
+  if (!hasCache) return unique.slice(0, limit);
+  const cached = unique.filter((number) => cache.has(String(number)));
+  const missing = unique.filter((number) => !cache.has(String(number)));
+  return [...cached, ...missing.slice(0, limit)];
 }
 
 // Keep exact NS train identities separate from the bounded diagnostic list of
@@ -261,21 +295,15 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
           Number(manifest?.serviceCalendarDateCount ?? 0) > 0 &&
           manifest?.serviceIdsEmbedded !== true
         ) {
-          const servicesName = name.replace(/\.json$/i, "-services.json");
-          const serviceRows = await readAssetJson(
-            env,
-            OPENOV_ROUTE_CROSSWALK_ROOT + "/routes/" + servicesName
-          );
-          if (!Array.isArray(serviceRows) || serviceRows.length !== rows.length) {
-            throw new Error(
-              "OpenOV-service-sidecar " + servicesName + " ontbreekt of is niet uitgelijnd."
-            );
-          }
+          // The route shard is needed to find a timetable candidate, but its
+          // aligned service sidecar is needed only for patterns that actually
+          // match this trip. Loading every sidecar up front doubles the asset
+          // requests for large routes and can exceed Workers Free's 50 limit.
           all.push(...rows.map((row, index) => ({
             ...row,
-            serviceIds: Array.isArray(serviceRows[index])
-              ? serviceRows[index].map(String)
-              : [],
+            __ovliveServiceSidecar: name.replace(/\.json$/i, "-services.json"),
+            __ovliveServiceIndex: index,
+            __ovliveServiceRowCount: rows.length,
           })));
         } else {
           all.push(...rows);
@@ -298,6 +326,7 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
       patterns,
       generatedAt: manifest?.generatedAt ?? null,
       serviceCalendarDateCount: Number(manifest?.serviceCalendarDateCount ?? 0),
+      serviceIdsEmbedded: manifest?.serviceIdsEmbedded === true,
       error: null,
     };
   } catch (error) {
@@ -310,6 +339,74 @@ async function getOpenovRouteCrosswalk(env, routeId, originalTripId = null) {
     };
   }
 }
+
+async function getOpenovRouteServiceSidecar(env, filename) {
+  let promise = getLruCacheValue(openovServiceSidecarCache, filename);
+  if (!promise) {
+    promise = readAssetJson(
+      env,
+      OPENOV_ROUTE_CROSSWALK_ROOT + "/routes/" + filename
+    ).catch((error) => {
+      openovServiceSidecarCache.delete(filename);
+      throw error;
+    });
+    setBoundedLruCacheValue(
+      openovServiceSidecarCache,
+      filename,
+      promise,
+      MAX_OPENOV_SERVICE_SIDECAR_CACHE_ENTRIES
+    );
+  }
+  return promise;
+}
+
+async function hydrateOpenovPatternServiceIds(env, crosswalk, matchedPatterns) {
+  if (
+    crosswalk?.serviceIdsEmbedded === true ||
+    Number(crosswalk?.serviceCalendarDateCount ?? 0) <= 0
+  ) {
+    return;
+  }
+
+  const patterns = [...new Set(Array.isArray(matchedPatterns) ? matchedPatterns : [])]
+    .filter((pattern) => pattern && typeof pattern === "object");
+  const requestedFiles = [...new Set(patterns
+    .map((pattern) => String(pattern.__ovliveServiceSidecar ?? "").trim())
+    .filter(Boolean))];
+  if (!requestedFiles.length) return;
+
+  const sidecarEntries = await Promise.all(requestedFiles.map(async (filename) => {
+    const rows = await getOpenovRouteServiceSidecar(env, filename);
+    if (!Array.isArray(rows)) {
+      throw new Error("OpenOV-service-sidecar " + filename + " is geen JSON-array.");
+    }
+    return [filename, rows];
+  }));
+  const sidecars = new Map(sidecarEntries);
+
+  for (const pattern of patterns) {
+    const filename = String(pattern.__ovliveServiceSidecar ?? "").trim();
+    if (!filename) continue;
+    const rows = sidecars.get(filename);
+    const index = Number(pattern.__ovliveServiceIndex);
+    const expectedLength = Number(pattern.__ovliveServiceRowCount);
+    if (
+      !Array.isArray(rows) ||
+      rows.length !== expectedLength ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= rows.length
+    ) {
+      throw new Error(
+        "OpenOV-service-sidecar " + filename + " ontbreekt of is niet uitgelijnd."
+      );
+    }
+    pattern.serviceIds = Array.isArray(rows[index])
+      ? rows[index].map(String)
+      : [];
+  }
+}
+
 function stopTimeValue(stop, kind) {
   if (!stop) return null;
   if (kind === "departure") return valueOf(stop, "departureTime", "departure", "arrivalTime", "arrival");
@@ -432,6 +529,7 @@ export function matchOpenovRoutePattern(leg, patterns, activeServiceIds = null) 
         reason: "exact_openov_trip_id_match",
         candidateCount: exactMatches.length,
         pattern: exactMatches[0],
+        candidatePatterns: matches,
       };
     }
   }
@@ -479,9 +577,16 @@ export function matchOpenovRoutePattern(leg, patterns, activeServiceIds = null) 
       candidateCount: matches.length,
       candidateRealtimeTripIds: ids,
       candidatePatternDetails,
+      candidatePatterns: matches,
     };
   }
-  return { realtimeTripId: ids[0], reason: "exact_route_time_stop_match", candidateCount: matches.length, pattern: matches[0] };
+  return {
+    realtimeTripId: ids[0],
+    reason: "exact_route_time_stop_match",
+    candidateCount: matches.length,
+    pattern: matches[0],
+    candidatePatterns: matches,
+  };
 }
 
 async function resolveRealtimeTripForLeg(env, item) {
@@ -491,8 +596,20 @@ async function resolveRealtimeTripForLeg(env, item) {
     if (crosswalk.indexedRoute) {
       if (crosswalk.error) return { parsed: null, source: "openov-route-crosswalk", generatedAt: crosswalk.generatedAt, error: crosswalk.error, indexedRoute: true };
       let activeServiceIds = null;
+      let match = matchOpenovRoutePattern(item.leg, crosswalk.patterns);
+      const preliminaryCandidates = Array.isArray(match.candidatePatterns)
+        ? match.candidatePatterns
+        : match.pattern
+          ? [match.pattern]
+          : [];
 
-      if (Number(crosswalk.serviceCalendarDateCount ?? 0) > 0) {
+      // Most route shards contain hundreds of patterns. Do not fetch their
+      // aligned service-ID sidecars wholesale: hydrate only the patterns that
+      // already match this trip's exact route, times and stop sequence.
+      if (
+        Number(crosswalk.serviceCalendarDateCount ?? 0) > 0 &&
+        preliminaryCandidates.length > 0
+      ) {
         const serviceDate = String(item?.identity?.serviceDate ?? "")
           .replace(/\D/g, "")
           .slice(0, 8);
@@ -503,6 +620,24 @@ async function resolveRealtimeTripForLeg(env, item) {
             realtimeTripId: null,
             source: "openov-route-crossmatch",
             reason: "missing_service_date_for_calendar_filter",
+            generatedAt: crosswalk.generatedAt,
+            indexedRoute: true
+          };
+        }
+
+        try {
+          await hydrateOpenovPatternServiceIds(
+            env,
+            crosswalk,
+            preliminaryCandidates
+          );
+        } catch (error) {
+          return {
+            parsed: null,
+            realtimeTripId: null,
+            source: "openov-route-crossmatch",
+            reason: "service_sidecar_unavailable",
+            error: error instanceof Error ? error.message : String(error),
             generatedAt: crosswalk.generatedAt,
             indexedRoute: true
           };
@@ -536,13 +671,12 @@ async function resolveRealtimeTripForLeg(env, item) {
         }
 
         activeServiceIds = new Set(activeForDate.map((id) => String(id)));
+        match = matchOpenovRoutePattern(
+          item.leg,
+          crosswalk.patterns,
+          activeServiceIds
+        );
       }
-
-      const match = matchOpenovRoutePattern(
-        item.leg,
-        crosswalk.patterns,
-        activeServiceIds
-      );
 
       // If the full route pattern is ambiguous, use the exact original
       // Transitous/OpenOV trip-ID crosswalk only as a validated tie-breaker.
@@ -675,14 +809,174 @@ async function getBisonSnapshot(env) {
   return snapshot;
 }
 
-async function getBisonIdentityDiagnostics(env) {
+async function getBisonIdentityDiagnostics(env, identities = []) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison&identityDiagnostics=1`);
+  const target = new URL(`${ASSET_ORIGIN}/status`);
+  target.searchParams.set("stream", "bison");
+  target.searchParams.set("identityDiagnostics", "1");
+  for (const identity of [...new Set(identities)].slice(0, 8)) target.searchParams.append("identity", identity);
+  const response = await stub.fetch(target.toString());
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `BISON-identiteitsdiagnose gaf HTTP ${response.status}.`);
   return snapshot.bisonIdentityDiagnostics ?? null;
+}
+
+
+function identityDiagnosticParts(value) {
+  const parts = String(value ?? "").split("|").map((part) => part.trim());
+  if (parts.length !== 5 || parts.some((part) => !part)) return null;
+  return {
+    identity: parts.join("|"),
+    owner: parts[0].toUpperCase(),
+    date: normalizeDate(parts[1]),
+    line: parts[2].toUpperCase(),
+    journey: parts[3],
+    reinforcement: parts[4] || "0",
+  };
+}
+
+function compactIdentityDiagnosticTrip(trip) {
+  return {
+    identity: String(trip?.identity ?? ""),
+    eventType: trip?.eventType ?? null,
+    receivedAt: trip?.receivedAt ?? null,
+    punctualityPresent: typeof trip?.punctualityPresent === "boolean"
+      ? trip.punctualityPresent
+      : undefined,
+    punctualityAgeSeconds: Number.isFinite(trip?.punctualityAgeSeconds)
+      ? trip.punctualityAgeSeconds
+      : undefined,
+    rowCount: Number.isFinite(trip?.rowCount) ? trip.rowCount : undefined,
+    uniqueStopCount: Number.isFinite(trip?.uniqueStopCount)
+      ? trip.uniqueStopCount
+      : undefined,
+    sampleStopCodes: Array.isArray(trip?.sampleStopCodes)
+      ? trip.sampleStopCodes.slice(0, 6)
+      : undefined,
+  };
+}
+
+/**
+ * Keep exact matching strict, but expose bounded near-identity samples when no
+ * exact NDOV match exists. This distinguishes missing feed records from an
+ * owner/line/journey/date/reinforcement crosswalk mismatch without changing
+ * cancellation or delay decisions.
+ */
+function summarizeRealtimeIdentityDiagnostics(requestedIdentities, diagnostics, stream) {
+  const uniqueIdentities = [...new Set(
+    (Array.isArray(requestedIdentities) ? requestedIdentities : [])
+      .map((identity) => String(identity ?? "").trim())
+      .filter(Boolean)
+  )];
+  const trips = Array.isArray(diagnostics?.trips) ? diagnostics.trips : [];
+  const parsedTrips = trips
+    .map((trip) => ({ trip, parts: identityDiagnosticParts(trip?.identity) }))
+    .filter((item) => item.parts);
+  const requestedParts = uniqueIdentities
+    .map((identity) => ({ identity, parts: identityDiagnosticParts(identity) }))
+    .filter((item) => item.parts);
+  const requestedOwners = new Set(requestedParts.map((item) => item.parts.owner));
+  const ownerLineEntries = Array.isArray(diagnostics?.byOwnerLine)
+    ? diagnostics.byOwnerLine
+    : [];
+  const relevantOwnerLineEntries = ownerLineEntries.filter((item) =>
+    requestedOwners.has(String(item?.owner ?? "").trim().toUpperCase())
+  );
+  const byOwnerLine = (relevantOwnerLineEntries.length
+    ? relevantOwnerLineEntries
+    : ownerLineEntries
+  ).slice(0, 12).map((item) => ({
+    owner: item?.owner ?? null,
+    line: item?.line ?? null,
+    tripCount: Number.isFinite(item?.tripCount) ? item.tripCount : null,
+    recordCount: Number.isFinite(item?.rowCount) ? item.rowCount : null,
+    punctualityCount: Number.isFinite(item?.punctualityCount)
+      ? item.punctualityCount
+      : undefined,
+  }));
+
+  const suppliedComparisons = new Map(
+    (Array.isArray(diagnostics?.requestedIdentityComparisons) ? diagnostics.requestedIdentityComparisons : [])
+      .map((comparison) => [String(comparison?.requestedIdentity ?? "").trim(), comparison])
+  );
+  const comparisons = requestedParts.slice(0, 8).map(({ identity, parts }) => {
+    const supplied = suppliedComparisons.get(identity);
+    if (supplied) {
+      return {
+        requestedIdentity: identity,
+        exactIdentityInReturnedSample: supplied.exactIdentityFound === true,
+        sameOwnerDateSampleCount: Number.isFinite(supplied.sameOwnerDateSampleCount) ? supplied.sameOwnerDateSampleCount : null,
+        sameOwnerDateLineSamples: (Array.isArray(supplied.sameOwnerDateLineSamples) ? supplied.sameOwnerDateLineSamples : []).slice(0, 5).map(compactIdentityDiagnosticTrip),
+        sameOwnerDateJourneySamples: (Array.isArray(supplied.sameOwnerDateJourneySamples) ? supplied.sameOwnerDateJourneySamples : []).slice(0, 5).map(compactIdentityDiagnosticTrip),
+        sameOwnerDateOtherSamples: (Array.isArray(supplied.sameOwnerDateOtherSamples) ? supplied.sameOwnerDateOtherSamples : []).slice(0, 3).map(compactIdentityDiagnosticTrip),
+      };
+    }
+    const sameOwnerDate = parsedTrips.filter(({ parts: sample }) =>
+      sample.owner === parts.owner && sample.date === parts.date
+    );
+    const sameOwnerDateLine = sameOwnerDate.filter(({ parts: sample }) =>
+      sample.line === parts.line
+    );
+    const sameOwnerDateJourney = sameOwnerDate.filter(({ parts: sample }) =>
+      sample.journey === parts.journey
+    );
+    return {
+      requestedIdentity: identity,
+      exactIdentityInReturnedSample: sameOwnerDate.some(({ parts: sample }) =>
+        sample.identity === identity
+      ),
+      sameOwnerDateSampleCount: sameOwnerDate.length,
+      sameOwnerDateLineSamples: sameOwnerDateLine.slice(0, 5)
+        .map(({ trip }) => compactIdentityDiagnosticTrip(trip)),
+      sameOwnerDateJourneySamples: sameOwnerDateJourney.slice(0, 5)
+        .map(({ trip }) => compactIdentityDiagnosticTrip(trip)),
+      sameOwnerDateOtherSamples: sameOwnerDate
+        .filter(({ parts: sample }) => sample.line !== parts.line && sample.journey !== parts.journey)
+        .slice(0, 3)
+        .map(({ trip }) => compactIdentityDiagnosticTrip(trip)),
+    };
+  });
+
+  const byLine = stream === "bison" && diagnostics?.byLine &&
+    typeof diagnostics.byLine === "object"
+    ? Object.entries(diagnostics.byLine).slice(0, 20).map(([line, tripCount]) => ({
+        line,
+        tripCount: Number.isFinite(tripCount) ? tripCount : null,
+      }))
+    : undefined;
+
+  return {
+    available: Array.isArray(diagnostics?.trips),
+    currentDate: diagnostics?.currentDate ?? null,
+    requestedIdentityCount: uniqueIdentities.length,
+    requestedIdentities: uniqueIdentities.slice(0, 8),
+    storedRecordCount: stream === "kv78"
+      ? (Number.isFinite(diagnostics?.cacheSize) ? diagnostics.cacheSize : null)
+      : (Number.isFinite(diagnostics?.storedTripCount) ? diagnostics.storedTripCount : null),
+    cacheLimit: Number.isFinite(diagnostics?.cacheLimit) ? diagnostics.cacheLimit : null,
+    rowCacheStats: stream === "kv78" ? diagnostics?.rowCacheStats ?? null : undefined,
+    stopTimePastRetentionSeconds: stream === "kv78" && Number.isFinite(diagnostics?.stopTimePastRetentionSeconds)
+      ? diagnostics.stopTimePastRetentionSeconds : null,
+    stopTimeFutureRetentionSeconds: stream === "kv78" && Number.isFinite(diagnostics?.stopTimeFutureRetentionSeconds)
+      ? diagnostics.stopTimeFutureRetentionSeconds : null,
+    currentDateRecordCount: Number.isFinite(diagnostics?.matchingRowCount)
+      ? diagnostics.matchingRowCount
+      : Number.isFinite(diagnostics?.matchingTripCount)
+        ? diagnostics.matchingTripCount
+        : null,
+    currentDateTripCount: Number.isFinite(diagnostics?.identityCount)
+      ? diagnostics.identityCount
+      : Number.isFinite(diagnostics?.matchingTripCount)
+        ? diagnostics.matchingTripCount
+        : null,
+    sampledTripCount: trips.length,
+    byOwnerLine,
+    byLine,
+    comparisons,
+    error: diagnostics?.error ?? null,
+  };
 }
 
 async function getCurrentBisonMutations(env, identities) {
@@ -705,28 +999,69 @@ async function getCurrentBisonMutations(env, identities) {
 }
 
 
-async function getKv78Snapshot(env) {
+async function getKv78Snapshot(env, identities = []) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=kv78&identityDiagnostics=1`);
+  const target = new URL(`${ASSET_ORIGIN}/status`);
+  target.searchParams.set("stream", "kv78");
+  // The planner only needs collector health and counts. Returning thousands of
+  // cached rows wastes Worker memory because exact rows are fetched separately
+  // by trip identity below.
+  target.searchParams.set("includeRows", "0");
+  const identityKeys = [...new Set(
+    (Array.isArray(identities) ? identities : [])
+      .map((identity) => String(identity ?? "").trim())
+      .filter(Boolean)
+  )].slice(0, 8);
+  // Full cross-cache identity diagnostics are expensive; opt in only for an
+  // explicit diagnostics request that actually supplied target identities.
+  if (identityKeys.length) {
+    target.searchParams.set("identityDiagnostics", "1");
+    for (const identity of identityKeys) target.searchParams.append("identity", identity);
+  }
+  const response = await stub.fetch(target.toString());
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `KV78-status gaf HTTP ${response.status}.`);
   return snapshot;
 }
 
-async function getCurrentKv78Rows(env, identity) {
-  if (!identity || !env?.NDOV_FEEDS) return [];
+async function getCurrentKv78RowsByIdentities(env, identities) {
+  const unique = [...new Set((Array.isArray(identities) ? identities : [])
+    .map((identity) => String(identity ?? "").trim())
+    .filter(Boolean))];
+  const rowsByIdentity = new Map(unique.map((identity) => [identity, []]));
+  if (!unique.length) return rowsByIdentity;
+  if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
+
   const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
   const stub = env.NDOV_FEEDS.get(id);
-  const url = new URL(`${ASSET_ORIGIN}/rows`);
-  url.searchParams.set("stream", "kv78");
-  url.searchParams.set("identity", identity);
-  const response = await stub.fetch(url.toString());
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error ?? `KV78-halterijen gaven HTTP ${response.status}.`);
-  if (!Array.isArray(data?.rows)) throw new Error("KV78 gaf geen lijst met halterijen terug.");
-  return data.rows;
+
+  // Multiple exact trip identities share one Durable Object call. The hub keeps
+  // the old 200-row cap per trip, avoiding repeated subrequests for every leg.
+  for (let offset = 0; offset < unique.length; offset += 50) {
+    const batch = unique.slice(offset, offset + 50);
+    const url = new URL(`${ASSET_ORIGIN}/rows`);
+    url.searchParams.set("stream", "kv78");
+    for (const identity of batch) url.searchParams.append("identity", identity);
+    const response = await stub.fetch(url.toString());
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error ?? `KV78-halterijen gaven HTTP ${response.status}.`);
+    if (!Array.isArray(data?.rows)) throw new Error("KV78 gaf geen lijst met halterijen terug.");
+
+    for (const row of data.rows) {
+      const rowIdentity = toIdentity(
+        row?.dataOwnerCode,
+        row?.operationDate,
+        row?.linePlanningNumber,
+        row?.journeyNumber,
+        row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? "0"
+      );
+      const matchingRows = rowsByIdentity.get(rowIdentity);
+      if (matchingRows) matchingRows.push(row);
+    }
+  }
+  return rowsByIdentity;
 }
 
 async function getCurrentKv78RowsByVehicle(env, lookup) {
@@ -842,6 +1177,18 @@ function stopAssignmentShardNumber(key, shardCount) {
 }
 
 async function getStopAssignmentIndex(env, keys = []) {
+  const validKeys = [...new Set((Array.isArray(keys) ? keys : [])
+    .filter((key) => typeof key === "string" && key.includes("|")))];
+  if (!validKeys.length) {
+    return {
+      assignments: Object.create(null),
+      requestedShardCount: 0,
+      loadedShardCount: 0,
+      partial: false,
+      generatedAt: null,
+    };
+  }
+
   if (!stopAssignmentManifestPromise) {
     stopAssignmentManifestPromise = readAssetJson(env, "ndov-stop-crosswalk/manifest.json").catch((error) => {
       stopAssignmentManifestPromise = null;
@@ -853,11 +1200,16 @@ async function getStopAssignmentIndex(env, keys = []) {
   if (!Number.isInteger(shardCount) || shardCount < 1 || shardCount > 256) {
     throw new Error("Ongeldige PSA/CHB crosswalk-manifest (shardCount).");
   }
-  const shardNumbers = [...new Set((Array.isArray(keys) ? keys : [])
-    .filter((key) => typeof key === "string" && key.includes("|"))
-    .map((key) => stopAssignmentShardNumber(key, shardCount)))];
+  const shardNumbers = [...new Set(validKeys.map((key) => stopAssignmentShardNumber(key, shardCount)))];
+  // The public plan endpoint shares its subrequest budget with route shards and live feeds.
+  // Unloaded assignment records remain explicitly unverified instead of exhausting the Worker.
+  const selectedShardNumbers = selectCachedCrosswalkShardNumbers(
+    shardNumbers,
+    stopAssignmentShardCache,
+    MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST
+  );
   const assignments = Object.create(null);
-  await Promise.all(shardNumbers.map(async (shardNumber) => {
+  await Promise.all(selectedShardNumbers.map(async (shardNumber) => {
     const cacheKey = String(shardNumber);
     let shardPromise = getLruCacheValue(stopAssignmentShardCache, cacheKey);
     if (!shardPromise) {
@@ -872,7 +1224,13 @@ async function getStopAssignmentIndex(env, keys = []) {
     const shard = await shardPromise;
     Object.assign(assignments, shard?.assignments ?? {});
   }));
-  return { ...manifest, assignments };
+  return {
+    ...manifest,
+    assignments,
+    requestedShardCount: shardNumbers.length,
+    loadedShardCount: selectedShardNumbers.length,
+    partial: selectedShardNumbers.length < shardNumbers.length,
+  };
 }
 
 function normalizeStopPlaceIdentity(value) {
@@ -913,6 +1271,21 @@ function openovStopPlaceShardNumber(key, shardCount) {
 }
 
 async function getOpenovStopPlaceIndex(env, stopIds = []) {
+  const keys = [...new Set(
+    (Array.isArray(stopIds) ? stopIds : [])
+      .map(openovStopPlaceKey)
+      .filter(Boolean),
+  )];
+  if (!keys.length) {
+    return {
+      generatedAt: null,
+      stopPlaces: Object.create(null),
+      requestedShardCount: 0,
+      loadedShardCount: 0,
+      partial: false,
+    };
+  }
+
   if (!openovStopPlaceManifestPromise) {
     openovStopPlaceManifestPromise = readAssetJson(
       env,
@@ -935,19 +1308,18 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
     throw new Error("Ongeldig OpenOV/CHB-stopcrosswalkmanifest.");
   }
 
-  const keys = [...new Set(
-    (Array.isArray(stopIds) ? stopIds : [])
-      .map(openovStopPlaceKey)
-      .filter(Boolean),
-  )];
-
   const shardNumbers = [...new Set(
     keys.map((key) => openovStopPlaceShardNumber(key, shardCount)),
   )];
-
+  // Unrelated stops do not justify more asset reads. Unloaded mappings stay unknown.
+  const selectedShardNumbers = selectCachedCrosswalkShardNumbers(
+    shardNumbers,
+    openovStopPlaceShardCache,
+    MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST
+  );
   const stopPlaces = Object.create(null);
 
-  await Promise.all(shardNumbers.map(async (shardNumber) => {
+  await Promise.all(selectedShardNumbers.map(async (shardNumber) => {
     const cacheKey = String(shardNumber);
     let shardPromise = getLruCacheValue(openovStopPlaceShardCache, cacheKey);
 
@@ -969,7 +1341,13 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
     Object.assign(stopPlaces, shard?.stopPlaces ?? {});
   }));
 
-  return { ...manifest, stopPlaces };
+  return {
+    ...manifest,
+    stopPlaces,
+    requestedShardCount: shardNumbers.length,
+    loadedShardCount: selectedShardNumbers.length,
+    partial: selectedShardNumbers.length < shardNumbers.length,
+  };
 }
 
 function expectedStopWithOpenovStopPlaceCrosswalk(stop, index) {
@@ -1072,10 +1450,7 @@ function wallClockSeconds(value) {
   }
   const ms = timestampMs(text);
   if (ms === null) return null;
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit",
-    second: "2-digit", hourCycle: "h23",
-  }).formatToParts(new Date(ms));
+  const parts = AMSTERDAM_CLOCK_FORMATTER.formatToParts(new Date(ms));
   const part = (type) => Number(parts.find((p) => p.type === type)?.value);
   const h = part("hour"), min = part("minute"), sec = part("second");
   if (![h, min, sec].every(Number.isFinite)) return null;
@@ -1094,9 +1469,9 @@ function clockDistanceSeconds(a, b) {
  * only use a unique scheduled-time match within an exact trip identity. Ambiguous
  * matches intentionally return null; this is not advertised as exact stop-ID matching.
  */
-export function matchKv78RowByScheduleTime(rows, scheduledInstant, targetField, maxDistanceSeconds = 180, stopContext = null) {
+function getKv78RowsNearScheduledTime(rows, scheduledInstant, targetField, maxDistanceSeconds = 180) {
   const targetSeconds = wallClockSeconds(scheduledInstant);
-  if (targetSeconds === null) return null;
+  if (targetSeconds === null) return [];
   const candidates = [];
   for (const row of Array.isArray(rows) ? rows : []) {
     const rowSeconds = wallClockSeconds(row?.[targetField]);
@@ -1116,17 +1491,27 @@ export function matchKv78RowByScheduleTime(rows, scheduledInstant, targetField, 
         if (sourceAgeMs < -30_000 || sourceAgeMs > MAX_BISON_AGE_MS) continue;
       }
     }
-    const stopResolution = resolveKv78StopAssignment(row, stopContext);
+    candidates.push({ row, distanceSeconds });
+  }
+  candidates.sort((a, b) => a.distanceSeconds - b.distanceSeconds);
+  return candidates;
+}
+
+export function matchKv78RowByScheduleTime(rows, scheduledInstant, targetField, maxDistanceSeconds = 180, stopContext = null) {
+  const timeCandidates = getKv78RowsNearScheduledTime(
+    rows, scheduledInstant, targetField, maxDistanceSeconds
+  );
+  const candidates = [];
+  for (const timeCandidate of timeCandidates) {
+    const stopResolution = resolveKv78StopAssignment(timeCandidate.row, stopContext);
     if (!stopResolution.matched) continue;
     candidates.push({
-      row,
-      distanceSeconds,
+      ...timeCandidate,
       stopAssignment: stopResolution.assignment ?? null,
       stopAssignmentStatus: stopResolution.status ?? "time_only_unverified",
       matchMethod: stopResolution.matchMethod ?? "unique-scheduled-time-only (PSA mapping unavailable)",
     });
   }
-  candidates.sort((a, b) => a.distanceSeconds - b.distanceSeconds);
   if (!candidates.length) return null;
   if (candidates.length > 1 && candidates[1].distanceSeconds - candidates[0].distanceSeconds < 30) return null;
   return candidates[0];
@@ -1222,6 +1607,53 @@ function legsWithTransitousId(plan) {
   return found;
 }
 
+function buildRealtimeCoverageByMode(candidates) {
+  const byMode = new Map();
+  for (const item of Array.isArray(candidates) ? candidates : []) {
+    const rawMode = String(item?.leg?.mode ?? item?.leg?.transitMode ?? item?.leg?.product?.category ?? "UNKNOWN").trim().toUpperCase();
+    const mode = rawMode || "UNKNOWN";
+    const stats = byMode.get(mode) ?? {
+      candidateLegCount: 0,
+      routeIdentityMatchedLegCount: 0,
+      kv6MatchedLegCount: 0,
+      kv6PunctualityPresentLegCount: 0,
+      kv78DataLegCount: 0,
+      kv78PositiveDelayLegCount: 0,
+      cancelledLegCount: 0,
+      predictedLegCount: 0,
+      realtimeDataLegCount: 0,
+    };
+    stats.candidateLegCount += 1;
+    if (item?.identityKey) stats.routeIdentityMatchedLegCount += 1;
+
+    const realtime = item?.leg?.ndovRealtime ?? {};
+    const kv6 = realtime?.kv6 ?? (realtime?.source === "NDOV BISON KV6" ? realtime : null);
+    const kv6Matched = kv6?.status === "kv6_live" || kv6?.status === "kv6_observed";
+    if (kv6Matched) {
+      stats.kv6MatchedLegCount += 1;
+      if (typeof kv6?.punctualitySeconds === "number" && Number.isFinite(kv6.punctualitySeconds)) {
+        stats.kv6PunctualityPresentLegCount += 1;
+      }
+    }
+
+    const kv78 = realtime?.kv78 ?? (realtime?.source === "NDOV KV78Turbo" ? realtime : null);
+    if (kv78?.status === "kv78_delay") {
+      stats.kv78DataLegCount += 1;
+      const delays = [kv78?.departure?.delaySeconds, kv78?.arrival?.delaySeconds]
+        .filter((delay) => typeof delay === "number" && Number.isFinite(delay));
+      if (delays.some((delay) => delay > 0)) stats.kv78PositiveDelayLegCount += 1;
+    }
+
+    const cancelled = item?.leg?.cancelled === true || realtime?.status === "cancelled";
+    if (cancelled) stats.cancelledLegCount += 1;
+    const predicted = Boolean(item?.leg?.realtimePrediction || realtime?.prediction);
+    if (predicted) stats.predictedLegCount += 1;
+    if (cancelled || kv6Matched || kv78?.status === "kv78_delay" || predicted) stats.realtimeDataLegCount += 1;
+    byMode.set(mode, stats);
+  }
+  return Object.fromEntries([...byMode.entries()].sort(([a], [b]) => a.localeCompare(b)));
+}
+
 const NS_RAIL_MODES_FOR_IDENTITY = new Set([
   "RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL",
   "HIGHSPEED_RAIL", "NIGHT_RAIL", "REGIONAL_FAST_RAIL", "SUBURBAN", "TRAIN",
@@ -1276,7 +1708,8 @@ export async function prepareNsTrainIdentities(plan, env) {
 }
 
 /** Mutates plan legs only for an exact, current KV17 cancellation. */
-export async function applyNdovCancellationsToPlan(plan, env) {
+export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
+  const includeIdentityDiagnostics = options?.includeIdentityDiagnostics === true;
   const candidates = legsWithTransitousId(plan);
   const baseMeta = {
     status: "unknown",
@@ -1293,6 +1726,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     ndovPredictionLegCount: 0,
     combinedPredictionLegCount: 0,
     message: "Geen bevestigde NDOV-koppeling toegepast.",
+    coverageByMode: buildRealtimeCoverageByMode(candidates),
   };
   if (!candidates.length) {
     plan.ndovRealtimeMeta = { ...baseMeta, status: "not_applicable", message: "Geen Transitous/OpenOV-trip-ID's gevonden om te koppelen." };
@@ -1313,7 +1747,16 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     routeCrosswalkOutcomes: routeCrosswalkOutcomes.slice(0, 12),
   });
   try {
-    for (const item of candidates) {
+    // Resolve each route+time bucket together. The parsed route-cache stays
+    // deliberately small for Worker memory safety, so itinerary order could
+    // otherwise evict a route and fetch its large shards again later in the
+    // same request. Grouping equivalent cache keys avoids those duplicate reads.
+    const routeResolutionOrder = [...candidates].sort((a, b) => {
+      const keyFor = (item) =>
+        `${routeNumericId(item?.leg) ?? ""}:${openovTripStartBucket(item?.identity?.originalTripId) ?? ""}`;
+      return keyFor(a).localeCompare(keyFor(b));
+    });
+    for (const item of routeResolutionOrder) {
       const resolution = await resolveRealtimeTripForLeg(env, item);
       if (resolution.generatedAt) routeCrosswalkGeneratedAt = resolution.generatedAt;
       if (resolution.error) routeCrosswalkError = resolution.error;
@@ -1437,6 +1880,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv78DelayLegCount = 0;
   let kv78FeedAgeSeconds = null;
   let kv78FeedState = "unknown";
+  let kv78CollectorDiagnostics = null;
   for (const item of candidates) {
     if (!item.identityKey) continue;
     const result = chooseLatestMutation(mutations, item.identityKey);
@@ -1476,6 +1920,11 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv6ObservedLegCount = 0;
   let kv6RequestedIdentityKeys = [];
   let kv6ReturnedEventCount = null;
+  let kv6IdentityAudit = null;
+  let kv78IdentityAudit = null;
+  const kv6UnmatchedIdentityKeys = new Set();
+  const kv78UnmatchedIdentityKeys = new Set();
+  let kv78IdentityDiagnosticSource = null;
   try {
     const liveItems = candidates.filter((item) => item.identityKey && item.leg.ndovRealtime?.status !== "cancelled");
     kv6RequestedIdentityKeys = [...new Set(liveItems.map((item) => item.identityKey))];
@@ -1487,7 +1936,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     ]));
     for (const item of liveItems) {
       const event = eventByIdentity.get(item.identityKey);
-      if (!event) continue;
+      if (!event) {
+        kv6UnmatchedIdentityKeys.add(item.identityKey);
+        continue;
+      }
       const nowMs = Date.now();
       const punctualitySeconds = numericDelay(event.punctualitySeconds);
       const punctualityReceivedMs = timestampMs(event.punctualityReceivedAt);
@@ -1533,7 +1985,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         }
       }
 
-      if (!hasFreshPunctuality && !hasFreshActivity) continue;
+      if (!hasFreshPunctuality && !hasFreshActivity) {
+        kv6UnmatchedIdentityKeys.add(item.identityKey);
+        continue;
+      }
 
       const delaySeconds = hasFreshPunctuality
         ? Math.trunc(punctualitySeconds)
@@ -1595,43 +2050,51 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv6Error = error instanceof Error ? error.message : "KV6-actuele ritgegevens niet beschikbaar.";
   }
 
-  // Log alleen een begrensde identiteitsdiagnose als geen enkele geplande rit
-  // een KV6-event matcht. Geen voertuigpositie, haltecode of voertuignummer loggen.
+  // Run the richer identity scan only when requested by the diagnostic endpoint,
+  // or at the existing low-frequency log interval. Partial KV6 success must not
+  // hide other planned identities that did not receive a fresh exact match.
+  const requestedKv6Misses = [...kv6UnmatchedIdentityKeys].slice(0, 8);
+  const kv6IdentityLogDue = Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000;
   if (
-    kv6MatchedLegCount === 0 &&
+    requestedKv6Misses.length > 0 &&
     kv6RequestedIdentityKeys.length > 0 &&
-    Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000
+    (includeIdentityDiagnostics || kv6IdentityLogDue)
   ) {
-    lastKv6NoExactMatchDiagnosticAt = Date.now();
-    const bisonIdentityDiagnostics = await getBisonIdentityDiagnostics(env).catch((error) => ({
+    const bisonIdentityDiagnostics = await getBisonIdentityDiagnostics(env, requestedKv6Misses).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     }));
-    const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
-    const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
-      identity: toIdentity(
-        valueOf(event, "dataOwnerCode", "DataOwnerCode"),
-        valueOf(event, "operationDate", "OperationDate"),
-        valueOf(event, "linePlanningNumber", "LinePlanningNumber"),
-        valueOf(event, "journeyNumber", "JourneyNumber"),
-        valueOf(event, "reinforcementNumber", "ReinforcementNumber") ?? "0"
-      ),
-      eventType: valueOf(event, "eventType", "EventType") ?? null,
-      receivedAt: valueOf(event, "receivedAt") ?? null,
-    }));
-    console.log("[OVLIVE_KV6_NO_EXACT_MATCH_DIAG]", JSON.stringify({
-      feedState: snapshot.state ?? null,
-      latestMessageAt: snapshot.latestMessageAt ?? null,
-      messageCount: snapshot.messageCount ?? null,
-      rawBytes: snapshot.rawBytes ?? null,
-      envelopeCounts: snapshot.envelopeCounts ?? {},
-      storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
-      bisonIdentityDiagnostics,
-      storedEventSampleCount: storedEventIdentitySamples.length,
-      requestedIdentityKeys: kv6RequestedIdentityKeys.slice(0, 8),
-      returnedExactEventCount: kv6ReturnedEventCount,
-      storedEventIdentitySamples,
-      kv6Error,
-    }));
+    if (includeIdentityDiagnostics) {
+      kv6IdentityAudit = summarizeRealtimeIdentityDiagnostics(requestedKv6Misses, bisonIdentityDiagnostics, "bison");
+    }
+    if (kv6IdentityLogDue) {
+      lastKv6NoExactMatchDiagnosticAt = Date.now();
+      const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
+      const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
+        identity: toIdentity(
+          valueOf(event, "dataOwnerCode", "DataOwnerCode"),
+          valueOf(event, "operationDate", "OperationDate"),
+          valueOf(event, "linePlanningNumber", "LinePlanningNumber"),
+          valueOf(event, "journeyNumber", "JourneyNumber"),
+          valueOf(event, "reinforcementNumber", "ReinforcementNumber") ?? "0"
+        ),
+        eventType: valueOf(event, "eventType", "EventType") ?? null,
+        receivedAt: valueOf(event, "receivedAt") ?? null,
+      }));
+      console.log("[OVLIVE_KV6_UNMATCHED_IDENTITY_DIAG]", JSON.stringify({
+        feedState: snapshot.state ?? null,
+        latestMessageAt: snapshot.latestMessageAt ?? null,
+        messageCount: snapshot.messageCount ?? null,
+        rawBytes: snapshot.rawBytes ?? null,
+        envelopeCounts: snapshot.envelopeCounts ?? {},
+        storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
+        bisonIdentityDiagnostics,
+        storedEventSampleCount: storedEventIdentitySamples.length,
+        requestedIdentityKeys: requestedKv6Misses,
+        returnedExactEventCount: kv6ReturnedEventCount,
+        storedEventIdentitySamples,
+        kv6Error,
+      }));
+    }
   }
 
   // Delay enrichment is independent of the KV17 state: it reads already-collected
@@ -1639,30 +2102,54 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv78Error = null;
   let stopAssignmentIndex = null;
   let openovStopPlaceIndex = null;
+  let stopAssignmentIndexAttempted = false;
+  let openovStopPlaceIndexAttempted = false;
   try {
-    const kv78Snapshot = await getKv78Snapshot(env);
-    const kv78CachedRows = Array.isArray(kv78Snapshot.latestRows)
-      ? kv78Snapshot.latestRows
-      : [];
-    const kv78WatchedRows = kv78CachedRows.filter((row) => {
-      const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
-      const line = String(row?.linePlanningNumber ?? "").trim().toUpperCase();
-      return owner === "CXX" && ["U005", "U011", "U073"].includes(line);
-    });
-
+    const kv78Snapshot = await getKv78Snapshot(
+      env,
+      includeIdentityDiagnostics ? candidates.map((item) => item.identityKey).filter(Boolean) : []
+    );
+    kv78IdentityDiagnosticSource = kv78Snapshot.kv78IdentityDiagnostics ?? null;
     kv78FeedState = kv78Snapshot.state ?? "unknown";
     const kv78LatestMs = timestampMs(valueOf(kv78Snapshot, "latestMessageAt"));
     const kv78AgeMs = kv78LatestMs === null ? null : Date.now() - kv78LatestMs;
     kv78FeedAgeSeconds = kv78AgeMs === null ? null : Math.round(kv78AgeMs / 1000);
+    if (includeIdentityDiagnostics) {
+      const finiteCount = (value) => {
+        if (value === null || value === undefined || value === "") return null;
+        const number = Number(value);
+        return Number.isFinite(number) ? number : null;
+      };
+      kv78CollectorDiagnostics = {
+        state: kv78Snapshot.state ?? "unknown",
+        latestMessageAt: kv78Snapshot.latestMessageAt ?? null,
+        feedAgeSeconds: kv78FeedAgeSeconds,
+        messageCount: finiteCount(kv78Snapshot.messageCount),
+        envelopeCounts: kv78Snapshot.envelopeCounts ?? {},
+        storedRowCount: finiteCount(kv78Snapshot.storedKv78RowCount),
+        statusSampleAvailableCount: finiteCount(kv78Snapshot.kv78StatusSampleCount),
+        passtimeMessageCount: finiteCount(kv78Snapshot.kv78PasstimeMessageCount),
+        parsedRowCount: finiteCount(kv78Snapshot.kv78ParsedRowCount),
+        lastPasstimeMessageAt: kv78Snapshot.kv78LastPasstimeMessageAt ?? null,
+        lastNonemptyPasstimeAt: kv78Snapshot.kv78LastNonemptyPasstimeAt ?? null,
+        lastPasstimeBatchSize: finiteCount(kv78Snapshot.kv78LastPasstimeBatchSize),
+        lastPasstimePayloadBytes: finiteCount(kv78Snapshot.kv78LastPasstimePayloadBytes),
+        rowCacheStats: kv78IdentityDiagnosticSource?.rowCacheStats ?? null,
+      };
+    }
     if (kv78Snapshot.state !== "error" && kv78AgeMs !== null && kv78AgeMs >= -30_000 && kv78AgeMs <= MAX_BISON_AGE_MS) {
       const delayItems = candidates.filter((item) =>
         item.leg.ndovRealtime?.status !== "cancelled" &&
         (item.identityKey || kv78VehicleLookupForItem(item))
       );
+      const exactRowsByIdentity = await getCurrentKv78RowsByIdentities(
+        env,
+        delayItems.map((item) => item.identityKey).filter(Boolean)
+      );
       const rowResults = await Promise.all(delayItems.map(async (item) => {
         const vehicleLookup = kv78VehicleLookupForItem(item);
         const exactRows = item.identityKey
-          ? await getCurrentKv78Rows(env, item.identityKey)
+          ? (exactRowsByIdentity.get(item.identityKey) ?? [])
           : [];
         let vehicleRows = [];
         let vehicleLookupError = null;
@@ -1708,11 +2195,31 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         const kv6RouteStopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
           item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
         ));
+        const kv78EndpointStopIds = [];
+        for (const { item, rows } of rowResults) {
+          const scheduledDeparture = valueOf(item?.leg?.from, "departure") ??
+            valueOf(item?.leg, "startTime", "departureTime");
+          const scheduledArrival = valueOf(item?.leg?.to, "arrival") ??
+            valueOf(item?.leg, "endTime", "arrivalTime");
+          if (getKv78RowsNearScheduledTime(rows, scheduledDeparture, "targetDepartureTime", 180).length) {
+            kv78EndpointStopIds.push(item?.leg?.from?.stopId);
+          }
+          if (getKv78RowsNearScheduledTime(rows, scheduledArrival, "targetArrivalTime", 180).length) {
+            kv78EndpointStopIds.push(item?.leg?.to?.stopId);
+          }
+        }
         const plannedStopIds = [
-          ...rowResults.flatMap(({ item }) => [item?.leg?.from?.stopId, item?.leg?.to?.stopId]),
+          ...kv78EndpointStopIds,
           ...kv6RouteStopIds,
         ];
+        openovStopPlaceIndexAttempted = true;
         openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, plannedStopIds);
+        if (openovStopPlaceIndex.partial) {
+          kv78Error = [
+            kv78Error,
+            `OpenOV/CHB-stopcrosswalk gedeeltelijk geladen (${openovStopPlaceIndex.loadedShardCount}/${openovStopPlaceIndex.requestedShardCount} shards); overige haltes blijven onbevestigd.`,
+          ].filter(Boolean).join("; ");
+        }
       } catch (error) {
         kv78Error = [
           kv78Error,
@@ -1721,6 +2228,20 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           }`,
         ].filter(Boolean).join("; ");
       }
+      // PSA/CHB data is only needed for halterijen that could match a leg's
+      // planned departure/arrival window. Loading every stop along every trip
+      // can fan out to all 16 assignment shards and exhaust the Worker subrequest
+      // budget even though only the endpoint haltes are relevant to this plan.
+      const assignmentCandidateRows = rowResults.flatMap(({ item, rows }) => {
+        const scheduledDeparture = valueOf(item?.leg?.from, "departure") ??
+          valueOf(item?.leg, "startTime", "departureTime");
+        const scheduledArrival = valueOf(item?.leg?.to, "arrival") ??
+          valueOf(item?.leg, "endTime", "arrivalTime");
+        return [
+          ...getKv78RowsNearScheduledTime(rows, scheduledDeparture, "targetDepartureTime", 180),
+          ...getKv78RowsNearScheduledTime(rows, scheduledArrival, "targetArrivalTime", 180),
+        ].map((candidate) => candidate.row);
+      });
       const kv6AssignmentKeys = kv6PredictionItems.map((item) => {
         const event = item.kv6PredictionContext?.event;
         const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
@@ -1728,21 +2249,32 @@ export async function applyNdovCancellationsToPlan(plan, env) {
         return owner && stopCode ? `${owner}|${stopCode}` : null;
       }).filter(Boolean);
       const assignmentKeys = [...new Set([
-        ...rowResults.flatMap((entry) => entry.rows.map((row) => {
+        ...kv6AssignmentKeys,
+        ...assignmentCandidateRows.map((row) => {
           const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
           const stopCode = String(row?.userStopCode ?? "").trim();
           return owner && stopCode ? `${owner}|${stopCode}` : null;
-        }).filter(Boolean)),
-        ...kv6AssignmentKeys,
+        }).filter(Boolean),
       ])];
       try {
+        stopAssignmentIndexAttempted = true;
         stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
+        if (stopAssignmentIndex.partial) {
+          kv78Error = [
+            kv78Error,
+            `PSA/CHB-haltecrosswalk gedeeltelijk geladen (${stopAssignmentIndex.loadedShardCount}/${stopAssignmentIndex.requestedShardCount} shards); niet-geladen haltecodes blijven onbevestigd.`,
+          ].filter(Boolean).join("; ");
+        }
       } catch (error) {
-        kv78Error = `PSA/CHB-haltecrosswalk niet beschikbaar; tijdmatching blijft ongeverifieerd: ${error instanceof Error ? error.message : "onbekende fout"}`;
+        kv78Error = [
+          kv78Error,
+          `PSA/CHB-haltecrosswalk niet beschikbaar; tijdmatching blijft ongeverifieerd: ${error instanceof Error ? error.message : "onbekende fout"}`,
+        ].filter(Boolean).join("; ");
       }
 
       for (const { item, rows, vehicleLookup } of rowResults) {
         if (!rows.length) {
+          if (item.identityKey) kv78UnmatchedIdentityKeys.add(item.identityKey);
           continue;
         }
         const scheduledDeparture = valueOf(item.leg.from, "departure") ?? valueOf(item.leg, "startTime", "departureTime");
@@ -1763,7 +2295,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
           departure = null;
           arrival = null;
         }
-        if (!departureMatch && !arrivalMatch) continue;
+        if (!departureMatch && !arrivalMatch) {
+          if (item.identityKey) kv78UnmatchedIdentityKeys.add(item.identityKey);
+          continue;
+        }
         kv78MatchedLegCount += 1;
         if (!departure && !arrival) continue;
         kv78DataLegCount += 1;
@@ -1824,16 +2359,30 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv78Error = error instanceof Error ? error.message : "KV78-gegevens niet beschikbaar.";
   }
 
+  if (includeIdentityDiagnostics && kv78UnmatchedIdentityKeys.size > 0 && kv78IdentityDiagnosticSource) {
+    kv78IdentityAudit = summarizeRealtimeIdentityDiagnostics(
+      [...kv78UnmatchedIdentityKeys],
+      kv78IdentityDiagnosticSource,
+      "kv78"
+    );
+  }
+
   const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
-  if (kv6PredictionItems.length && (!stopAssignmentIndex || !openovStopPlaceIndex)) {
+  if (kv6PredictionItems.length && (
+    (!stopAssignmentIndex && !stopAssignmentIndexAttempted) ||
+    (!openovStopPlaceIndex && !openovStopPlaceIndexAttempted)
+  )) {
     const stopIds = kv6PredictionItems.flatMap((item) => getNdovPredictionStopIds(
       item.leg, item.routePattern, item.kv6PredictionContext.event, item.kv6PredictionContext.delaySeconds,
     ));
-    try {
-      if (!openovStopPlaceIndex) openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, stopIds);
-    } catch (error) {
-      kv78Error = [kv78Error, "OpenOV/CHB-stopcrosswalk voor KV6-voorspelling niet beschikbaar: " +
-        (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+    if (!openovStopPlaceIndex && !openovStopPlaceIndexAttempted) {
+      try {
+        openovStopPlaceIndexAttempted = true;
+        openovStopPlaceIndex = await getOpenovStopPlaceIndex(env, stopIds);
+      } catch (error) {
+        kv78Error = [kv78Error, "OpenOV/CHB-stopcrosswalk voor KV6-voorspelling niet beschikbaar: " +
+          (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+      }
     }
     const assignmentKeys = kv6PredictionItems.map((item) => {
       const event = item.kv6PredictionContext?.event;
@@ -1841,30 +2390,58 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       const stopCode = String(event?.userStopCode ?? "").trim();
       return owner && stopCode ? owner + "|" + stopCode : null;
     }).filter(Boolean);
-    try {
-      if (!stopAssignmentIndex) stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
-    } catch (error) {
-      kv78Error = [kv78Error, "PSA/CHB-haltecrosswalk voor KV6-voorspelling niet beschikbaar: " +
-        (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+    if (!stopAssignmentIndex && !stopAssignmentIndexAttempted) {
+      try {
+        stopAssignmentIndexAttempted = true;
+        stopAssignmentIndex = await getStopAssignmentIndex(env, assignmentKeys);
+      } catch (error) {
+        kv78Error = [kv78Error, "PSA/CHB-haltecrosswalk voor KV6-voorspelling niet beschikbaar: " +
+          (error instanceof Error ? error.message : "onbekende fout")].filter(Boolean).join("; ");
+      }
     }
   }
 
   let ndovPredictionLegCount = 0;
   let combinedPredictionLegCount = 0;
+  const kv6ProjectionCandidateItems = candidates.filter(
+    (item) => item.routePattern && item.kv6PredictionContext
+  );
+  const kv6ProjectionFailureReasonCounts = {};
+  let kv6ProjectionAttemptCount = 0;
+  const recordKv6ProjectionFailure = (reason) => {
+    const key = String(reason || "unknown_projection_failure");
+    kv6ProjectionFailureReasonCounts[key] =
+      (kv6ProjectionFailureReasonCounts[key] ?? 0) + 1;
+  };
+
   for (const item of candidates) {
     const context = item.kv6PredictionContext;
-    if (context && item.routePattern && stopAssignmentIndex && openovStopPlaceIndex) {
-      const prediction = deriveNdovKv6Prediction({
-        leg: item.leg,
-        pattern: item.routePattern,
-        event: context.event,
-        assignmentIndex: stopAssignmentIndex,
-        stopPlaceIndex: openovStopPlaceIndex,
-        operationDate: item.identity?.serviceDate ?? null,
-      });
-      if (prediction) {
-        item.leg.ndovRealtime = { ...(item.leg.ndovRealtime ?? {}), prediction };
-        ndovPredictionLegCount += 1;
+    if (context && item.routePattern) {
+      if (!stopAssignmentIndex) {
+        recordKv6ProjectionFailure("psa_assignment_index_unavailable");
+      } else if (!openovStopPlaceIndex) {
+        recordKv6ProjectionFailure("openov_stop_place_index_unavailable");
+      } else {
+        kv6ProjectionAttemptCount += 1;
+        let failureReported = false;
+        const prediction = deriveNdovKv6Prediction({
+          leg: item.leg,
+          pattern: item.routePattern,
+          event: context.event,
+          assignmentIndex: stopAssignmentIndex,
+          stopPlaceIndex: openovStopPlaceIndex,
+          operationDate: item.identity?.serviceDate ?? null,
+          onFailure: (reason) => {
+            failureReported = true;
+            recordKv6ProjectionFailure(reason);
+          },
+        });
+        if (prediction) {
+          item.leg.ndovRealtime = { ...(item.leg.ndovRealtime ?? {}), prediction };
+          ndovPredictionLegCount += 1;
+        } else if (!failureReported) {
+          recordKv6ProjectionFailure("projection_unavailable_without_reason");
+        }
       }
     }
     const combined = buildUnifiedRealtimePrediction(item.leg);
@@ -1873,11 +2450,25 @@ export async function applyNdovCancellationsToPlan(plan, env) {
       combinedPredictionLegCount += 1;
     }
   }
+  const kv6ProjectionDiagnostics = {
+    candidateLegCount: kv6ProjectionCandidateItems.length,
+    attemptedLegCount: kv6ProjectionAttemptCount,
+    predictedLegCount: ndovPredictionLegCount,
+    notPredictedLegCount: Math.max(0, kv6ProjectionCandidateItems.length - ndovPredictionLegCount),
+    failureReasonCounts: Object.fromEntries(
+      Object.entries(kv6ProjectionFailureReasonCounts).sort(([a], [b]) => a.localeCompare(b))
+    ),
+  };
 
   plan.ndovRealtimeMeta = {
     ...baseMeta,
+    coverageByMode: buildRealtimeCoverageByMode(candidates),
     ndovPredictionLegCount,
     combinedPredictionLegCount,
+    kv6ProjectionDiagnostics,
+    ...(includeIdentityDiagnostics && kv78CollectorDiagnostics
+      ? { kv78CollectorDiagnostics }
+      : {}),
     status: "ok",
     feedState: snapshot.state ?? "unknown",
     feedAgeSeconds: Math.round(feedAgeMs / 1000),
@@ -1904,6 +2495,8 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv78VehicleFallbackLegCount,
     kv78DelayLegCount,
     kv78Error,
+    ...(includeIdentityDiagnostics && kv6IdentityAudit ? { kv6IdentityDiagnostics: kv6IdentityAudit } : {}),
+    ...(includeIdentityDiagnostics && kv78IdentityAudit ? { kv78IdentityDiagnostics: kv78IdentityAudit } : {}),
     message: cancelled
       ? `${cancelled} exacte KV17-annulering(en) aan een reisdeel gekoppeld.`
       : kv78DataLegCount

@@ -1,14 +1,56 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { applyNdovCancellationsToPlan, buildNsTrainIdentities } from '../src/ndov-plan-cancellation.js';
+import { applyNdovCancellationsToPlan, buildNsTrainIdentities, selectCrosswalkShardNumbers } from '../src/ndov-plan-cancellation.js';
 
 const planCancellationSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
+const ndovStreamHubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
+
+assert.deepEqual(
+  selectCrosswalkShardNumbers([7, 2, 7, 4, 1, 9], 3),
+  [7, 2, 4],
+  'crosswalk shard budgets deduplicate values and preserve first-in-order priorities',
+);
+assert.deepEqual(selectCrosswalkShardNumbers([4, 3], 0), []);
+assert.match(planCancellationSource, /MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 2/);
+assert.match(planCancellationSource, /MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 2/);
+assert.match(planCancellationSource, /AMSTERDAM_CLOCK_FORMATTER\.formatToParts/);
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
 assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 7,
   'snapshot, mutation, event, KV78 snapshot/exact-row/vehicle-row, and on-demand identity diagnostic reads must all use the shared collector object');
-assert.match(planCancellationSource, /status\?stream=bison&identityDiagnostics=1/,
-  'no-match diagnostics must include the targeted current CXX journey identities');
+assert.match(planCancellationSource, /target\.searchParams\.set\("stream", "bison"\)/,
+  'BISON identity diagnostics must select the shared BISON stream');
+assert.match(planCancellationSource, /target\.searchParams\.set\("identityDiagnostics", "1"\)/,
+  'BISON identity diagnostics must explicitly enable the targeted identity scan');
+assert.match(planCancellationSource, /target\.searchParams\.append\("identity", identity\)/,
+  'BISON identity diagnostics must query the targeted current journey identities');
+assert.match(planCancellationSource, /kv78CollectorDiagnostics/,
+  'targeted plan diagnostics must expose the KV78 collection state without opening the protected status endpoint');
+assert.match(planCancellationSource, /kv78LastNonemptyPasstimeAt/,
+  'targeted plan diagnostics must distinguish fresh transport messages from fresh parsed KV78 rows');
+assert.match(ndovStreamHubSource, /kv78PasstimeMessageCount/,
+  'collector must count KV78 passtime envelopes independently of generic stream messages');
+assert.match(ndovStreamHubSource, /kv78ParsedRowCount/,
+  'collector must count parsed KV78 stop rows independently of envelope activity');
+
+const kv78SnapshotStart = planCancellationSource.indexOf("async function getKv78Snapshot");
+const kv78SnapshotEnd = planCancellationSource.indexOf("async function getCurrentKv78RowsByIdentities", kv78SnapshotStart);
+assert.ok(kv78SnapshotStart >= 0 && kv78SnapshotEnd > kv78SnapshotStart,
+  'KV78 status snapshot helper must remain inspectable');
+const kv78SnapshotSource = planCancellationSource.slice(kv78SnapshotStart, kv78SnapshotEnd);
+assert.match(kv78SnapshotSource, /target\.searchParams\.set\("includeRows", "0"\)/,
+  'plan requests must not transfer a 5,000-row KV78 status sample when exact trip rows are fetched separately');
+assert.match(kv78SnapshotSource, /if \(identityKeys\.length\) \{\s*target\.searchParams\.set\("identityDiagnostics", "1"\)/,
+  'the expensive full-cache KV78 identity scan must be opt-in for diagnostic requests with target identities');
+assert.doesNotMatch(kv78SnapshotSource.slice(0, kv78SnapshotSource.indexOf("if (identityKeys.length)")),
+  /identityDiagnostics/,
+  'ordinary planner requests must not enable the KV78 full-cache identity scan');
+assert.match(ndovStreamHubSource, /url\.searchParams\.get\('includeRows'\) === '0' \? \{\} : \{/,
+  'the NDOV status endpoint must omit row arrays when the planner requests a lightweight snapshot');
+assert.match(ndovStreamHubSource, /kv78StatusSampleCount: Math\.min\(state\.rows\.size, KV78_STATUS_SAMPLE_LIMIT\)/,
+  'lightweight KV78 status must still report the size of the available row sample');
+assert.match(planCancellationSource, /statusSampleAvailableCount: finiteCount\(kv78Snapshot\.kv78StatusSampleCount\)/,
+  'plan diagnostics must report available sample size without transferring the sample rows');
 
 const mutationFailureAt = planCancellationSource.indexOf('status: "mutation_lookup_unavailable"');
 const mutationFailureStart = planCancellationSource.lastIndexOf("plan.ndovRealtimeMeta = {", mutationFailureAt);

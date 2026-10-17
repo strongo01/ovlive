@@ -12,6 +12,8 @@
     "ndov:plan-selftest": "node scripts/ndov-plan-cancellation-selftest.mjs",
     "ndov:continuous-selftest": "node scripts/ndov-continuous-collector-selftest.mjs",
     "ndov:kv78-delay-selftest": "node scripts/ndov-kv78-delay-selftest.mjs",
+    "ndov:tram-metro-selftest": "node scripts/ndov-stream-selftest.mjs && node scripts/ndov-kv78-delay-selftest.mjs && node scripts/ndov-openov-route-crossmatch-selftest.mjs",
+    "ovapi:match-selftest": "node scripts/ovapi-transitous-match-selftest.cjs",
     "ndov:kv6-live-selftest": "node scripts/ndov-kv6-live-selftest.mjs",
     "ndov:build-openov-route-crosswalk": "python3 scripts/build-ndov-openov-route-crosswalk.py",
     "ndov:openov-route-crossmatch-selftest": "node scripts/ndov-openov-route-crossmatch-selftest.mjs",

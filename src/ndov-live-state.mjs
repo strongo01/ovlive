@@ -115,6 +115,121 @@ export function rowMatchesIdentity(row, lookup) {
     && String(row.fortifyOrderNumber ?? row.reinforcementNumber ?? '0') === lookup.reinforcement;
 }
 
+function kv78ClockSeconds(value) {
+  const match = String(value ?? '').trim().match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] ?? 0);
+  // KV78 operation-day times may legitimately be expressed as 24:xx or 25:xx
+  // for after-midnight service, so do not clamp the hour to a civil clock day.
+  if (minute < 0 || minute > 59 || second < 0 || second > 59) return null;
+  return hour * 3600 + minute * 60 + second;
+}
+
+export function amsterdamClockSeconds(nowMs) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Amsterdam',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(nowMs));
+  const part = (type) => Number(parts.find((item) => item.type === type)?.value);
+  const hour = part('hour'), minute = part('minute'), second = part('second');
+  if (![hour, minute, second].every(Number.isFinite)) return null;
+  return hour * 3600 + minute * 60 + second;
+}
+
+/**
+ * KV78 cache key uses the same exact trip identity as live matching.
+ * LocalServiceLevelCode is source metadata, not part of the journey identity
+ * used downstream, so it must not create duplicate copies of the same stop.
+ */
+export function kv78RowCacheKey(row) {
+  if (!row || typeof row !== 'object') return null;
+  const owner = String(row.dataOwnerCode ?? row.DataOwnerCode ?? '').trim().toUpperCase();
+  const date = normalizeOperatingDate(row.operationDate ?? row.OperationDate);
+  const line = String(row.linePlanningNumber ?? row.LinePlanningNumber ?? '').trim().toUpperCase();
+  const journey = String(row.journeyNumber ?? row.JourneyNumber ?? '').trim();
+  const reinforcement = String(row.fortifyOrderNumber ?? row.reinforcementNumber ?? row.FortifyOrderNumber ?? row.ReinforcementNumber ?? '0').trim() || '0';
+  if (!owner || !/^\d{8}$/.test(date) || !line || !journey) return null;
+  const stopOrder = String(row.userStopOrderNumber ?? row.UserStopOrderNumber ?? '').trim();
+  const stopCode = String(row.userStopCode ?? row.UserStopCode ?? '').trim();
+  const targetArrival = String(row.targetArrivalTime ?? row.TargetArrivalTime ?? '').trim();
+  const targetDeparture = String(row.targetDepartureTime ?? row.TargetDepartureTime ?? '').trim();
+  const fallbackTime = !stopOrder && !stopCode ? `|${targetArrival}|${targetDeparture}` : '';
+  return [owner, date, line, journey, reinforcement, stopOrder, stopCode].join('|') + fallbackTime;
+}
+
+/**
+ * Evaluate schedule relevance against a single precomputed Amsterdam wall clock.
+ * KV78 target times are local clock values rather than absolute instants.
+ */
+export function kv78RowScheduleInfo(
+  row, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
+) {
+  if (!Number.isFinite(nowSeconds)) {
+    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
+  }
+  const eventTimes = [
+    kv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime),
+    kv78ClockSeconds(row?.targetArrivalTime ?? row?.TargetArrivalTime),
+  ].filter((value) => value !== null);
+  if (!eventTimes.length) {
+    // Unknown times are kept until capacity pressure; they cannot be ranked
+    // confidently, so the cache-eviction helper will discard them first.
+    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
+  }
+  const deltas = eventTimes.map((targetSeconds) => {
+    let delta = targetSeconds - nowSeconds;
+    // Only wrap close to midnight; otherwise an old morning stop could appear future.
+    if (delta > 64800) delta -= 86400;
+    else if (delta < -64800) delta += 86400;
+    return delta;
+  });
+  const distanceSeconds = Math.min(...deltas.map((delta) => Math.abs(delta)));
+  return {
+    relevant: deltas.some((delta) =>
+      delta >= -Math.max(0, maxPastSeconds) &&
+      delta <= Math.max(0, maxFutureSeconds)
+    ),
+    hasScheduleTime: true,
+    distanceSeconds,
+  };
+}
+
+export function isKv78RowScheduleRelevant(
+  row, nowMs = Date.now(), maxPastSeconds = 180,
+  nowSeconds = amsterdamClockSeconds(nowMs), maxFutureSeconds = 4 * 60 * 60,
+) {
+  return kv78RowScheduleInfo(row, nowSeconds, maxPastSeconds, maxFutureSeconds).relevant;
+}
+
+/**
+ * If capacity is reached, prefer stop rows closest to the current time and
+ * evict unknown-time/farthest-future rows first. This is safer than FIFO, which
+ * can discard a just-received near-term row before an irrelevant later run.
+ */
+export function selectKv78RowEvictionKeys(
+  entries, limit, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
+) {
+  const allEntries = entries instanceof Map ? [...entries.entries()] : Array.from(entries ?? []);
+  const excess = Math.max(0, allEntries.length - Math.max(0, limit));
+  if (!excess) return [];
+  const ranked = allEntries.map(([key, row], index) => {
+    const info = kv78RowScheduleInfo(row, nowSeconds, maxPastSeconds, maxFutureSeconds);
+    return {
+      key,
+      index,
+      // Unknown scheduled times are least useful for stop-time predictions.
+      distanceSeconds: info.hasScheduleTime ? info.distanceSeconds : Number.POSITIVE_INFINITY,
+    };
+  });
+  ranked.sort((a, b) => b.distanceSeconds - a.distanceSeconds || a.index - b.index);
+  return ranked.slice(0, excess).map((item) => item.key);
+}
+
 export function isRecentIsoTime(value, now = Date.now(), maxAgeMs = 180_000) {
   if (!value) return false;
   const ms = Date.parse(String(value));

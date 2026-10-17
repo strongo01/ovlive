@@ -41,6 +41,8 @@ const stopPlaceIndex = { stopPlaces: {
   const ids = getNdovPredictionStopIds(leg, pattern, event, 20);
   assert.ok(ids.includes("3924354"));
   assert.ok(ids.includes("3924355"));
+  assert.ok(!ids.includes("3924353"), "a stop 10 minutes away from the measured timestamp must not expand the lookup window");
+  assert.ok(!ids.includes("3924356"), "a stop 10 minutes away from the measured timestamp must not expand the lookup window");
   assert.ok(ids.length < pattern.stops.length, "crosswalk reads must be bounded to target and nearby timetable stops");
   const prediction = deriveNdovKv6Prediction({
     leg, pattern, event, assignmentIndex, stopPlaceIndex, operationDate: "20261012", nowMs,
@@ -78,6 +80,7 @@ const stopPlaceIndex = { stopPlaces: {
   console.log("PASS: unique stop-time fallback handles missing OpenOV mapping with medium confidence");
 
   const nonStopEvent = { ...fallbackEvent, eventType: "ONSTOP" };
+  let nonStopFailureReason = null;
   assert.equal(deriveNdovKv6Prediction({
     leg,
     pattern,
@@ -86,7 +89,13 @@ const stopPlaceIndex = { stopPlaces: {
     stopPlaceIndex: { stopPlaces: withoutCurrentStopMapping },
     operationDate: "20261012",
     nowMs,
+    onFailure: (reason) => { nonStopFailureReason = reason; },
   }), null, "schedule-time fallback must not be used for ONSTOP events without a static mapping");
+  assert.equal(
+    nonStopFailureReason,
+    "missing_static_stop_mapping_for_non_stop_event",
+    "a missing projection must expose why the safe stop-time fallback was rejected",
+  );
 
   const conflictingStopPlaces = {
     ...stopPlaceIndex.stopPlaces,

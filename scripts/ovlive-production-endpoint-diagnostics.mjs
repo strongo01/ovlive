@@ -52,8 +52,13 @@ async function main() {
   planUrl.searchParams.set("fromPlace", process.env.OVLIVE_FROM_PLACE ?? "nl-OpenOV_3924329");
   planUrl.searchParams.set("toPlace", process.env.OVLIVE_TO_PLACE ?? "nl-OpenOV_3924355");
   planUrl.searchParams.set("time", new Date(Date.now() + 120_000).toISOString());
-  planUrl.searchParams.set("numItineraries", "5");
-  planUrl.searchParams.set("maxItineraries", "5");
+  const parsedItineraryCount = Number.parseInt(process.env.OVLIVE_NUM_ITINERARIES ?? "3", 10);
+  const itineraryCount = Number.isFinite(parsedItineraryCount)
+    ? Math.min(5, Math.max(1, parsedItineraryCount))
+    : 3;
+  planUrl.searchParams.set("numItineraries", String(itineraryCount));
+  planUrl.searchParams.set("maxItineraries", String(itineraryCount));
+  planUrl.searchParams.set("ndovIdentityDiagnostics", "1");
 
   const planResult = await get(planUrl.pathname + planUrl.search, 65000);
   if (!planResult.ok || !planResult.json) {
@@ -63,20 +68,41 @@ async function main() {
 
   const legs = collectLegs(planResult.json);
   const openovLegs = legs.filter((leg) => /^nl-OpenOV_/i.test(String(leg.routeId ?? leg.route?.id ?? "")));
+  const transitLegs = legs.filter((leg) => {
+    const mode = String(leg?.mode ?? leg?.transitMode ?? "").trim().toUpperCase();
+    const tripId = String(leg?.tripId ?? leg?.trip?.id ?? "").trim();
+    const route = String(leg?.routeId ?? leg?.route?.id ?? "").trim();
+    return mode !== "WALK" && mode !== "TRANSFER" && Boolean(tripId || route);
+  });
   const ndovStatusCounts = {};
-  for (const leg of legs) {
+  for (const leg of transitLegs) {
     const status = String(leg.ndovRealtime?.status ?? "no_ndov_match");
     ndovStatusCounts[status] = (ndovStatusCounts[status] ?? 0) + 1;
+  }
+  const openovStatusCounts = {};
+  const openovReasonCounts = {};
+  for (const leg of openovLegs) {
+    const status = String(leg.openovRealtime?.status ?? "no_openov_match");
+    openovStatusCounts[status] = (openovStatusCounts[status] ?? 0) + 1;
+    if (leg.openovRealtime?.reason) {
+      const reason = String(leg.openovRealtime.reason);
+      openovReasonCounts[reason] = (openovReasonCounts[reason] ?? 0) + 1;
+    }
   }
 
   console.log(JSON.stringify({
     check: "production-plan",
     baseUrl,
+    requestedItineraries: itineraryCount,
     httpStatus: planResult.status,
     itineraries: Array.isArray(planResult.json.itineraries) ? planResult.json.itineraries.length : null,
     totalLegs: legs.length,
+    transitLegs: transitLegs.length,
     openovLegs: openovLegs.length,
+    ndovStatusScope: "transit legs only; walking and transfer legs are excluded",
     ndovStatusCounts,
+    openovStatusCounts,
+    openovReasonCounts,
     ndovRealtimeMeta: planResult.json.ndovRealtimeMeta ?? null,
     legs: legs.map((leg) => ({
       routeId: leg.routeId ?? leg.route?.id ?? null,
