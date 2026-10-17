@@ -349,8 +349,8 @@ const assignmentShardReads = assetFetchPaths.filter((path) =>
 );
 assert.ok(assignmentShardReads.length > 0, "PSA candidate stop shards should be checked");
 assert.ok(
-  assignmentShardReads.length < 16,
-  `irrelevant mid-trip stop rows must not fetch all 16 PSA shards; fetched ${assignmentShardReads.length}`
+  assignmentShardReads.length <= 2,
+  `the per-plan PSA budget must stay at or below 2 shards; fetched ${assignmentShardReads.length}`
 );
 console.log("PASS: PSA/CHB lookup only reads shards for time-relevant target haltes");
 console.log("PASS: exact KV17 cancellations attach only to their own bus/tram/metro trip");
