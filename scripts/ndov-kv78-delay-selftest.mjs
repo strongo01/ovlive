@@ -200,6 +200,7 @@ const shard = {
 };
 
 const assetFetchPaths = [];
+let kv78ExactBatchRequestCount = 0;
 const env = {
   ASSETS: {
     async fetch(request) {
@@ -246,9 +247,16 @@ const env = {
             return Response.json({ events: [] });
           }
           if (url.pathname === '/rows' && stream === 'kv78') {
-            const identity = url.searchParams.get("identity");
-            if (identity === "EBS|20261012|1314|1039|0") return Response.json({ rows: tripRows });
-            if (Object.hasOwn(alternateModeRows, identity)) return Response.json({ rows: alternateModeRows[identity] });
+            const identities = url.searchParams.getAll("identity");
+            if (identities.length) {
+              kv78ExactBatchRequestCount += 1;
+              const rows = [];
+              if (identities.includes("EBS|20261012|1314|1039|0")) rows.push(...tripRows);
+              for (const [identity, matchedRows] of Object.entries(alternateModeRows)) {
+                if (identities.includes(identity)) rows.push(...matchedRows);
+              }
+              return Response.json({ rows });
+            }
             if (
               url.searchParams.get('vehicleNumber') === '2281' &&
               url.searchParams.get('owner') === 'CXX' &&
@@ -335,6 +343,7 @@ assert.equal(plan.ndovRealtimeMeta.coverageByMode.TRAM.cancelledLegCount, 1);
 assert.equal(plan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv78DataLegCount, 1);
 assert.equal(plan.ndovRealtimeMeta.coverageByMode.METRO.kv78DataLegCount, 1);
 assert.equal(plan.ndovRealtimeMeta.coverageByMode.METRO.cancelledLegCount, 1);
+assert.equal(kv78ExactBatchRequestCount, 1, "all exact trip identities should be fetched in one KV78 Durable Object call");
 const assignmentShardReads = assetFetchPaths.filter((path) =>
   /\/ndov-stop-crosswalk\/shards\/stop-assignments-\d+\.json$/.test(path)
 );
