@@ -28,6 +28,16 @@ function safeText(value: unknown): string | null {
   return String(value);
 }
 
+function normalizeLineForMode(value: unknown, mode: unknown): string {
+  let line = String(value ?? "").trim();
+  const normalizedMode = String(mode ?? "").trim().toUpperCase();
+  if (normalizedMode === "TRAM") line = line.replace(/^(?:TRAM|T)\s*/i, "");
+  if (normalizedMode === "METRO" || normalizedMode === "SUBWAY") {
+    line = line.replace(/^(?:METRO|M)\s*/i, "");
+  }
+  return line.trim();
+}
+
 function validateCode(value: unknown, label: string): string {
   const code = String(value ?? "").trim();
   if (!code || code.length > 80 || !/^[A-Za-z0-9_-]+$/.test(code)) {
@@ -215,7 +225,7 @@ function groupByIdentity(rows: Obj[], line: string, date: string): Map<string, O
 }
 
 function compareLeg(leg: Obj, fromRows: Obj[], toRows: Obj[], fromCode: string, toCode: string): Obj {
-  const line = String(leg.line ?? "").trim();
+  const line = normalizeLineForMode(leg.line, leg.mode);
   const depart = amsterdamDateTime(leg.departure);
   const arrive = amsterdamDateTime(leg.arrival);
   if (!/^\d{1,8}[A-Za-z]?$/.test(line) || !depart || !arrive) {
@@ -320,19 +330,20 @@ export async function handleTransitousOvapiMatch(request: Request): Promise<Resp
     const toCode = validateCode(body.toArea, "tweede haltegebiedcode");
     if (fromCode.toLowerCase() === toCode.toLowerCase()) return json({ ok: false, error: "Kies twee verschillende haltegebieden." }, 400);
     if (!Array.isArray(body.legs) || body.legs.length === 0 || body.legs.length > MAX_LEGS) {
-      return json({ ok: false, error: `Geef 1 tot ${MAX_LEGS} Transitous-busritten op.` }, 400);
+      return json({ ok: false, error: `Geef 1 tot ${MAX_LEGS} Transitous-OV-ritten op.` }, 400);
     }
     const legs = body.legs.map((leg: any, index: number) => {
-      const line = String(leg?.line ?? "").trim();
+      const mode = String(leg?.mode ?? "").trim().toUpperCase();
+      const line = normalizeLineForMode(leg?.line, mode);
       const departure = safeText(leg?.departure);
       const arrival = safeText(leg?.arrival);
       if (!/^\d{1,8}[A-Za-z]?$/.test(line) || !departure || !arrival || departure.length > 80 || arrival.length > 80) {
-        throw new Error(`Rit ${index + 1} heeft een ongeldig lijnnummer of ongeldige tijden.`);
+        throw new Error("Rit " + (index + 1) + " heeft een ongeldig lijnnummer of ongeldige tijden.");
       }
       return {
         itinerary: Math.max(1, Math.floor(Number(leg.itinerary) || index + 1)),
         line,
-        mode: safeText(leg.mode),
+        mode: mode || safeText(leg.mode),
         fromName: safeText(leg.fromName),
         toName: safeText(leg.toName),
         fromStopId: safeText(leg.fromStopId),

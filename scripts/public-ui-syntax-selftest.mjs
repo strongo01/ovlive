@@ -226,4 +226,19 @@ assert.ok(summaryFunction.includes("niet gebruikt als verwachte tijd in de tijdl
 console.log("PASS: OpenOV status helper has no out-of-scope leg reference");
 console.log("PASS: KV6 observed-only status is rendered in the leg UI");
 console.log("PASS: unconfirmed OpenOV times cannot replace planned timeline times");
+
+const ovapiPanelStart = html.indexOf("$('ovapiTransitousMatchButton').onclick = async () => {");
+const ovapiPanelEnd = html.indexOf("function normalizeTransitousStopId", ovapiPanelStart);
+assert.ok(ovapiPanelStart >= 0 && ovapiPanelEnd > ovapiPanelStart, "OVAPI comparison panel must exist");
+const ovapiPanelSource = html.slice(ovapiPanelStart, ovapiPanelEnd);
+assert.ok(ovapiPanelSource.includes("['BUS', 'TRAM', 'METRO', 'SUBWAY'].includes(mode)"),
+  "OVAPI panel must accept bus, tram, metro and subway legs");
+assert.ok(ovapiPanelSource.includes("normalizeComparableLine"),
+  "OVAPI panel must normalize T/M-prefixed route labels before comparison");
+assert.ok(ovapiPanelSource.includes("TRAM: 'tram'") && ovapiPanelSource.includes("METRO: 'metro'"),
+  "OVAPI comparison results must display the correct transport mode");
+assert.equal(ovapiPanelSource.includes("!== 'BUS'"), false,
+  "OVAPI comparison panel must not retain the old bus-only filter");
+console.log("PASS: OVAPI comparison panel accepts tram/metro and labels them correctly");
+
 console.log("All public UI JavaScript checks passed.");

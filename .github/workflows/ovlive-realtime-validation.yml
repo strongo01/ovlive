@@ -68,6 +68,9 @@ jobs:
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
 
+      - name: OVAPI comparison tests for tram and metro
+        run: npm run ovapi:match-selftest
+
       - name: Deployment asset preflight syntax
         run: node --check scripts/validate-realtime-assets.mjs
 

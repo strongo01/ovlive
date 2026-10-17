@@ -159,9 +159,9 @@
       <div><label for="ovapiTransitousToArea">OVAPI-haltegebied aankomst</label><input id="ovapiTransitousToArea" value="utrmyl" maxlength="80"></div>
       <div><label for="ovapiTransitousFromStopId">Transitous-stop-ID vertrek</label><input id="ovapiTransitousFromStopId" value="nl-OpenOV_3924352" maxlength="200"></div>
       <div><label for="ovapiTransitousToStopId">Transitous-stop-ID aankomst</label><input id="ovapiTransitousToStopId" value="nl-OpenOV_3924329" maxlength="200"></div>
-      <div><label for="ovapiTransitousLineFilter">Lijnnummer (optioneel)</label><input id="ovapiTransitousLineFilter" value="" maxlength="20" placeholder="Leeg = alle passende buslijnen"></div>
+      <div><label for="ovapiTransitousLineFilter">Lijnnummer (optioneel)</label><input id="ovapiTransitousLineFilter" value="" maxlength="20" placeholder="Leeg = alle passende lijnen"></div>
     </div>
-    <p class="muted">Klik eerst bovenaan op ‘Zoek reizen’. Daarna vergelijkt deze knop de busritten uit het laatste plannerantwoord die precies bij de ingestelde Transitous-halte-ID’s passen. OVAPI-plantijden mogen maximaal 4 minuten verschillen om roosterverschillen te onderzoeken; actuele vertragingen blijven afhankelijk van verse bronupdates.</p>
+    <p class="muted">Klik eerst bovenaan op ‘Zoek reizen’. Daarna vergelijkt deze knop bus-, tram- en metroritten uit het laatste plannerantwoord die precies bij de ingestelde Transitous-halte-ID’s passen. OVAPI-plantijden mogen maximaal 4 minuten verschillen om roosterverschillen te onderzoeken; actuele vertragingen blijven afhankelijk van verse bronupdates.</p>
     <button type="button" id="ovapiTransitousMatchButton">Vergelijk laatste reisopties met OVAPI</button>
     <div id="ovapiTransitousMatchStatus" class="muted" aria-live="polite"></div>
     <div id="ovapiTransitousMatchResults"></div>
@@ -1992,24 +1992,34 @@ $('ovapiTransitousMatchButton').onclick = async () => {
     const sourceLegs = Array.isArray(journey.legs) ? journey.legs
       : Array.isArray(journey.transitLegs) ? journey.transitLegs : [];
     sourceLegs.forEach(leg => {
-      if (String(leg.mode || '').toUpperCase() !== 'BUS') return;
+      const mode = String(leg.mode || '').trim().toUpperCase();
+      if (!['BUS', 'TRAM', 'METRO', 'SUBWAY'].includes(mode)) return;
       const actualFromId = normalizeTransitousStopId(leg.from?.stopId || leg.from?.id || leg.from?.stopCode);
       const actualToId = normalizeTransitousStopId(leg.to?.stopId || leg.to?.id || leg.to?.stopCode);
       if (actualFromId !== fromId || actualToId !== toId) return;
       let line = String(leg.routeShortName || leg.route?.shortName || leg.tripShortName || '').trim();
+      const normalizeComparableLine = (value, modeValue) => {
+        let result = String(value || '').trim();
+        const normalizedMode = String(modeValue || '').trim().toUpperCase();
+        if (normalizedMode === 'TRAM') result = result.replace(/^(?:TRAM|T)\s*/i, '');
+        if (normalizedMode === 'METRO' || normalizedMode === 'SUBWAY') result = result.replace(/^(?:METRO|M)\s*/i, '');
+        return result.trim();
+      };
+      line = normalizeComparableLine(line, mode);
       if (!line) {
         const title = String(leg.displayName || leg.routeLongName || '');
         const found = title.match(/(?:bus\s*)?(\d{1,8}[a-z]?)(?:\b|$)/i);
-        if (found) line = found[1];
+        if (found) line = normalizeComparableLine(found[1], mode);
       }
-      if (!line || (lineFilter && line.toLowerCase() !== lineFilter.toLowerCase())) return;
+      const comparableFilter = normalizeComparableLine(lineFilter, mode);
+      if (!line || (lineFilter && line.toLowerCase() !== comparableFilter.toLowerCase())) return;
       const departure = leg.scheduledStartTime || leg.startTime || leg.from?.departure || leg.departureTime;
       const arrival = leg.scheduledEndTime || leg.endTime || leg.to?.arrival || leg.arrivalTime;
       if (!departure || !arrival) return;
       legs.push({
         itinerary: index + 1,
         line,
-        mode: leg.mode,
+        mode,
         fromName: leg.from?.name || leg.origin?.name || '',
         toName: leg.to?.name || leg.destination?.name || '',
         fromStopId: leg.from?.stopId || leg.from?.id || '',
@@ -2024,14 +2034,14 @@ $('ovapiTransitousMatchButton').onclick = async () => {
   });
 
   if (!legs.length) {
-    status.textContent = 'Geen busritten in de laatste plannerresultaten passen bij deze twee Transitous-halte-ID’s. Controleer de gekozen haltes of plan opnieuw.';
+    status.textContent = 'Geen bus-, tram- of metroritten in de laatste plannerresultaten passen bij deze twee Transitous-halte-ID’s. Controleer de gekozen haltes of plan opnieuw.';
     return;
   }
   const selectedLegs = legs.slice(0, 10);
   if (legs.length > selectedLegs.length) {
-    status.textContent = `Er zijn ${legs.length} passende busritten gevonden; de eerste ${selectedLegs.length} worden getest…`;
+    status.textContent = `Er zijn ${legs.length} passende OV-ritten gevonden; de eerste ${selectedLegs.length} worden getest…`;
   } else {
-    status.textContent = `${selectedLegs.length} busrit(ten) gevonden. OVAPI bij beide haltes ophalen en dienstregeling vergelijken…`;
+    status.textContent = `${selectedLegs.length} OV-rit(ten) gevonden. OVAPI bij beide haltes ophalen en dienstregeling vergelijken…`;
   }
   button.disabled = true;
   try {
@@ -2073,7 +2083,8 @@ $('ovapiTransitousMatchButton').onclick = async () => {
         : renderCandidate(candidate);
       const statusTitle = item.status === 'unique_schedule_candidate' ? 'Unieke dienstregelingskandidaat' : item.status === 'ambiguous' ? 'Ambigue koppeling — niet automatisch gekozen' : item.status === 'no_candidate' ? 'Geen passende OVAPI-kandidaat' : 'Niet vergelijkbaar';
       const cls = item.status === 'unique_schedule_candidate' && candidate?.reliableDelayAtBothStops ? 'rt-ok' : 'rt-unknown';
-      return `<article class="journey"><strong>Reis ${esc(item.itinerary)} · bus ${esc(item.line)} · ${esc(item.fromName || '')} → ${esc(item.toName || '')}</strong><div class="muted">Transitous routeId: ${esc(item.routeId || 'onbekend')} · tripId: ${esc(item.tripId || 'onbekend')}</div><div class="muted">Gepland in Transitous: ${esc(clock(item.departure))} → ${esc(clock(item.arrival))}</div><div class="rt-status ${cls}"><strong>${esc(statusTitle)}</strong><div class="rt-details">${esc(item.note || '')}</div></div>${candidateHtml}${item.status === 'ambiguous' && item.candidates?.length > 1 ? `<div class="muted">Er zijn ${item.candidates.length} kandidaten. Er wordt geen automatische ritkeuze gemaakt.</div>` : ''}</article>`;
+      const modeLabel = ({ BUS: 'bus', TRAM: 'tram', METRO: 'metro', SUBWAY: 'metro' })[String(item.mode || '').toUpperCase()] || 'OV';
+      return `<article class="journey"><strong>Reis ${esc(item.itinerary)} · ${esc(modeLabel)} ${esc(item.line)} · ${esc(item.fromName || '')} → ${esc(item.toName || '')}</strong><div class="muted">Transitous routeId: ${esc(item.routeId || 'onbekend')} · tripId: ${esc(item.tripId || 'onbekend')}</div><div class="muted">Gepland in Transitous: ${esc(clock(item.departure))} → ${esc(clock(item.arrival))}</div><div class="rt-status ${cls}"><strong>${esc(statusTitle)}</strong><div class="rt-details">${esc(item.note || '')}</div></div>${candidateHtml}${item.status === 'ambiguous' && item.candidates?.length > 1 ? `<div class="muted">Er zijn ${item.candidates.length} kandidaten. Er wordt geen automatische ritkeuze gemaakt.</div>` : ''}</article>`;
     }).join('');
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : 'Transitous-OVAPI-koppelingstest mislukt.';
