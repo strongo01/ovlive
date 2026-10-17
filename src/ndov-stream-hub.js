@@ -253,6 +253,13 @@ function initialSnapshot(stream) {
     startedAt: null, finishedAt: null, sessionSeconds: null, messageCount: 0, rawBytes: 0,
     envelopeCounts: {}, latestMessageAt: null, latestRows: [], latestEvents: [], latestMutations: [],
     error: null, warnings: [],
+    // Session-level diagnostics distinguish fresh transport messages from usable KV78 stop-time rows.
+    kv78PasstimeMessageCount: 0,
+    kv78ParsedRowCount: 0,
+    kv78LastPasstimeMessageAt: null,
+    kv78LastNonemptyPasstimeAt: null,
+    kv78LastPasstimeBatchSize: 0,
+    kv78LastPasstimePayloadBytes: 0,
   };
 }
 
@@ -1678,10 +1685,23 @@ export class NdovFeedHub extends DurableObject {
             state.lastRowPruneAt = Date.now();
           }
           if (stream === 'kv78' && /\/KV8passtimes\//.test(envelope)) {
-            for (const row of parseKv78Payload(text, envelope)) {
+            const passtimeReceivedAt = new Date().toISOString();
+            const parsedRows = parseKv78Payload(text, envelope);
+            state.snapshot = {
+              ...state.snapshot,
+              kv78PasstimeMessageCount: (Number(state.snapshot.kv78PasstimeMessageCount) || 0) + 1,
+              kv78ParsedRowCount: (Number(state.snapshot.kv78ParsedRowCount) || 0) + parsedRows.length,
+              kv78LastPasstimeMessageAt: passtimeReceivedAt,
+              kv78LastNonemptyPasstimeAt: parsedRows.length
+                ? passtimeReceivedAt
+                : (state.snapshot.kv78LastNonemptyPasstimeAt ?? null),
+              kv78LastPasstimeBatchSize: parsedRows.length,
+              kv78LastPasstimePayloadBytes: payload.length,
+            };
+            for (const row of parsedRows) {
               // Keep every line during this bounded diagnostic run. Filtering to
               // U005/U011/U073/24 hid mutations such as CXX L014 and ARR 26010.
-              row.receivedAt = new Date().toISOString();
+              row.receivedAt = passtimeReceivedAt;
               const key = kv78RowCacheKey(row) ?? `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
               state.rows.delete(key);
               state.rows.set(key, row);
