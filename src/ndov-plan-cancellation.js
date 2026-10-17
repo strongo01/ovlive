@@ -804,6 +804,141 @@ async function getBisonIdentityDiagnostics(env) {
   return snapshot.bisonIdentityDiagnostics ?? null;
 }
 
+
+function identityDiagnosticParts(value) {
+  const parts = String(value ?? "").split("|").map((part) => part.trim());
+  if (parts.length !== 5 || parts.some((part) => !part)) return null;
+  return {
+    identity: parts.join("|"),
+    owner: parts[0].toUpperCase(),
+    date: normalizeDate(parts[1]),
+    line: parts[2].toUpperCase(),
+    journey: parts[3],
+    reinforcement: parts[4] || "0",
+  };
+}
+
+function compactIdentityDiagnosticTrip(trip) {
+  return {
+    identity: String(trip?.identity ?? ""),
+    eventType: trip?.eventType ?? null,
+    receivedAt: trip?.receivedAt ?? null,
+    punctualityPresent: typeof trip?.punctualityPresent === "boolean"
+      ? trip.punctualityPresent
+      : undefined,
+    punctualityAgeSeconds: Number.isFinite(trip?.punctualityAgeSeconds)
+      ? trip.punctualityAgeSeconds
+      : undefined,
+    rowCount: Number.isFinite(trip?.rowCount) ? trip.rowCount : undefined,
+    uniqueStopCount: Number.isFinite(trip?.uniqueStopCount)
+      ? trip.uniqueStopCount
+      : undefined,
+    sampleStopCodes: Array.isArray(trip?.sampleStopCodes)
+      ? trip.sampleStopCodes.slice(0, 6)
+      : undefined,
+  };
+}
+
+/**
+ * Keep exact matching strict, but expose bounded near-identity samples when no
+ * exact NDOV match exists. This distinguishes missing feed records from an
+ * owner/line/journey/date/reinforcement crosswalk mismatch without changing
+ * cancellation or delay decisions.
+ */
+function summarizeRealtimeIdentityDiagnostics(requestedIdentities, diagnostics, stream) {
+  const uniqueIdentities = [...new Set(
+    (Array.isArray(requestedIdentities) ? requestedIdentities : [])
+      .map((identity) => String(identity ?? "").trim())
+      .filter(Boolean)
+  )];
+  const trips = Array.isArray(diagnostics?.trips) ? diagnostics.trips : [];
+  const parsedTrips = trips
+    .map((trip) => ({ trip, parts: identityDiagnosticParts(trip?.identity) }))
+    .filter((item) => item.parts);
+  const requestedParts = uniqueIdentities
+    .map((identity) => ({ identity, parts: identityDiagnosticParts(identity) }))
+    .filter((item) => item.parts);
+  const requestedOwners = new Set(requestedParts.map((item) => item.parts.owner));
+  const ownerLineEntries = Array.isArray(diagnostics?.byOwnerLine)
+    ? diagnostics.byOwnerLine
+    : [];
+  const relevantOwnerLineEntries = ownerLineEntries.filter((item) =>
+    requestedOwners.has(String(item?.owner ?? "").trim().toUpperCase())
+  );
+  const byOwnerLine = (relevantOwnerLineEntries.length
+    ? relevantOwnerLineEntries
+    : ownerLineEntries
+  ).slice(0, 12).map((item) => ({
+    owner: item?.owner ?? null,
+    line: item?.line ?? null,
+    tripCount: Number.isFinite(item?.tripCount) ? item.tripCount : null,
+    recordCount: Number.isFinite(item?.rowCount) ? item.rowCount : null,
+    punctualityCount: Number.isFinite(item?.punctualityCount)
+      ? item.punctualityCount
+      : undefined,
+  }));
+
+  const comparisons = requestedParts.slice(0, 8).map(({ identity, parts }) => {
+    const sameOwnerDate = parsedTrips.filter(({ parts: sample }) =>
+      sample.owner === parts.owner && sample.date === parts.date
+    );
+    const sameOwnerDateLine = sameOwnerDate.filter(({ parts: sample }) =>
+      sample.line === parts.line
+    );
+    const sameOwnerDateJourney = sameOwnerDate.filter(({ parts: sample }) =>
+      sample.journey === parts.journey
+    );
+    return {
+      requestedIdentity: identity,
+      exactIdentityInReturnedSample: sameOwnerDate.some(({ parts: sample }) =>
+        sample.identity === identity
+      ),
+      sameOwnerDateSampleCount: sameOwnerDate.length,
+      sameOwnerDateLineSamples: sameOwnerDateLine.slice(0, 5)
+        .map(({ trip }) => compactIdentityDiagnosticTrip(trip)),
+      sameOwnerDateJourneySamples: sameOwnerDateJourney.slice(0, 5)
+        .map(({ trip }) => compactIdentityDiagnosticTrip(trip)),
+      sameOwnerDateOtherSamples: sameOwnerDate
+        .filter(({ parts: sample }) => sample.line !== parts.line && sample.journey !== parts.journey)
+        .slice(0, 3)
+        .map(({ trip }) => compactIdentityDiagnosticTrip(trip)),
+    };
+  });
+
+  const byLine = stream === "bison" && diagnostics?.byLine &&
+    typeof diagnostics.byLine === "object"
+    ? Object.entries(diagnostics.byLine).slice(0, 20).map(([line, tripCount]) => ({
+        line,
+        tripCount: Number.isFinite(tripCount) ? tripCount : null,
+      }))
+    : undefined;
+
+  return {
+    available: Array.isArray(diagnostics?.trips),
+    currentDate: diagnostics?.currentDate ?? null,
+    requestedIdentityCount: uniqueIdentities.length,
+    requestedIdentities: uniqueIdentities.slice(0, 8),
+    storedRecordCount: stream === "kv78"
+      ? (Number.isFinite(diagnostics?.cacheSize) ? diagnostics.cacheSize : null)
+      : (Number.isFinite(diagnostics?.storedTripCount) ? diagnostics.storedTripCount : null),
+    currentDateRecordCount: Number.isFinite(diagnostics?.matchingRowCount)
+      ? diagnostics.matchingRowCount
+      : Number.isFinite(diagnostics?.matchingTripCount)
+        ? diagnostics.matchingTripCount
+        : null,
+    currentDateTripCount: Number.isFinite(diagnostics?.identityCount)
+      ? diagnostics.identityCount
+      : Number.isFinite(diagnostics?.matchingTripCount)
+        ? diagnostics.matchingTripCount
+        : null,
+    sampledTripCount: trips.length,
+    byOwnerLine,
+    byLine,
+    comparisons,
+    error: diagnostics?.error ?? null,
+  };
+}
+
 async function getCurrentBisonMutations(env, identities) {
   const unique = [...new Set(identities.filter(Boolean))];
   if (!unique.length) return [];
@@ -1724,6 +1859,8 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let kv6ObservedLegCount = 0;
   let kv6RequestedIdentityKeys = [];
   let kv6ReturnedEventCount = null;
+  let kv6IdentityAudit = null;
+  let kv78IdentityAudit = null;
   try {
     const liveItems = candidates.filter((item) => item.identityKey && item.leg.ndovRealtime?.status !== "cancelled");
     kv6RequestedIdentityKeys = [...new Set(liveItems.map((item) => item.identityKey))];
@@ -1854,6 +1991,11 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     const bisonIdentityDiagnostics = await getBisonIdentityDiagnostics(env).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     }));
+    kv6IdentityAudit = summarizeRealtimeIdentityDiagnostics(
+      kv6RequestedIdentityKeys,
+      bisonIdentityDiagnostics,
+      "bison"
+    );
     const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
     const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
       identity: toIdentity(
@@ -1891,6 +2033,11 @@ export async function applyNdovCancellationsToPlan(plan, env) {
   let openovStopPlaceIndexAttempted = false;
   try {
     const kv78Snapshot = await getKv78Snapshot(env);
+    kv78IdentityAudit = summarizeRealtimeIdentityDiagnostics(
+      candidates.map((item) => item.identityKey).filter(Boolean),
+      kv78Snapshot.kv78IdentityDiagnostics,
+      "kv78"
+    );
     const kv78CachedRows = Array.isArray(kv78Snapshot.latestRows)
       ? kv78Snapshot.latestRows
       : [];
@@ -2206,6 +2353,10 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     kv78VehicleFallbackLegCount,
     kv78DelayLegCount,
     kv78Error,
+    ...(kv6IdentityAudit ? { kv6IdentityDiagnostics: kv6IdentityAudit } : {}),
+    ...(kv78MatchedLegCount === 0 && kv78IdentityAudit
+      ? { kv78IdentityDiagnostics: kv78IdentityAudit }
+      : {}),
     message: cancelled
       ? `${cancelled} exacte KV17-annulering(en) aan een reisdeel gekoppeld.`
       : kv78DataLegCount
