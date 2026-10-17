@@ -9,7 +9,7 @@ import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
 import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 
-import { applyNdovCancellationsToPlan } from "./ndov-plan-cancellation.js";
+import { applyNdovCancellationsToPlan, prepareNsTrainIdentities } from "./ndov-plan-cancellation.js";
 import { enrichNsTrainPlan } from "./ns-train-realtime";
 import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
@@ -2643,9 +2643,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       }
 
       try {
+        // Prioritize the exact NS train identity and NS board requests before
+        // OpenOV/NDOV enrichment loads route shards for many bus/tram legs.
+        await prepareNsTrainIdentities(planData, env);
+        await enrichNsTrainPlan(planData, env);
         planData = await enrichTransitousPlan(planData);
         await applyNdovCancellationsToPlan(planData, env);
-        await enrichNsTrainPlan(planData, env);
       } catch (error) {
         console.error(
           "[OVLIVE_ENRICHMENT_ERROR]",
