@@ -38,18 +38,18 @@ const kv78SnapshotEnd = planCancellationSource.indexOf("async function getCurren
 assert.ok(kv78SnapshotStart >= 0 && kv78SnapshotEnd > kv78SnapshotStart,
   'KV78 status snapshot helper must remain inspectable');
 const kv78SnapshotSource = planCancellationSource.slice(kv78SnapshotStart, kv78SnapshotEnd);
-assert.match(kv78SnapshotSource, /target\\.searchParams\\.set\\("includeRows", "0"\\)/,
+assert.match(kv78SnapshotSource, /target\.searchParams\.set\("includeRows", "0"\)/,
   'plan requests must not transfer a 5,000-row KV78 status sample when exact trip rows are fetched separately');
-assert.match(kv78SnapshotSource, /if \\(identityKeys\\.length\\) \\{\\s*target\\.searchParams\\.set\\("identityDiagnostics", "1"\\)/,
+assert.match(kv78SnapshotSource, /if \(identityKeys\.length\) \{\s*target\.searchParams\.set\("identityDiagnostics", "1"\)/,
   'the expensive full-cache KV78 identity scan must be opt-in for diagnostic requests with target identities');
 assert.doesNotMatch(kv78SnapshotSource.slice(0, kv78SnapshotSource.indexOf("if (identityKeys.length)")),
   /identityDiagnostics/,
   'ordinary planner requests must not enable the KV78 full-cache identity scan');
-assert.match(ndovStreamHubSource, /url\\.searchParams\\.get\\('includeRows'\\) === '0' \\? \\{\\} : \\{/,
+assert.match(ndovStreamHubSource, /url\.searchParams\.get\('includeRows'\) === '0' \? \{\} : \{/,
   'the NDOV status endpoint must omit row arrays when the planner requests a lightweight snapshot');
-assert.match(ndovStreamHubSource, /kv78StatusSampleCount: Math\\.min\\(state\\.rows\\.size, KV78_STATUS_SAMPLE_LIMIT\\)/,
+assert.match(ndovStreamHubSource, /kv78StatusSampleCount: Math\.min\(state\.rows\.size, KV78_STATUS_SAMPLE_LIMIT\)/,
   'lightweight KV78 status must still report the size of the available row sample');
-assert.match(planCancellationSource, /statusSampleAvailableCount: finiteCount\\(kv78Snapshot\\.kv78StatusSampleCount\\)/,
+assert.match(planCancellationSource, /statusSampleAvailableCount: finiteCount\(kv78Snapshot\.kv78StatusSampleCount\)/,
   'plan diagnostics must report available sample size without transferring the sample rows');
 
 const mutationFailureAt = planCancellationSource.indexOf('status: "mutation_lookup_unavailable"');
