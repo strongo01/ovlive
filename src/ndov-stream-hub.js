@@ -1043,7 +1043,20 @@ export class NdovFeedHub extends DurableObject {
     }
     if (url.pathname === '/rows') {
       if (stream !== 'kv78') return Response.json({ ok: false, error: 'KV78-halterijen zijn alleen beschikbaar op de KV78-stream.' }, { status: 400 });
-      const identity = normalizeTripLookupIdentity(url.searchParams.get('identity'));
+      const rawIdentities = url.searchParams.getAll('identity').map(value => String(value ?? '').trim()).filter(Boolean);
+      if (rawIdentities.length > 50) {
+        return Response.json({ ok: false, error: 'Vraag maximaal 50 KV78-ritidentiteiten tegelijk op.' }, { status: 400 });
+      }
+      const parsedIdentities = rawIdentities.map(normalizeTripLookupIdentity);
+      if (parsedIdentities.some(identity => !identity)) {
+        return Response.json({ ok: false, error: 'Een of meer KV78-ritidentiteiten zijn ongeldig.' }, { status: 400 });
+      }
+      const identityKey = identity => [
+        identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement
+      ].join('|');
+      const identitiesByKey = new Map(parsedIdentities.map(identity => [identityKey(identity), identity]));
+      const identities = [...identitiesByKey.values()];
+      const identity = identities.length === 1 ? identities[0] : null;
       const vehicleNumber = String(url.searchParams.get('vehicleNumber') ?? '').trim().split(':').pop();
       const vehicleOwner = String(url.searchParams.get('owner') ?? '').trim().toUpperCase();
       const vehicleDate = normalizeOperatingDate(url.searchParams.get('date'));
@@ -1051,12 +1064,12 @@ export class NdovFeedHub extends DurableObject {
       const vehicleLookupValid = Boolean(
         vehicleNumber && vehicleOwner && /^\d{8}$/.test(vehicleDate)
       );
-      if (!identity && !vehicleLookupValid) {
-        return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement of vehicleNumber=...&owner=...&date=YYYYMMDD op.' }, { status: 400 });
+      if (!identities.length && !vehicleLookupValid) {
+        return Response.json({ ok: false, error: 'Geef een of meer identity=owner|YYYY-MM-DD|line|journey|reinforcement-parameters of vehicleNumber=...&owner=...&date=YYYYMMDD op.' }, { status: 400 });
       }
       const now = Date.now();
-      const rows = [...state.rows.values()].filter((row) => identity
-        ? rowMatchesIdentity(row, identity)
+      const rows = [...state.rows.values()].filter((row) => identities.length
+        ? identities.some(identity => rowMatchesIdentity(row, identity))
         : String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
           String(row?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
           normalizeOperatingDate(row?.operationDate) === vehicleDate &&
@@ -1064,13 +1077,38 @@ export class NdovFeedHub extends DurableObject {
       );
       const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
       fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
+
+      // Preserve the previous 200-row per-identity cap while allowing a plan to
+      // retrieve multiple exact trips with one Durable Object subrequest.
+      let returnedRows;
+      if (identities.length) {
+        const rowsByIdentity = new Map([...identitiesByKey.keys()].map(key => [key, []]));
+        for (const row of fresh) {
+          const rowIdentity = normalizeTripLookupIdentity([
+            row?.dataOwnerCode,
+            row?.operationDate,
+            row?.linePlanningNumber,
+            row?.journeyNumber,
+            row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? '0'
+          ].join('|'));
+          if (!rowIdentity) continue;
+          const bucket = rowsByIdentity.get(identityKey(rowIdentity));
+          if (bucket) bucket.push(row);
+        }
+        returnedRows = [...rowsByIdentity.values()].flatMap(items => items.slice(-200));
+      } else {
+        returnedRows = fresh.slice(-200);
+      }
+
+      const normalizedIdentityKeys = [...identitiesByKey.keys()];
       return Response.json({
         ok: true,
-        identity: identity ? [identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement].join('|') : null,
-        lookup: identity ? null : { vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
-        returnedCount: Math.min(fresh.length, 200),
+        identity: identity ? identityKey(identity) : null,
+        identities: identities.length > 1 ? normalizedIdentityKeys : undefined,
+        lookup: identities.length ? null : { vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
+        returnedCount: returnedRows.length,
         staleCount: rows.length - fresh.length,
-        rows: fresh.slice(-200),
+        rows: returnedRows,
       }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname !== '/start') return new Response('not found', { status: 404 });
