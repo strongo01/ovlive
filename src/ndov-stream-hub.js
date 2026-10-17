@@ -930,14 +930,22 @@ export class NdovFeedHub extends DurableObject {
       const currentMutations = flattenCurrentMutations(state.mutations, 300);
       return Response.json({
         ...base,
-        latestRows: url.searchParams.get('includeAllRows') === '1'
-          ? [...state.rows.values()]
-          : [...state.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
+        // The planner asks for a lightweight status snapshot. It retrieves
+        // exact KV78 rows separately by trip identity, so serializing 5,000
+        // unrelated cached rows into every plan request is needless memory/CPU.
+        ...(url.searchParams.get('includeRows') === '0' ? {} : {
+          latestRows: url.searchParams.get('includeAllRows') === '1'
+            ? [...state.rows.values()]
+            : [...state.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
+        }),
         latestEvents: [...state.events.values()].slice(-100),
         bisonIdentityDiagnostics,
         storedKv6TripCount: state.events.size,
         latestMutations: currentMutations,
         storedKv78RowCount: state.rows.size,
+        ...(stream === 'kv78' ? {
+          kv78StatusSampleCount: Math.min(state.rows.size, KV78_STATUS_SAMPLE_LIMIT),
+        } : {}),
         kv78IdentityDiagnostics,
         storedMutationIdentityCount: state.mutations.size,
         continuousEnabled: state.continuousEnabled,
