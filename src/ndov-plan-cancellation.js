@@ -8,8 +8,10 @@ const OPENOV_ROUTE_CROSSWALK_ROOT = "/ndov-openov-route-crosswalk";
 const ASSET_ORIGIN = "https://ovlive-assets.local";
 const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
 // Leave room for Transitous/OpenOV requests and route-shard reads on a Free Worker.
-const MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 6;
-const MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 8;
+// Share the Free Worker subrequest budget with Transitous, realtime feeds, route
+// shards, service calendars and Durable Object calls. Partial maps stay unconfirmed.
+const MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 2;
+const MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 2;
 const AMSTERDAM_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Amsterdam",
   hour: "2-digit",
