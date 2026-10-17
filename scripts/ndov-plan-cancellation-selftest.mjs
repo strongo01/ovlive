@@ -26,7 +26,7 @@ assert.match(planCancellationSource, /target\.searchParams\.append\("identity", 
   'BISON identity diagnostics must query the targeted current journey identities');
 assert.match(planCancellationSource, /kv78CollectorDiagnostics/,
   'targeted plan diagnostics must expose the KV78 collection state without opening the protected status endpoint');
-assert.match(planCancellationSource, /lastNonemptyPasstimeAt/,
+assert.match(planCancellationSource, /kv78LastNonemptyPasstimeAt/,
   'targeted plan diagnostics must distinguish fresh transport messages from fresh parsed KV78 rows');
 assert.match(ndovStreamHubSource, /kv78PasstimeMessageCount/,
   'collector must count KV78 passtime envelopes independently of generic stream messages');
