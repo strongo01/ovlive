@@ -714,11 +714,7 @@ export class NdovFeedHub extends DurableObject {
                 const date = normalizeOperatingDate(row?.operationDate);
                 const line = String(row?.linePlanningNumber ?? "").trim().toUpperCase();
 
-                if (
-                  owner !== "CXX" ||
-                  date !== currentDate ||
-                  !["U005", "U011", "U073"].includes(line)
-                ) continue;
+                if (!owner || date !== currentDate || !line) continue;
 
                 const journey = String(row?.journeyNumber ?? "").trim();
                 const reinforcement = String(row?.fortifyOrderNumber ?? "0").trim() || "0";
@@ -768,12 +764,24 @@ export class NdovFeedHub extends DurableObject {
                   )
                 );
 
+              const byOwnerLineMap = new Map();
+              for (const trip of trips) {
+                const parts = trip.identity.split("|");
+                const owner = parts[0] ?? "?";
+                const line = parts[2] ?? "?";
+                const key = owner + "|" + line;
+                const summary = byOwnerLineMap.get(key) ?? { owner, line, tripCount: 0, rowCount: 0 };
+                summary.tripCount += 1;
+                summary.rowCount += trip.rowCount;
+                byOwnerLineMap.set(key, summary);
+              }
               return {
                 currentDate,
                 cacheSize: state.rows.size,
                 cacheLimit: KV78_ROW_LIMIT,
                 matchingRowCount,
                 identityCount: trips.length,
+                byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.rowCount - a.rowCount).slice(0, 80),
                 trips: trips.slice(0, 80),
               };
             })()
@@ -788,7 +796,7 @@ export class NdovFeedHub extends DurableObject {
                 const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
                 const date = normalizeOperatingDate(event?.operationDate);
                 const line = String(event?.linePlanningNumber ?? "").trim().toUpperCase();
-                if (owner !== "CXX" || date !== currentDate || !["U005", "U011", "U073"].includes(line)) continue;
+                if (!owner || date !== currentDate || !line) continue;
 
                 const journey = String(event?.journeyNumber ?? "").trim();
                 const reinforcement = String(event?.reinforcementNumber ?? "0").trim() || "0";
@@ -809,14 +817,25 @@ export class NdovFeedHub extends DurableObject {
               }
 
               trips.sort((a, b) => String(b.receivedAt ?? "").localeCompare(String(a.receivedAt ?? "")));
+              const byLineMap = new Map();
+              const byOwnerLineMap = new Map();
+              for (const trip of trips) {
+                const parts = trip.identity.split("|");
+                const owner = parts[0] ?? "?";
+                const line = parts[2] ?? "?";
+                byLineMap.set(line, (byLineMap.get(line) ?? 0) + 1);
+                const key = owner + "|" + line;
+                const summary = byOwnerLineMap.get(key) ?? { owner, line, tripCount: 0, punctualityCount: 0 };
+                summary.tripCount += 1;
+                if (trip.punctualityPresent) summary.punctualityCount += 1;
+                byOwnerLineMap.set(key, summary);
+              }
               return {
                 currentDate,
                 storedTripCount: state.events.size,
                 matchingTripCount: trips.length,
-                byLine: Object.fromEntries(["U005", "U011", "U073"].map((line) => [
-                  line,
-                  trips.filter((item) => item.identity.split("|")[2] === line).length,
-                ])),
+                byLine: Object.fromEntries([...byLineMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 80)),
+                byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.tripCount - a.tripCount).slice(0, 80),
                 trips: trips.slice(0, 80),
               };
             })()

@@ -1222,6 +1222,53 @@ function legsWithTransitousId(plan) {
   return found;
 }
 
+function buildRealtimeCoverageByMode(candidates) {
+  const byMode = new Map();
+  for (const item of Array.isArray(candidates) ? candidates : []) {
+    const rawMode = String(item?.leg?.mode ?? item?.leg?.transitMode ?? item?.leg?.product?.category ?? "UNKNOWN").trim().toUpperCase();
+    const mode = rawMode || "UNKNOWN";
+    const stats = byMode.get(mode) ?? {
+      candidateLegCount: 0,
+      routeIdentityMatchedLegCount: 0,
+      kv6MatchedLegCount: 0,
+      kv6PunctualityPresentLegCount: 0,
+      kv78DataLegCount: 0,
+      kv78PositiveDelayLegCount: 0,
+      cancelledLegCount: 0,
+      predictedLegCount: 0,
+      realtimeDataLegCount: 0,
+    };
+    stats.candidateLegCount += 1;
+    if (item?.identityKey) stats.routeIdentityMatchedLegCount += 1;
+
+    const realtime = item?.leg?.ndovRealtime ?? {};
+    const kv6 = realtime?.kv6 ?? (realtime?.source === "NDOV BISON KV6" ? realtime : null);
+    const kv6Matched = kv6?.status === "kv6_live" || kv6?.status === "kv6_observed";
+    if (kv6Matched) {
+      stats.kv6MatchedLegCount += 1;
+      if (typeof kv6?.punctualitySeconds === "number" && Number.isFinite(kv6.punctualitySeconds)) {
+        stats.kv6PunctualityPresentLegCount += 1;
+      }
+    }
+
+    const kv78 = realtime?.kv78 ?? (realtime?.source === "NDOV KV78Turbo" ? realtime : null);
+    if (kv78?.status === "kv78_delay") {
+      stats.kv78DataLegCount += 1;
+      const delays = [kv78?.departure?.delaySeconds, kv78?.arrival?.delaySeconds]
+        .filter((delay) => typeof delay === "number" && Number.isFinite(delay));
+      if (delays.some((delay) => delay > 0)) stats.kv78PositiveDelayLegCount += 1;
+    }
+
+    const cancelled = item?.leg?.cancelled === true || realtime?.status === "cancelled";
+    if (cancelled) stats.cancelledLegCount += 1;
+    const predicted = Boolean(item?.leg?.realtimePrediction || realtime?.prediction);
+    if (predicted) stats.predictedLegCount += 1;
+    if (cancelled || kv6Matched || kv78?.status === "kv78_delay" || predicted) stats.realtimeDataLegCount += 1;
+    byMode.set(mode, stats);
+  }
+  return Object.fromEntries([...byMode.entries()].sort(([a], [b]) => a.localeCompare(b)));
+}
+
 const NS_RAIL_MODES_FOR_IDENTITY = new Set([
   "RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL",
   "HIGHSPEED_RAIL", "NIGHT_RAIL", "REGIONAL_FAST_RAIL", "SUBURBAN", "TRAIN",
@@ -1293,6 +1340,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     ndovPredictionLegCount: 0,
     combinedPredictionLegCount: 0,
     message: "Geen bevestigde NDOV-koppeling toegepast.",
+    coverageByMode: buildRealtimeCoverageByMode(candidates),
   };
   if (!candidates.length) {
     plan.ndovRealtimeMeta = { ...baseMeta, status: "not_applicable", message: "Geen Transitous/OpenOV-trip-ID's gevonden om te koppelen." };
@@ -1644,12 +1692,6 @@ export async function applyNdovCancellationsToPlan(plan, env) {
     const kv78CachedRows = Array.isArray(kv78Snapshot.latestRows)
       ? kv78Snapshot.latestRows
       : [];
-    const kv78WatchedRows = kv78CachedRows.filter((row) => {
-      const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
-      const line = String(row?.linePlanningNumber ?? "").trim().toUpperCase();
-      return owner === "CXX" && ["U005", "U011", "U073"].includes(line);
-    });
-
     kv78FeedState = kv78Snapshot.state ?? "unknown";
     const kv78LatestMs = timestampMs(valueOf(kv78Snapshot, "latestMessageAt"));
     const kv78AgeMs = kv78LatestMs === null ? null : Date.now() - kv78LatestMs;
@@ -1876,6 +1918,7 @@ export async function applyNdovCancellationsToPlan(plan, env) {
 
   plan.ndovRealtimeMeta = {
     ...baseMeta,
+    coverageByMode: buildRealtimeCoverageByMode(candidates),
     ndovPredictionLegCount,
     combinedPredictionLegCount,
     status: "ok",
