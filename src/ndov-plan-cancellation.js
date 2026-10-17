@@ -2369,20 +2369,45 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
 
   let ndovPredictionLegCount = 0;
   let combinedPredictionLegCount = 0;
+  const kv6ProjectionCandidateItems = candidates.filter(
+    (item) => item.routePattern && item.kv6PredictionContext
+  );
+  const kv6ProjectionFailureReasonCounts = {};
+  let kv6ProjectionAttemptCount = 0;
+  const recordKv6ProjectionFailure = (reason) => {
+    const key = String(reason || "unknown_projection_failure");
+    kv6ProjectionFailureReasonCounts[key] =
+      (kv6ProjectionFailureReasonCounts[key] ?? 0) + 1;
+  };
+
   for (const item of candidates) {
     const context = item.kv6PredictionContext;
-    if (context && item.routePattern && stopAssignmentIndex && openovStopPlaceIndex) {
-      const prediction = deriveNdovKv6Prediction({
-        leg: item.leg,
-        pattern: item.routePattern,
-        event: context.event,
-        assignmentIndex: stopAssignmentIndex,
-        stopPlaceIndex: openovStopPlaceIndex,
-        operationDate: item.identity?.serviceDate ?? null,
-      });
-      if (prediction) {
-        item.leg.ndovRealtime = { ...(item.leg.ndovRealtime ?? {}), prediction };
-        ndovPredictionLegCount += 1;
+    if (context && item.routePattern) {
+      if (!stopAssignmentIndex) {
+        recordKv6ProjectionFailure("psa_assignment_index_unavailable");
+      } else if (!openovStopPlaceIndex) {
+        recordKv6ProjectionFailure("openov_stop_place_index_unavailable");
+      } else {
+        kv6ProjectionAttemptCount += 1;
+        let failureReported = false;
+        const prediction = deriveNdovKv6Prediction({
+          leg: item.leg,
+          pattern: item.routePattern,
+          event: context.event,
+          assignmentIndex: stopAssignmentIndex,
+          stopPlaceIndex: openovStopPlaceIndex,
+          operationDate: item.identity?.serviceDate ?? null,
+          onFailure: (reason) => {
+            failureReported = true;
+            recordKv6ProjectionFailure(reason);
+          },
+        });
+        if (prediction) {
+          item.leg.ndovRealtime = { ...(item.leg.ndovRealtime ?? {}), prediction };
+          ndovPredictionLegCount += 1;
+        } else if (!failureReported) {
+          recordKv6ProjectionFailure("projection_unavailable_without_reason");
+        }
       }
     }
     const combined = buildUnifiedRealtimePrediction(item.leg);
@@ -2391,12 +2416,22 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
       combinedPredictionLegCount += 1;
     }
   }
+  const kv6ProjectionDiagnostics = {
+    candidateLegCount: kv6ProjectionCandidateItems.length,
+    attemptedLegCount: kv6ProjectionAttemptCount,
+    predictedLegCount: ndovPredictionLegCount,
+    notPredictedLegCount: Math.max(0, kv6ProjectionCandidateItems.length - ndovPredictionLegCount),
+    failureReasonCounts: Object.fromEntries(
+      Object.entries(kv6ProjectionFailureReasonCounts).sort(([a], [b]) => a.localeCompare(b))
+    ),
+  };
 
   plan.ndovRealtimeMeta = {
     ...baseMeta,
     coverageByMode: buildRealtimeCoverageByMode(candidates),
     ndovPredictionLegCount,
     combinedPredictionLegCount,
+    kv6ProjectionDiagnostics,
     status: "ok",
     feedState: snapshot.state ?? "unknown",
     feedAgeSeconds: Math.round(feedAgeMs / 1000),
