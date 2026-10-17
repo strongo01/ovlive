@@ -147,7 +147,7 @@ console.log('PASS: ambiguous candidate patterns expose route, trip endpoints and
 console.log('All OpenOV route crossmatch selftests passed.');
 
 
-// Full plan-enrichment test: route/time/stop fallback must flow through to the fresh exact KV6 event.
+// End-to-end enrichment tests for exact BUS, TRAM, SUBWAY and METRO identities.
 const now = new Date().toISOString();
 const identity = 'CXX|20261011|U073|7054|0';
 const event = {
@@ -156,26 +156,57 @@ const event = {
   identity, punctualitySeconds: 102, punctualityTimestamp: now, punctualityReceivedAt: now, receivedAt: now,
   vehicleNumber: '9633', blockCode: null, userStopCode: '50003360', passageSequenceNumber: '0',
 };
+const makeModeEvent = (owner, line, journey, punctualitySeconds, vehicleNumber) => ({
+  source: "BISON", envelope: "/" + owner + "/KV6posinfo", eventType: "ONROUTE",
+  dataOwnerCode: owner, operationDate: "2026-10-11", linePlanningNumber: line,
+  journeyNumber: journey, reinforcementNumber: "0",
+  identity: owner + "|20261011|" + line + "|" + journey + "|0",
+  punctualitySeconds, punctualityTimestamp: now, punctualityReceivedAt: now, receivedAt: now,
+  vehicleNumber, blockCode: null, userStopCode: owner + "-STOP", passageSequenceNumber: "1",
+});
+const tramIdentity = "GVB|20261011|24|56057|0";
+const subwayIdentity = "GVB|20261011|52|66051|0";
+const metroIdentity = "GVB|20261011|50|56059|0";
+const modeEvents = [
+  event,
+  makeModeEvent("GVB", "24", "56057", 180, "2201"),
+  makeModeEvent("GVB", "52", "66051", -15, "3001"),
+  makeModeEvent("GVB", "50", "56059", 45, "3002"),
+];
+const tramPattern = { ...patterns[0], routeId: "120024", realtimeTripId: "GVB:24:56057" };
+const subwayPattern = { ...patterns[0], routeId: "120052", realtimeTripId: "GVB:52:66051" };
+const metroPattern = { ...patterns[0], routeId: "120050", realtimeTripId: "GVB:50:56059" };
+const makeModeLeg = (mode, routeId, sourceTripId) => ({
+  ...leg, mode, routeId: "nl-OpenOV_" + routeId,
+  tripId: "20261011_15:21_nl-OpenOV_" + sourceTripId,
+});
 const planEnv = {
   ASSETS: {
     async fetch(request) {
       const url = new URL(request.url);
       if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: [] });
       if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({
-        generatedAt: now,
-        serviceCalendarDateCount: 0,
-        routes: { '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json'] },
+        generatedAt: now, serviceCalendarDateCount: 0,
+        routes: {
+          '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json'],
+          '120024': ['route-120024-t12-0.json'],
+          '120052': ['route-120052-t12-0.json'],
+          '120050': ['route-120050-t12-0.json'],
+        },
         routesByStartBucket: {
-          '146903': {
-            '00': ['route-146903-t00-0.json'],
-            '12': ['route-146903-t12-0.json'],
-          },
+          '146903': { '00': ['route-146903-t00-0.json'], '12': ['route-146903-t12-0.json'] },
+          '120024': { '12': ['route-120024-t12-0.json'] },
+          '120052': { '12': ['route-120052-t12-0.json'] },
+          '120050': { '12': ['route-120050-t12-0.json'] },
         },
       });
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t00-0.json') {
         return new Response('A different start-time bucket must not be loaded.', { status: 500 });
       }
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t12-0.json') return Response.json(patterns);
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120024-t12-0.json') return Response.json([tramPattern]);
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120052-t12-0.json') return Response.json([subwayPattern]);
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120050-t12-0.json') return Response.json([metroPattern]);
       return new Response('not found', { status: 404 });
     },
   },
@@ -189,20 +220,40 @@ const planEnv = {
         if (url.pathname === '/status' && stream === 'bison') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/status' && stream === 'kv78') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/mutations' && stream === 'bison') return Response.json({ mutations: [] });
-        if (url.pathname === '/events' && stream === 'bison') return Response.json({ events: url.searchParams.getAll('identity').includes(identity) ? [event] : [] });
+        if (url.pathname === '/events' && stream === 'bison') {
+          const requested = new Set(url.searchParams.getAll("identity"));
+          return Response.json({ events: modeEvents.filter((item) => requested.has(item.identity)) });
+        }
         if (url.pathname === '/rows' && stream === 'kv78') return Response.json({ rows: [] });
         return new Response('unexpected mock request', { status: 404 });
       } };
     },
   },
 };
-const endToEndPlan = { itineraries: [{ legs: [{ ...leg }] }] };
+const endToEndPlan = { itineraries: [{ legs: [
+  { ...leg },
+  makeModeLeg("TRAM", "120024", "391225407"),
+  makeModeLeg("SUBWAY", "120052", "391225408"),
+  makeModeLeg("METRO", "120050", "391225409"),
+] }] };
 await applyNdovCancellationsToPlan(endToEndPlan, planEnv);
-const enrichedLeg = endToEndPlan.itineraries[0].legs[0];
-assert.equal(enrichedLeg.ndovRealtime?.status, 'kv6_live');
-assert.equal(enrichedLeg.ndovRealtime?.identity, identity);
-assert.equal(enrichedLeg.ndovRealtime?.punctualitySeconds, 102);
-assert.equal(enrichedLeg.ndovRealtime?.vehicleNumber, '9633');
-assert.equal(endToEndPlan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 1);
-assert.equal(endToEndPlan.ndovRealtimeMeta.kv6MatchedLegCount, 1);
-console.log('PASS: route crossmatch flows into the plan as fresh exact KV6 delay (102 seconds, vehicle 9633)');
+const [enrichedLeg, enrichedTramLeg, enrichedSubwayLeg, enrichedMetroLeg] = endToEndPlan.itineraries[0].legs;
+for (const [modeName, actualLeg, expectedIdentity, expectedDelay, expectedVehicle] of [
+  ["BUS", enrichedLeg, identity, 102, "9633"],
+  ["TRAM", enrichedTramLeg, tramIdentity, 180, "2201"],
+  ["SUBWAY", enrichedSubwayLeg, subwayIdentity, -15, "3001"],
+  ["METRO", enrichedMetroLeg, metroIdentity, 45, "3002"],
+]) {
+  assert.equal(actualLeg.ndovRealtime?.status, "kv6_live", modeName + " should receive a fresh exact KV6 match");
+  assert.equal(actualLeg.ndovRealtime?.identity, expectedIdentity);
+  assert.equal(actualLeg.ndovRealtime?.punctualitySeconds, expectedDelay);
+  assert.equal(actualLeg.ndovRealtime?.vehicleNumber, expectedVehicle);
+}
+assert.equal(endToEndPlan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 4);
+assert.equal(endToEndPlan.ndovRealtimeMeta.kv6MatchedLegCount, 4);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.BUS.kv6MatchedLegCount, 1);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.TRAM.kv6MatchedLegCount, 1);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv6MatchedLegCount, 1);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.METRO.kv6MatchedLegCount, 1);
+console.log("PASS: exact route/time/stop crossmatch attaches fresh KV6 to BUS/TRAM/SUBWAY/METRO");
+console.log("PASS: per-mode coverage counters preserve each operator and exact trip identity");
