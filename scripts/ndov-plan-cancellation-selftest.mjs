@@ -1,8 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { applyNdovCancellationsToPlan, buildNsTrainIdentities } from '../src/ndov-plan-cancellation.js';
+import { applyNdovCancellationsToPlan, buildNsTrainIdentities, selectCrosswalkShardNumbers } from '../src/ndov-plan-cancellation.js';
 
 const planCancellationSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
+
+assert.deepEqual(
+  selectCrosswalkShardNumbers([7, 2, 7, 4, 1, 9], 3),
+  [7, 2, 4],
+  'crosswalk shard budgets deduplicate values and preserve first-in-order priorities',
+);
+assert.deepEqual(selectCrosswalkShardNumbers([4, 3], 0), []);
+assert.match(planCancellationSource, /MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 6/);
+assert.match(planCancellationSource, /MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 8/);
+assert.match(planCancellationSource, /AMSTERDAM_CLOCK_FORMATTER\.formatToParts/);
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
 assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 7,
