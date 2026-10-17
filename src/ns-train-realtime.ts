@@ -9,6 +9,9 @@ const ROOT = "https://gateway.apiportal.ns.nl/reisinformatie-api";
 const CACHE_TTL = 8_000;
 const STATION_TTL = 6 * 60 * 60 * 1000;
 const MATCH_TOLERANCE_MS = 180_000;
+// The NS board cache is minute-keyed. Expired unique requests must not remain
+// in the Worker isolate forever; a small LRU is sufficient for the 8 s TTL.
+const MAX_BOARD_CACHE_ENTRIES = 64;
 
 let stationCache: { until: number; promise: Promise<any[]> } | null = null;
 const boardCache = new Map<string, { until: number; promise: Promise<any[]> }>();
@@ -380,8 +383,15 @@ async function getBoard(
 ): Promise<any[]> {
   const minute = Math.floor(plannedMs / 60_000);
   const cacheKey = `${kind}|${station}|${minute}`;
+  const now = Date.now();
   const existing = boardCache.get(cacheKey);
-  if (existing && existing.until > Date.now()) return existing.promise;
+  if (existing && existing.until > now) {
+    // Refresh LRU order so frequently requested active boards stay cached.
+    boardCache.delete(cacheKey);
+    boardCache.set(cacheKey, existing);
+    return existing.promise;
+  }
+  if (existing) boardCache.delete(cacheKey);
 
   const promise = (async () => {
     const data = await nsJson(`/api/v2/${kind}`, {
@@ -400,6 +410,11 @@ async function getBoard(
   })();
 
   boardCache.set(cacheKey, { until: Date.now() + CACHE_TTL, promise });
+  while (boardCache.size > MAX_BOARD_CACHE_ENTRIES) {
+    const oldestKey = boardCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    boardCache.delete(oldestKey);
+  }
 
   try {
     return await promise;
