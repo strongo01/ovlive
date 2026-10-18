@@ -7,7 +7,7 @@ const html = await readFile(new URL("../public/index.html", import.meta.url), "u
 function extractFunction(name) {
   const start = html.indexOf("function " + name + "(");
   assert.ok(start >= 0, "Required function must exist: " + name);
-  const end = html.indexOf("\\n}", start);
+  const end = html.indexOf("\n}", start);
   assert.ok(end > start, "Could not isolate function: " + name);
   return html.slice(start, end + 2);
 }
