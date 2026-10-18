@@ -314,8 +314,29 @@ async function findPlaces(inputId, selectId, statusId) {
     select.innerHTML = '<option value="">Kies de juiste plek…</option>' + features.map((f, i) => {
       const p = f.properties || {};
       const coords = f.geometry?.coordinates || [];
-      const label = [p.name, p.street, p.housenumber, p.postcode, p.city || p.locality, p.state].filter(Boolean).join(', ');
-      return `<option value="${esc(coords[1] + ',' + coords[0])}" data-label="${esc(label)}">${esc(label || query)} (${esc(p.osm_value || p.type || 'plek')})</option>`;
+      const transitousId = String(p.transitousId || '').trim();
+      const label = transitousId
+        ? (p.display_name || [p.name, p.street, p.housenumber, p.postcode, p.city || p.locality, p.state].filter(Boolean).join(', '))
+        : [p.name, p.street, p.housenumber, p.postcode, p.city || p.locality, p.state].filter(Boolean).join(', ');
+      const modeLabels = {
+        BUS: 'bus', COACH: 'bus', TRAM: 'tram', SUBWAY: 'metro', METRO: 'metro',
+        RAIL: 'trein', REGIONAL_RAIL: 'trein', SUBURBAN: 'trein',
+        LONG_DISTANCE: 'trein', HIGHSPEED_RAIL: 'trein', HIGH_SPEED_RAIL: 'trein',
+        NIGHT_RAIL: 'trein', FERRY: 'veerboot'
+      };
+      const modeText = Array.isArray(p.modes)
+        ? [...new Set(p.modes.map(mode => modeLabels[String(mode).toUpperCase()] || String(mode).toLowerCase()))].slice(0, 3).join('/')
+        : '';
+      const optionValue = transitousId || (
+        coords.length >= 2 && Number.isFinite(Number(coords[0])) && Number.isFinite(Number(coords[1]))
+          ? coords[1] + ',' + coords[0]
+          : ''
+      );
+      if (!optionValue) return '';
+      const placeTypeLabel = transitousId
+        ? 'OV-halte' + (modeText ? ' · ' + modeText : '')
+        : (p.osm_value || p.type || 'kaartlocatie');
+      return `<option value="${esc(optionValue)}" data-label="${esc(label)}" data-provider="${transitousId ? 'transitous' : 'coordinates'}">${esc(label || query)} (${esc(placeTypeLabel)})</option>`;
     }).join('');
     select.hidden = features.length === 0;
     if (features.length === 1) select.selectedIndex = 1;
@@ -2382,7 +2403,9 @@ q.set('pedestrianSpeed', '1.5');
     const diagnosticPlanStatus = $('planStatus').textContent;
     $('planStatus').textContent = meta?.status === 'enrichment_failed'
       ? 'Reisopties gevonden, maar de realtimecontrole kon niet volledig worden afgerond. Onbevestigde tijden worden niet als realtime getoond.'
-      : `${journeys.length} reisopties ontvangen. Tik op een reis voor alle haltes en realtime-informatie.`;
+      : `${validItineraryCandidates.length} bruikbare reisopties gevonden` +
+        (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
+        '. Tik op een reis voor alle haltes en realtime-informatie.';
 
     const feedInfo = meta?.feeds
       ? `<div class="muted">Realtimefeeds: ${
@@ -2436,7 +2459,7 @@ q.set('pedestrianSpeed', '1.5');
       : '';
 
     window.__ovliveTrackingJourneys = [];
-    const cards = validItineraryCandidates.slice(0, 5).map(({ journey, sourceLegs }, index) => {
+    const cards = validItineraryCandidates.slice(0, 8).map(({ journey, sourceLegs }, index) => {
 
       // Werk met kopieën: de oorspronkelijke API-resultaten blijven intact.
       const legs = sourceLegs.map(leg => ({

@@ -11,6 +11,7 @@ import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 
 import { applyNdovCancellationsToPlan, prepareNsTrainIdentities } from "./ndov-plan-cancellation.js";
 import { enrichNsTrainPlan } from "./ns-train-realtime";
+import { mergeTransitousAndMapFeatureCollections, transitousMatchesToFeatureCollection } from "./transitous-geocode.js";
 import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
 interface Env {
@@ -365,6 +366,72 @@ async function getGeocodeFeatures(
         fallbackError instanceof Error ? fallbackError.message : "Onbekende fout"
       );
       throw new Error("Nominatim en Geoapify zijn tijdelijk niet beschikbaar.");
+    }
+  }
+}
+
+
+// Native Transitous stop search. The result IDs can be sent directly to /api/v6/plan;
+// coordinate geocoders remain available below as address/place fallbacks.
+const TRANSITOUS_GEOCODE_CACHE_TTL_MS = 10 * 60 * 1000;
+const TRANSITOUS_GEOCODE_MAX_CACHE_ENTRIES = 200;
+const transitousGeocodeCache = new Map<string, { expiresAtMs: number; data: any }>();
+const transitousGeocodeInflight = new Map<string, Promise<any>>();
+
+async function getTransitousStopFeatures(query: string, env: Env): Promise<any> {
+  const cacheKey = query.trim().toLocaleLowerCase("nl-NL");
+  const now = Date.now();
+  const cached = transitousGeocodeCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > now) return cached.data;
+  if (cached) transitousGeocodeCache.delete(cacheKey);
+
+  const inflight = transitousGeocodeInflight.get(cacheKey);
+  if (inflight) return inflight;
+
+  const task = (async () => {
+    const upstream = new URL("https://api.transitous.org/api/v1/geocode");
+    upstream.searchParams.set("text", query);
+    upstream.searchParams.set("language", "nl");
+    upstream.searchParams.set("type", "STOP");
+    upstream.searchParams.set("mode", "TRANSIT");
+    upstream.searchParams.set("numResults", "8");
+
+    const response = await fetch(upstream, {
+      headers: {
+        "accept": "application/json",
+        "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+      },
+      signal: AbortSignal.timeout(8000),
+      cf: { cacheTtl: 600, cacheEverything: true }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Transitous geocoder gaf HTTP ${response.status}.`);
+    }
+
+    const matches = await response.json();
+    if (!Array.isArray(matches)) {
+      throw new Error("Transitous geocoder gaf geen geldige lijst met haltes.");
+    }
+
+    const data = transitousMatchesToFeatureCollection(matches);
+    if (transitousGeocodeCache.size >= TRANSITOUS_GEOCODE_MAX_CACHE_ENTRIES) {
+      const oldestKey = transitousGeocodeCache.keys().next().value;
+      if (oldestKey) transitousGeocodeCache.delete(oldestKey);
+    }
+    transitousGeocodeCache.set(cacheKey, {
+      expiresAtMs: Date.now() + TRANSITOUS_GEOCODE_CACHE_TTL_MS,
+      data
+    });
+    return data;
+  })();
+
+  transitousGeocodeInflight.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    if (transitousGeocodeInflight.get(cacheKey) === task) {
+      transitousGeocodeInflight.delete(cacheKey);
     }
   }
 }
@@ -2393,7 +2460,39 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
 
     try {
-      const data = await getGeocodeFeatures(query, env);
+      // Zoek eerst echte Transitous-OV-haltes en houd adres-/kaartlocaties als fallback.
+      // Zo wordt een gekozen bushalte als stop-ID doorgestuurd in plaats van alleen als coördinaat.
+      const [transitousResult, mapResult] = await Promise.allSettled([
+        getTransitousStopFeatures(query, env),
+        getGeocodeFeatures(query, env)
+      ]);
+
+      if (transitousResult.status === "rejected") {
+        console.warn("[OVLIVE_TRANSITOUS_GEOCODE]",
+          transitousResult.reason instanceof Error
+            ? transitousResult.reason.message
+            : "Transitous-haltezoeking mislukt.");
+      }
+      if (mapResult.status === "rejected") {
+        console.warn("[OVLIVE_MAP_GEOCODE]",
+          mapResult.reason instanceof Error
+            ? mapResult.reason.message
+            : "Adres-/kaartzoeking mislukt.");
+      }
+
+      if (transitousResult.status === "rejected" && mapResult.status === "rejected") {
+        throw new Error("Transitous en de adreszoekdiensten zijn tijdelijk niet beschikbaar.");
+      }
+
+      const emptyFeatureCollection = { type: "FeatureCollection", features: [] };
+      const data = mergeTransitousAndMapFeatureCollections(
+        transitousResult.status === "fulfilled"
+          ? transitousResult.value
+          : emptyFeatureCollection,
+        mapResult.status === "fulfilled"
+          ? mapResult.value
+          : emptyFeatureCollection
+      );
 
       return json(data, 200, {
         ...headers,
