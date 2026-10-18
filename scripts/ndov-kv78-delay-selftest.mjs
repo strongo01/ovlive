@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { applyNdovCancellationsToPlan, matchKv78RowByScheduleTime } from '../src/ndov-plan-cancellation.js';
+import { kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
 
 const now = new Date().toISOString();
 const row = (extra = {}) => ({
@@ -16,6 +17,56 @@ const row = (extra = {}) => ({
 });
 
 const plannedDeparture = '2026-10-12T07:03:00Z'; // 09:03 Europe/Amsterdam
+
+// Regression: an on-time 09:03 target has slipped to 09:09:36. At 09:09,
+// the timetable time is six minutes old, but the expected prediction is only
+// 36 seconds away. The fresh row must survive schedule pruning and cache pressure.
+{
+  const nowClockSeconds = 9 * 3600 + 9 * 60;
+  const lateRow = row({
+    targetDepartureTime: '09:03:00',
+    expectedDepartureTime: '09:09:36',
+    departureDelaySeconds: 396,
+    targetArrivalTime: null,
+    expectedArrivalTime: null,
+    arrivalDelaySeconds: null,
+  });
+  const scheduleInfo = kv78RowScheduleInfo(lateRow, nowClockSeconds, 180, 4 * 60 * 60);
+  assert.equal(scheduleInfo.relevant, true, 'fresh 396-second late row remains relevant via expected time');
+  assert.equal(scheduleInfo.distanceSeconds, 36, 'cache distance uses the imminent predicted event');
+
+  const unrelatedFutureRow = row({
+    targetDepartureTime: '11:00:00',
+    expectedDepartureTime: '11:06:36',
+    departureDelaySeconds: 396,
+    targetArrivalTime: null,
+    expectedArrivalTime: null,
+    arrivalDelaySeconds: null,
+  });
+  const evicted = selectKv78RowEvictionKeys(
+    [['late', lateRow], ['future', unrelatedFutureRow]],
+    1,
+    nowClockSeconds,
+    180,
+    4 * 60 * 60,
+  );
+  assert.deepEqual(evicted, ['future'], 'cache pressure keeps the late prediction closest to now');
+
+  const fullyExpiredRow = row({
+    targetDepartureTime: '09:03:00',
+    expectedDepartureTime: '09:04:00',
+    departureDelaySeconds: 60,
+    targetArrivalTime: null,
+    expectedArrivalTime: null,
+    arrivalDelaySeconds: null,
+  });
+  assert.equal(
+    kv78RowScheduleInfo(fullyExpiredRow, nowClockSeconds, 180, 4 * 60 * 60).relevant,
+    false,
+    'a row is still pruned when both target and expected times are outside the past window',
+  );
+  console.log('PASS: fresh delayed KV78 predictions survive schedule pruning and cache pressure');
+}
 {
   const match = matchKv78RowByScheduleTime([row()], plannedDeparture, 'targetDepartureTime');
   assert.equal(match?.row.userStopCode, 'STOP-A');
