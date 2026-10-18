@@ -980,6 +980,197 @@ async function main() {
     routePatternChecks,
   }, null, 2));
 
+
+  // Follow a trip already published in the fresh OpenOV TripUpdates feed back
+  // through the production planner. Unlike the normal OD probe above, this
+  // chooses a stop pair from an observed source record near the audit time.
+  // It is read-only and does not assume a missing historical trip means a bug.
+  const liveTripFeed = routeLevelFeedResults.find((item) => item.kind === "tripUpdates")?.result ?? null;
+  const liveTripData = liveTripFeed?.json ?? null;
+  const liveTripFeedAge = Number(liveTripData?.ageSeconds);
+  const liveTripFeedFresh = liveTripData?.ok === true &&
+    liveTripData?.freshness === "fresh" &&
+    Number.isFinite(liveTripFeedAge) && liveTripFeedAge >= -60 && liveTripFeedAge <= 180;
+  const liveTripNowSeconds = auditStartedMs / 1000;
+  const liveTripNearNowCandidates = [];
+  const liveTripSourceRecords = Array.isArray(liveTripData?.entities) ? liveTripData.entities : [];
+  if (liveTripFeedFresh) {
+    for (const record of liveTripSourceRecords) {
+      const sourceRouteId = normalizeOpenovId(record?.routeId);
+      if (!openovRouteIds.includes(sourceRouteId)) continue;
+      if (/CANCEL|DELETE/i.test(String(record?.scheduleRelationship ?? ""))) continue;
+      const stopUpdates = Array.isArray(record?.stopUpdates) ? record.stopUpdates : [];
+      if (stopUpdates.length < 2) continue;
+      for (let index = 0; index < stopUpdates.length - 1; index++) {
+        const fromUpdate = stopUpdates[index];
+        const toUpdate = stopUpdates[index + 1];
+        const fromStopId = normalizeOpenovId(fromUpdate?.stopId);
+        const toStopId = normalizeOpenovId(toUpdate?.stopId);
+        if (!fromStopId || !toStopId || fromStopId === toStopId) continue;
+        const eventKind = typeof fromUpdate?.departureTime === "number" &&
+          Number.isFinite(fromUpdate.departureTime)
+          ? "departure"
+          : typeof fromUpdate?.arrivalTime === "number" && Number.isFinite(fromUpdate.arrivalTime)
+            ? "arrival"
+            : null;
+        if (!eventKind) continue;
+        const rawEventSeconds = fromUpdate[eventKind + "Time"];
+        const delayValue = fromUpdate["effective" + eventKind[0].toUpperCase() + eventKind.slice(1) + "DelaySeconds"] ??
+          fromUpdate[eventKind + "DelaySeconds"];
+        const hasDelay = typeof delayValue === "number" && Number.isFinite(delayValue);
+        const reconstructedScheduledSeconds = hasDelay ? rawEventSeconds - delayValue : rawEventSeconds;
+        const secondsFromNow = reconstructedScheduledSeconds - liveTripNowSeconds;
+        if (Math.abs(secondsFromNow) > 900) continue;
+        liveTripNearNowCandidates.push({
+          routeId: sourceRouteId,
+          sourceTripId: String(record?.tripId ?? ""),
+          startDate: record?.startDate ?? null,
+          startTime: record?.startTime ?? null,
+          scheduleRelationship: record?.scheduleRelationship ?? null,
+          stopUpdateCount: stopUpdates.length,
+          fromStopIndex: index,
+          toStopIndex: index + 1,
+          fromStopId,
+          toStopId,
+          eventKind,
+          rawEventTime: new Date(rawEventSeconds * 1000).toISOString(),
+          delaySeconds: hasDelay ? delayValue : null,
+          reconstructedScheduledTime: new Date(reconstructedScheduledSeconds * 1000).toISOString(),
+          secondsFromAuditStart: Math.round(secondsFromNow),
+        });
+        break;
+      }
+    }
+  }
+  liveTripNearNowCandidates.sort((a, b) =>
+    Math.abs(a.secondsFromAuditStart) - Math.abs(b.secondsFromAuditStart)
+  );
+  const selectedPublishedTrip = liveTripNearNowCandidates[0] ?? null;
+  let publishedTripPlanProbe = {
+    status: !liveTripFeedFresh
+      ? "skipped_feed_not_fresh"
+      : !selectedPublishedTrip
+        ? "no_near_now_published_trip_candidate"
+        : "selected_source_trip_probe_not_completed",
+    feedFresh: liveTripFeedFresh,
+    feedAgeSeconds: Number.isFinite(liveTripFeedAge) ? liveTripFeedAge : null,
+    routeRecordCount: liveTripSourceRecords.length,
+    nearNowCandidateCount: liveTripNearNowCandidates.length,
+    candidateSamples: liveTripNearNowCandidates.slice(0, 5),
+  };
+  if (selectedPublishedTrip) {
+    const probeUrl = new URL("/api/plan", baseUrl);
+    probeUrl.searchParams.set("fromPlace", "nl-OpenOV_" + selectedPublishedTrip.fromStopId);
+    probeUrl.searchParams.set("toPlace", "nl-OpenOV_" + selectedPublishedTrip.toStopId);
+    // Query just before the observed stop's reconstructed scheduled time so
+    // the selected source trip, rather than a later trip, is the intended candidate.
+    probeUrl.searchParams.set("time", new Date(
+      Date.parse(selectedPublishedTrip.reconstructedScheduledTime) - 30_000
+    ).toISOString());
+    probeUrl.searchParams.set("numItineraries", "5");
+    probeUrl.searchParams.set("maxItineraries", "5");
+    probeUrl.searchParams.set("ndovIdentityDiagnostics", "1");
+    const probeResult = await get(probeUrl.pathname + probeUrl.search, 65000);
+    const probeLegs = probeResult.ok && probeResult.json ? collectLegs(probeResult.json) : [];
+    const exactPublishedTripLeg = probeLegs.find((leg) =>
+      normalizeOpenovId(leg.routeId ?? leg.route?.id) === selectedPublishedTrip.routeId &&
+      openovTripId(leg.tripId ?? leg.trip?.id) === selectedPublishedTrip.sourceTripId
+    ) ?? null;
+    const sourceLegId = exactPublishedTripLeg?.tripId ?? exactPublishedTripLeg?.trip?.id ?? null;
+    const probeMeta = probeResult.json?.ndovRealtimeMeta ?? {};
+    const probeRouteCrosswalkOutcomes = Array.isArray(probeMeta.routeCrosswalkOutcomes)
+      ? probeMeta.routeCrosswalkOutcomes
+      : [];
+    const exactPublishedTripCrosswalk = probeRouteCrosswalkOutcomes.find((item) =>
+      String(item?.tripId ?? "") === String(sourceLegId ?? "")
+    ) ?? null;
+    publishedTripPlanProbe = {
+      status: !probeResult.ok || !probeResult.json
+        ? "published_trip_plan_query_failed"
+        : exactPublishedTripLeg
+          ? "exact_published_openov_trip_returned_by_plan"
+          : "published_openov_trip_not_returned_exactly_by_plan",
+      feedFresh: liveTripFeedFresh,
+      feedAgeSeconds: Number.isFinite(liveTripFeedAge) ? liveTripFeedAge : null,
+      sourceRecord: selectedPublishedTrip,
+      sourceCandidateCountNearNow: liveTripNearNowCandidates.length,
+      query: {
+        httpStatus: probeResult.status,
+        fromPlace: probeUrl.searchParams.get("fromPlace"),
+        toPlace: probeUrl.searchParams.get("toPlace"),
+        time: probeUrl.searchParams.get("time"),
+        ok: probeResult.json?.ok ?? null,
+        error: probeResult.json?.error ?? probeResult.error ?? null,
+        itineraryCount: Array.isArray(probeResult.json?.itineraries)
+          ? probeResult.json.itineraries.length
+          : Array.isArray(probeResult.json?.journeys)
+            ? probeResult.json.journeys.length
+            : null,
+      },
+      exactSourceTripFound: Boolean(exactPublishedTripLeg),
+      matchedPlanLeg: exactPublishedTripLeg ? {
+        routeId: exactPublishedTripLeg.routeId ?? exactPublishedTripLeg.route?.id ?? null,
+        tripId: exactPublishedTripLeg.tripId ?? exactPublishedTripLeg.trip?.id ?? null,
+        plannedDeparture: plannedEndpoint(exactPublishedTripLeg, "departure"),
+        plannedArrival: plannedEndpoint(exactPublishedTripLeg, "arrival"),
+        openovRealtime: exactPublishedTripLeg.openovRealtime ? {
+          status: exactPublishedTripLeg.openovRealtime.status ?? null,
+          reason: exactPublishedTripLeg.openovRealtime.reason ?? null,
+          matchMethod: exactPublishedTripLeg.openovRealtime.matchMethod ?? null,
+          updateAgeSeconds: exactPublishedTripLeg.openovRealtime.updateAgeSeconds ?? null,
+        } : null,
+        ndovRealtimeMatch: exactPublishedTripLeg.ndovRealtimeMatch ? {
+          status: exactPublishedTripLeg.ndovRealtimeMatch.status ?? null,
+          reason: exactPublishedTripLeg.ndovRealtimeMatch.reason ?? null,
+          candidateCount: exactPublishedTripLeg.ndovRealtimeMatch.candidateCount ?? null,
+          candidateRealtimeTripIds: exactPublishedTripLeg.ndovRealtimeMatch.candidateRealtimeTripIds ?? [],
+        } : null,
+        ndovRealtime: exactPublishedTripLeg.ndovRealtime ? {
+          status: exactPublishedTripLeg.ndovRealtime.status ?? null,
+          source: exactPublishedTripLeg.ndovRealtime.source ?? null,
+          identity: exactPublishedTripLeg.ndovRealtime.identity ?? null,
+          eventType: exactPublishedTripLeg.ndovRealtime.eventType ??
+            exactPublishedTripLeg.ndovRealtime.kv6?.eventType ?? null,
+          punctualitySeconds: exactPublishedTripLeg.ndovRealtime.punctualitySeconds ??
+            exactPublishedTripLeg.ndovRealtime.kv6?.punctualitySeconds ?? null,
+          kv6Status: exactPublishedTripLeg.ndovRealtime.kv6?.status ?? null,
+          kv78Status: exactPublishedTripLeg.ndovRealtime.kv78?.status ?? null,
+        } : null,
+        routeCrosswalk: exactPublishedTripCrosswalk ? {
+          source: exactPublishedTripCrosswalk.source ?? null,
+          reason: exactPublishedTripCrosswalk.reason ?? null,
+          realtimeTripId: exactPublishedTripCrosswalk.realtimeTripId ?? null,
+          parsedIdentity: exactPublishedTripCrosswalk.parsedIdentity ?? null,
+          candidateRealtimeTripIds: exactPublishedTripCrosswalk.candidateRealtimeTripIds ?? [],
+        } : null,
+      } : null,
+      candidatePlanLegs: probeLegs.slice(0, 10).map((leg) => ({
+        routeId: leg.routeId ?? leg.route?.id ?? null,
+        tripId: leg.tripId ?? leg.trip?.id ?? null,
+        fromStopId: normalizeOpenovId(leg.from?.stopId ?? leg.from?.id) || null,
+        toStopId: normalizeOpenovId(leg.to?.stopId ?? leg.to?.id) || null,
+        plannedDeparture: plannedEndpoint(leg, "departure"),
+        openovStatus: leg.openovRealtime?.status ?? null,
+        openovReason: leg.openovRealtime?.reason ?? null,
+        ndovStatus: leg.ndovRealtime?.status ?? null,
+        ndovIdentity: leg.ndovRealtime?.identity ?? null,
+        ndovMatchReason: leg.ndovRealtimeMatch?.reason ?? null,
+      })),
+      ndovRealtimeMeta: {
+        routeCrosswalkGeneratedAt: probeMeta.openovRouteCrosswalkGeneratedAt ?? null,
+        routeCrosswalkMatchedLegCount: probeMeta.routeCrosswalkMatchedLegCount ?? null,
+        routeCrosswalkError: probeMeta.routeCrosswalkError ?? null,
+        kv6LookupDiagnostics: probeMeta.kv6LookupDiagnostics ?? null,
+        kv6IdentityDiagnostics: probeMeta.kv6IdentityDiagnostics ?? null,
+        kv78FeedAgeSeconds: probeMeta.kv78FeedAgeSeconds ?? null,
+        kv78Error: probeMeta.kv78Error ?? null,
+      },
+      interpretationLimit: "A failed or non-exact match in this near-time probe is diagnostic evidence only; it is not alone proof of a production defect. Confirm service time zone and static trip/stop identity before attributing cause.",
+    };
+  }
+  console.log("=== NEAR-NOW PUBLISHED OPENOV TRIP END-TO-END PROBE ===");
+  console.log(JSON.stringify(publishedTripPlanProbe, null, 2));
+
   assert.ok(legs.length > 0, "Production /api/plan must return at least one leg.");
   console.log("PASS: production endpoint diagnostics finished; no data was changed.");
 }
