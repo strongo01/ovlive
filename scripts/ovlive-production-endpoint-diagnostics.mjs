@@ -1434,6 +1434,27 @@ async function main() {
           error: planProbeResult.json?.error ?? planProbeResult.error ?? null,
         },
         exactTripReturned: Boolean(exactCancelledLeg),
+        routeLegSamples: cancellationProbeLegs
+          .filter((leg) => normalizeOpenovId(leg.routeId ?? leg.route?.id) === selected.routeKey)
+          .slice(0, 10)
+          .map((leg) => ({
+            routeId: leg.routeId ?? leg.route?.id ?? null,
+            tripId: leg.tripId ?? leg.trip?.id ?? null,
+            fromStopId: normalizeOpenovId(leg.from?.stopId ?? leg.from?.id) || null,
+            toStopId: normalizeOpenovId(leg.to?.stopId ?? leg.to?.id) || null,
+            departure: plannedEndpoint(leg, "departure"),
+            arrival: plannedEndpoint(leg, "arrival"),
+            cancelled: leg.cancelled ?? null,
+            openovStatus: leg.openovRealtime?.status ?? null,
+            openovReason: leg.openovRealtime?.reason ?? null,
+          })),
+        planLegSamples: cancellationProbeLegs.slice(0, 15).map((leg) => ({
+          routeId: leg.routeId ?? leg.route?.id ?? null,
+          tripId: leg.tripId ?? leg.trip?.id ?? null,
+          departure: plannedEndpoint(leg, "departure"),
+          openovStatus: leg.openovRealtime?.status ?? null,
+          openovReason: leg.openovRealtime?.reason ?? null,
+        })),
         exactLeg: exactCancelledLeg ? {
           routeId: exactCancelledLeg.routeId ?? exactCancelledLeg.route?.id ?? null,
           tripId: exactCancelledLeg.tripId ?? exactCancelledLeg.trip?.id ?? null,
