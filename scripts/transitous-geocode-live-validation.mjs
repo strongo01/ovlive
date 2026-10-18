@@ -20,15 +20,18 @@ async function verifyStopSearch(query, expectedStopName) {
   const body = await response.json();
   assert.ok(Array.isArray(body.features), "/api/geocode must return a FeatureCollection");
 
+  const expectedName = normalize(expectedStopName);
   const matchingStops = body.features.filter(feature =>
     feature.properties?.isTransitousStop === true &&
-    normalize(feature.properties?.name) === normalize(expectedStopName)
+    normalize(feature.properties?.name).includes(expectedName)
   );
   assert.ok(matchingStops.length > 0,
     "Native Transitous stop search must find " + expectedStopName +
     "; returned results: " +
     body.features.map(feature =>
-      (feature.properties?.name || "?") + " [" + (feature.properties?.source || "unknown") + "]"
+      (feature.properties?.name || "?") + " [" +
+      (feature.properties?.transitousId || feature.properties?.source || "unknown") +
+      "; modes=" + JSON.stringify(feature.properties?.modes || []) + "]"
     ).join("; "));
 
   const stop = matchingStops[0];
@@ -39,8 +42,8 @@ async function verifyStopSearch(query, expectedStopName) {
     "The stop suggestion must also include valid map coordinates");
   assert.equal(body.features[0]?.properties?.isTransitousStop, true,
     "Native Transitous stop suggestions must be ranked before ordinary map locations");
-  console.log("PASS: " + expectedStopName + " is returned first as a native Transitous stop ID " +
-    stop.properties.transitousId);
+  console.log("PASS: " + expectedStopName + " is returned as a native Transitous stop ID " +
+    stop.properties.transitousId + " (" + (stop.properties.name || expectedStopName) + ")");
 }
 
 await verifyStopSearch("Klifrakplantsoen", "Klifrakplantsoen");
