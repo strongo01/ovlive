@@ -9,6 +9,7 @@ on:
       - assistant/metro-exact-trip-id-fallback-20261018
       - assistant/metro-ui-confidence-20261018
       - assistant/kv78-stop-crosswalk-priority-20261018
+      - assistant/kv6-live-ui-diagnostics-20261018
   workflow_dispatch:
 
 permissions:
