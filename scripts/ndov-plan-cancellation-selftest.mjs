@@ -16,8 +16,8 @@ assert.match(planCancellationSource, /MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST =
 assert.match(planCancellationSource, /AMSTERDAM_CLOCK_FORMATTER\.formatToParts/);
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
-assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 7,
-  'snapshot, mutation, event, KV78 snapshot/exact-row/vehicle-row, and on-demand identity diagnostic reads must all use the shared collector object');
+assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 8,
+  'snapshot, mutation, event, KV78 snapshot/exact-row/vehicle-row, bounded metro line-time lookup, and on-demand identity diagnostic reads must all use the shared collector object');
 assert.match(planCancellationSource, /target\.searchParams\.set\("stream", "bison"\)/,
   'BISON identity diagnostics must select the shared BISON stream');
 assert.match(planCancellationSource, /target\.searchParams\.set\("identityDiagnostics", "1"\)/,
