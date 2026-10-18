@@ -301,7 +301,7 @@
 const $ = id => document.getElementById(id);
 const fmt = t => t ? new Date(t).toLocaleString('nl-NL',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : 'onbekend';
 const esc = s => String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(path){const r=await fetch(path);const data=await r.json().catch(()=>({error:'Ongeldig antwoord'}));if(!r.ok)throw new Error(data.error||`HTTP ${r.status}`);return data;}
+async function api(path, options = {}){const r=await fetch(path, options);const data=await r.json().catch(()=>({error:'Ongeldig antwoord'}));if(!r.ok)throw new Error(data.error||`HTTP ${r.status}`);return data;}
 
 async function findPlaces(inputId, selectId, statusId) {
   const query = $(inputId).value.trim();
@@ -2382,6 +2382,19 @@ function updateJourneyRealtimeSummary(card, legs) {
   }
 }
 
+function renderRealtimeFeedInfo(meta) {
+  if (!meta?.feeds) return '';
+  return `<div class="muted">Realtimefeeds: ${
+    Object.entries(meta.feeds).map(([name, feed]) =>
+      `${esc(name)}: ${esc(feed.freshness || 'onbekend')}` +
+      (feed.ageSeconds != null ? ` (${esc(feed.ageSeconds)} sec oud)` : '') +
+      (feed.status != null ? ` · HTTP ${esc(feed.status)}` : '') +
+      (feed.servedFromCache ? ` · cache ${esc(feed.cacheAgeSeconds ?? '?')} sec` : '') +
+      (feed.error ? ` · ${esc(feed.error)}` : '')
+    ).join(' · ')
+  }</div>`;
+}
+
 function stopLivePlanRealtimeRefresh() {
   livePlanRealtimeGeneration += 1;
   if (livePlanRealtimeTimer) {
@@ -2392,6 +2405,7 @@ function stopLivePlanRealtimeRefresh() {
   // Zo kan een nieuw zoekresultaat nooit een tweede refresh naast de eerste starten.
   window.__ovliveRealtimeRefreshBaseline = null;
   window.__ovliveDisplayedItineraryKeys = [];
+  window.__ovliveDeferredRealtimePlan = false;
 }
 
 async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) {
@@ -2408,6 +2422,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       cache: 'no-store',
+      signal: AbortSignal.timeout(30000),
       body: JSON.stringify(baseline)
     });
     const refreshed = await response.json().catch(() => ({}));
@@ -2454,6 +2469,22 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
     if (statusElement) {
       statusElement.textContent = `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 10 sec.`;
     }
+    if (window.__ovliveDeferredRealtimePlan === true &&
+        generation === livePlanRealtimeGeneration) {
+      const openovMeta = refreshed.openovRealtimeMeta;
+      const message = openovMeta?.status === 'enrichment_failed'
+        ? `Reisopties geladen · realtimecontrole niet volledig beschikbaar om ${checkedAt}. De geplande tijden blijven zichtbaar.`
+        : `Reisplanner klaar · realtime gecontroleerd om ${checkedAt}. OpenOV: ${openovMeta?.matchedLegCount ?? 0} ritten gekoppeld, ${openovMeta?.freshPredictionLegCount ?? 0} met verse halteprognose.`;
+      const planStatus = document.getElementById('planStatus');
+      if (planStatus) planStatus.textContent = message;
+      const diagnosticStatus = document.getElementById('realtime-plan-diagnostic-status');
+      if (diagnosticStatus) diagnosticStatus.textContent = message;
+      const feedInfoContainer = document.getElementById('realtime-feed-info');
+      if (feedInfoContainer) feedInfoContainer.innerHTML = renderRealtimeFeedInfo(openovMeta);
+      if (openovMeta?.status !== 'enrichment_failed') {
+        window.__ovliveDeferredRealtimePlan = false;
+      }
+    }
     window.__ovliveLastRealtimeRefreshAt = new Date().toISOString();
     window.__ovliveLastRealtimeRefreshMeta = {
       openov: refreshed.openovRealtimeMeta ?? null,
@@ -2462,8 +2493,17 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
     };
   } catch (error) {
     console.warn('[OVLIVE_REALTIME_REFRESH]', error instanceof Error ? error.message : String(error));
-    if (generation === livePlanRealtimeGeneration && statusElement) {
-      statusElement.textContent = 'Realtime-update mislukt; bestaande tijden blijven staan.';
+    if (generation === livePlanRealtimeGeneration) {
+      if (statusElement) {
+        statusElement.textContent = 'Realtime-update mislukt; bestaande tijden blijven staan. Er volgt automatisch een nieuwe poging.';
+      }
+      if (window.__ovliveDeferredRealtimePlan === true) {
+        const message = 'Reisopties geladen · realtimecontrole is tijdelijk niet beschikbaar. De geplande tijden blijven zichtbaar.';
+        const planStatus = document.getElementById('planStatus');
+        if (planStatus) planStatus.textContent = message;
+        const diagnosticStatus = document.getElementById('realtime-plan-diagnostic-status');
+        if (diagnosticStatus) diagnosticStatus.textContent = message;
+      }
     }
   } finally {
     livePlanRealtimeInFlight = false;
@@ -2472,6 +2512,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
 
 function startLivePlanRealtimeRefresh(plan) {
   stopLivePlanRealtimeRefresh();
+  window.__ovliveDeferredRealtimePlan = plan?.openovRealtimeMeta?.status === 'deferred';
   try {
     window.__ovliveRealtimeRefreshBaseline = buildRealtimeRefreshBaseline(plan);
     window.__ovliveDisplayedItineraryKeys = (Array.isArray(plan.itineraries)
@@ -2487,6 +2528,8 @@ function startLivePlanRealtimeRefresh(plan) {
     livePlanRealtimeTimer = window.setInterval(() => {
       void refreshLivePlanRealtime(generation);
     }, LIVE_PLAN_REALTIME_POLL_MS);
+    // Run the first enrichment immediately; do not make passengers wait 10 seconds.
+    void refreshLivePlanRealtime(generation);
   } catch (error) {
     console.warn('[OVLIVE_REALTIME_REFRESH_SETUP]', error instanceof Error ? error.message : String(error));
   }
@@ -2556,8 +2599,11 @@ $('planBtn').onclick = async () => {
 q.set('pedestrianSpeed', '1.5');
 
     q.set('numItineraries', '5');
+    q.set('deferRealtime', '1');
 
-    let data = await api('/api/plan?' + q);
+    let data = await api('/api/plan?' + q, {
+      signal: AbortSignal.timeout(30000)
+    });
     let journeys = Array.isArray(data.itineraries)
       ? data.itineraries
       : Array.isArray(data.journeys)
@@ -2586,7 +2632,10 @@ q.set('pedestrianSpeed', '1.5');
         const railQuery = new URLSearchParams(q);
         railQuery.set('transitModes', modeEnumByChoice.train.join(','));
         railQuery.set('numItineraries', '3');
-        const railData = await api('/api/plan?' + railQuery);
+        const railData = await api('/api/plan?' + railQuery, {
+          // Train-only results are supplementary; do not hold the main results for too long.
+          signal: AbortSignal.timeout(12000)
+        });
         const railJourneys = Array.isArray(railData.itineraries)
           ? railData.itineraries
           : Array.isArray(railData.journeys)
@@ -2649,7 +2698,10 @@ q.set('pedestrianSpeed', '1.5');
         (kv6UnmatchedSamples.length ? `; voorbeelden: ${kv6UnmatchedSamples.join(', ')}` : '') +
         (kv6Lookup.error ? `; fout: ${String(kv6Lookup.error).slice(0, 160)}` : '') + '.'
       : '';
-    if (meta?.status === 'enrichment_failed') {
+    if (meta?.status === 'deferred') {
+      $('planStatus').textContent =
+        `Plannerantwoord ontvangen · ${journeys.length} opties. Realtimecontrole wordt apart gestart.`;
+    } else if (meta?.status === 'enrichment_failed') {
       $('planStatus').textContent =
         `Reisplanner klaar · realtimeverwerking mislukt. ` +
         `${meta.message || 'De ritstatussen konden niet worden gecontroleerd.'} ` +
@@ -2678,17 +2730,7 @@ q.set('pedestrianSpeed', '1.5');
 
     const diagnosticPlanStatus = $('planStatus').textContent;
 
-    const feedInfo = meta?.feeds
-      ? `<div class="muted">Realtimefeeds: ${
-          Object.entries(meta.feeds).map(([name, feed]) =>
-            `${esc(name)}: ${esc(feed.freshness || 'onbekend')}` +
-            (feed.ageSeconds != null ? ` (${esc(feed.ageSeconds)} sec oud)` : '') +
-            (feed.status != null ? ` · HTTP ${esc(feed.status)}` : '') +
-            (feed.servedFromCache ? ` · cache ${esc(feed.cacheAgeSeconds ?? '?')} sec` : '') +
-            (feed.error ? ` · ${esc(feed.error)}` : '')
-          ).join(' · ')
-        }</div>`
-      : ''; 
+    const feedInfo = renderRealtimeFeedInfo(meta); 
 
     if (journeys.length === 0) {
       $('journeys').innerHTML =
@@ -2718,11 +2760,14 @@ q.set('pedestrianSpeed', '1.5');
 
     // Render pas na initialisatie van de kandidaatverzamelingen; eerder lezen
     // veroorzaakt een Temporal Dead Zone-fout en breekt de hele reisplanner.
-    $('planStatus').textContent = meta?.status === 'enrichment_failed'
-      ? 'Reisopties gevonden, maar de realtimecontrole kon niet volledig worden afgerond. Onbevestigde tijden worden niet als realtime getoond.'
-      : `${validItineraryCandidates.length} bruikbare reisopties gevonden` +
-        (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
-        '. Tik op een reis voor alle haltes en realtime-informatie.';
+    const itineraryStatus = `${validItineraryCandidates.length} bruikbare reisopties gevonden` +
+      (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
+      '.';
+    $('planStatus').textContent = meta?.status === 'deferred'
+      ? `${itineraryStatus} Realtimecontrole wordt direct gestart…`
+      : meta?.status === 'enrichment_failed'
+        ? 'Reisopties gevonden, maar de realtimecontrole kon niet volledig worden afgerond. Onbevestigde tijden worden niet als realtime getoond.'
+        : `${itineraryStatus} Tik op een reis voor alle haltes en realtime-informatie.`;
 
     if (validItineraryCandidates.length === 0) {
       $('journeys').innerHTML =
@@ -2865,7 +2910,7 @@ q.set('pedestrianSpeed', '1.5');
       `<div class="results-heading"><h3>Reisopties</h3><span>Tik op een reis voor details</span><span class="muted" id="live-refresh-status" role="status">Automatische realtime-update start na zoeken.</span></div>` +
       cards +
       renderAlerts(data.openovAlerts || []) +
-      `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted">${esc(diagnosticPlanStatus)}</p>${feedInfo}${renderRealtimeLegend()}</div></details>`;
+      `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted" id="realtime-plan-diagnostic-status">${esc(diagnosticPlanStatus)}</p><div id="realtime-feed-info">${feedInfo}</div>${renderRealtimeLegend()}</div></details>`;
     bindLiveJourneyCards();
     startLivePlanRealtimeRefresh(data);
     $('journeys').scrollIntoView({ behavior: 'smooth', block: 'start' });
