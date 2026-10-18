@@ -1227,6 +1227,216 @@ async function main() {
   console.log("=== NEAR-NOW PUBLISHED OPENOV TRIP END-TO-END PROBE ===");
   console.log(JSON.stringify(publishedTripPlanProbe, null, 2));
 
+
+  // Validate cancellation propagation for an actual CANCELED record from the
+  // fresh, complete route-level OpenOV feed sample. This is a read-only plan
+  // query; if the exact canceled trip is not returned, label the result
+  // inconclusive rather than claiming the planner handled it correctly.
+  const currentOperatingDate = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Amsterdam",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(auditStartedMs)).replace(/-/g, "");
+  const cancelledFeedCandidates = (routeLevelFeedResults
+    .find((item) => item.kind === "tripUpdates")?.result?.json?.entities ?? [])
+    .filter((record) =>
+      String(record?.startDate ?? "") === currentOperatingDate &&
+      /CANCEL|DELETE/i.test(String(record?.scheduleRelationship ?? ""))
+    )
+    .sort((a, b) => String(a?.startTime ?? "").localeCompare(String(b?.startTime ?? "")));
+  let cancelledTripProbe = {
+    status: "no_current_day_cancelled_record_in_complete_route_sample",
+    feedFresh: routeLevelFeedResults.find((item) => item.kind === "tripUpdates")?.result?.json?.freshness === "fresh",
+    currentOperatingDate,
+    cancelledCandidateCount: cancelledFeedCandidates.length,
+  };
+  const cancelledTripFeedFresh = routeLevelFeedResults.find((item) => item.kind === "tripUpdates")?.result?.json?.freshness === "fresh";
+  const cancelledTripFeedComplete = routeLevelFeedResults.find((item) => item.kind === "tripUpdates")?.result?.json &&
+    Number(routeLevelFeedResults.find((item) => item.kind === "tripUpdates").result.json.returnedCount ??
+      routeLevelFeedResults.find((item) => item.kind === "tripUpdates").result.json.entities?.length ?? 0) >=
+    Number(routeLevelFeedResults.find((item) => item.kind === "tripUpdates").result.json.matchingCount ??
+      routeLevelFeedResults.find((item) => item.kind === "tripUpdates").result.json.entities?.length ?? 0);
+  if (cancelledTripFeedFresh && cancelledTripFeedComplete && cancelledFeedCandidates.length > 0) {
+    let selected = null;
+    for (const record of cancelledFeedCandidates.slice(0, 5)) {
+      const routeKey = normalizeOpenovId(record?.routeId);
+      const date = String(record?.startDate ?? "");
+      const clock = String(record?.startTime ?? "");
+      const clockMatch = clock.match(/^(\\d{1,3}):(\\d{2})(?::(\\d{2}))?$/);
+      const hour = clockMatch ? Number(clockMatch[1]) : NaN;
+      const bucket = Number.isFinite(hour) ? (hour >= 24 ? "24" : hour >= 12 ? "12" : "00") : null;
+      const filenames = (bucket
+        ? routeManifest?.routesByStartBucket?.[routeKey]?.[bucket]
+        : null) ?? routeManifest?.routes?.[routeKey] ?? [];
+      if (!routeKey || !/^\\d{8}$/.test(date) || !clockMatch || !Array.isArray(filenames) || !filenames.length) continue;
+      const activeServiceIds = Array.isArray(serviceCalendar?.[date])
+        ? new Set(serviceCalendar[date].map(String))
+        : null;
+      if (!activeServiceIds) continue;
+      for (const filenameValue of filenames) {
+        const filename = String(filenameValue ?? "");
+        if (!filename || filename.includes("..") || filename.includes("/")) continue;
+        const shardPath = "/ndov-openov-route-crosswalk/routes/" + filename;
+        const [shardResult, sidecarResult] = await Promise.all([
+          get(shardPath),
+          get(shardPath.replace(/\\.json$/i, "-services.json")),
+        ]);
+        if (!Array.isArray(shardResult.json) || !Array.isArray(sidecarResult.json) ||
+            shardResult.json.length !== sidecarResult.json.length) continue;
+        for (let index = 0; index < shardResult.json.length; index++) {
+          const pattern = shardResult.json[index];
+          const openovTripIdValue = String(pattern?.openovTripId ?? "").trim();
+          if (openovTripIdValue !== String(record?.tripId ?? "").trim()) continue;
+          const serviceIds = Array.isArray(sidecarResult.json[index])
+            ? sidecarResult.json[index].map(String)
+            : [];
+          if (!serviceIds.some((serviceId) => activeServiceIds.has(serviceId))) continue;
+          const stops = Array.isArray(pattern?.stops) ? pattern.stops : [];
+          if (stops.length < 2) continue;
+          const parseClock = clockMatch;
+          const localWallClockMs = Date.UTC(
+            Number(date.slice(0, 4)),
+            Number(date.slice(4, 6)) - 1,
+            Number(date.slice(6, 8)),
+            Number(parseClock[1]),
+            Number(parseClock[2]),
+            Number(parseClock[3] ?? "0"),
+          );
+          let utcGuessMs = localWallClockMs;
+          for (let attempt = 0; attempt < 4; attempt++) {
+            const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+              timeZone: "Europe/Amsterdam",
+              year: "numeric", month: "2-digit", day: "2-digit",
+              hour: "2-digit", minute: "2-digit", second: "2-digit",
+              hourCycle: "h23",
+            }).formatToParts(new Date(utcGuessMs)).map((part) => [part.type, part.value]));
+            const representedLocalMs = Date.UTC(
+              Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+              Number(parts.hour), Number(parts.minute), Number(parts.second),
+            );
+            const nextGuessMs = localWallClockMs - (representedLocalMs - utcGuessMs);
+            if (nextGuessMs === utcGuessMs) break;
+            utcGuessMs = nextGuessMs;
+          }
+          selected = {
+            record,
+            routeKey,
+            date,
+            bucket,
+            filename,
+            pattern,
+            stopIds: [
+              normalizeOpenovId(stops[0]?.stopId ?? stops[0]?.id),
+              normalizeOpenovId(stops[stops.length - 1]?.stopId ?? stops[stops.length - 1]?.id),
+            ],
+            plannedTripStart: new Date(utcGuessMs).toISOString(),
+            activeServiceMatched: true,
+          };
+          break;
+        }
+        if (selected) break;
+      }
+      if (selected) break;
+    }
+
+    if (!selected) {
+      cancelledTripProbe = {
+        status: "no_exact_active_static_pattern_for_cancelled_feed_record",
+        feedFresh: cancelledTripFeedFresh,
+        feedComplete: cancelledTripFeedComplete,
+        currentOperatingDate,
+        cancelledCandidateCount: cancelledFeedCandidates.length,
+        candidateSamples: cancelledFeedCandidates.slice(0, 5).map(summarizeSourceRecord),
+      };
+    } else {
+      const [fromStopId, toStopId] = selected.stopIds;
+      const planProbeUrl = new URL("/api/plan", baseUrl);
+      planProbeUrl.searchParams.set("fromPlace", "nl-OpenOV_" + fromStopId);
+      planProbeUrl.searchParams.set("toPlace", "nl-OpenOV_" + toStopId);
+      planProbeUrl.searchParams.set("time", new Date(Date.parse(selected.plannedTripStart) - 30_000).toISOString());
+      planProbeUrl.searchParams.set("numItineraries", "5");
+      planProbeUrl.searchParams.set("maxItineraries", "5");
+      planProbeUrl.searchParams.set("ndovIdentityDiagnostics", "1");
+      const planProbeResult = await get(planProbeUrl.pathname + planProbeUrl.search, 65000);
+      const cancellationProbeLegs = planProbeResult.ok && planProbeResult.json
+        ? collectLegs(planProbeResult.json)
+        : [];
+      const exactCancelledLeg = cancellationProbeLegs.find((leg) =>
+        normalizeOpenovId(leg.routeId ?? leg.route?.id) === selected.routeKey &&
+        openovTripId(leg.tripId ?? leg.trip?.id) === String(selected.record?.tripId ?? "").trim()
+      ) ?? null;
+      const openovCancellationConfirmed = exactCancelledLeg &&
+        (exactCancelledLeg.cancelled === true ||
+          String(exactCancelledLeg.openovRealtime?.status ?? "").toLowerCase() === "cancelled");
+      cancelledTripProbe = {
+        status: !planProbeResult.ok || !planProbeResult.json
+          ? "cancelled_trip_plan_query_failed"
+          : exactCancelledLeg
+            ? openovCancellationConfirmed
+              ? "passed_exact_openov_cancellation_propagation"
+              : "exact_cancelled_trip_returned_without_cancelled_status"
+            : "exact_cancelled_trip_not_returned_by_plan_inconclusive",
+        sourceFeed: {
+          freshness: routeLevelFeedResults.find((item) => item.kind === "tripUpdates")?.result?.json?.freshness ?? null,
+          feedTimestamp: routeLevelFeedResults.find((item) => item.kind === "tripUpdates")?.result?.json?.feedTimestamp ?? null,
+          record: summarizeSourceRecord(selected.record),
+        },
+        activeStaticPattern: {
+          routeId: selected.routeKey,
+          openovTripId: selected.record?.tripId ?? null,
+          realtimeTripId: selected.pattern?.realtimeTripId ?? null,
+          patternStart: selected.pattern?.stops?.[0] ?? null,
+          patternEnd: selected.pattern?.stops?.[selected.pattern.stops.length - 1] ?? null,
+          serviceDate: selected.date,
+          bucket: selected.bucket,
+          shard: selected.filename,
+          plannedTripStart: selected.plannedTripStart,
+          activeServiceMatched: selected.activeServiceMatched,
+        },
+        planQuery: {
+          httpStatus: planProbeResult.status,
+          fromPlace: planProbeUrl.searchParams.get("fromPlace"),
+          toPlace: planProbeUrl.searchParams.get("toPlace"),
+          time: planProbeUrl.searchParams.get("time"),
+          itineraryCount: Array.isArray(planProbeResult.json?.itineraries)
+            ? planProbeResult.json.itineraries.length
+            : Array.isArray(planProbeResult.json?.journeys)
+              ? planProbeResult.json.journeys.length
+              : null,
+          error: planProbeResult.json?.error ?? planProbeResult.error ?? null,
+        },
+        exactTripReturned: Boolean(exactCancelledLeg),
+        exactLeg: exactCancelledLeg ? {
+          routeId: exactCancelledLeg.routeId ?? exactCancelledLeg.route?.id ?? null,
+          tripId: exactCancelledLeg.tripId ?? exactCancelledLeg.trip?.id ?? null,
+          cancelled: exactCancelledLeg.cancelled ?? null,
+          openovRealtime: exactCancelledLeg.openovRealtime ? {
+            status: exactCancelledLeg.openovRealtime.status ?? null,
+            reason: exactCancelledLeg.openovRealtime.reason ?? null,
+            matchMethod: exactCancelledLeg.openovRealtime.matchMethod ?? null,
+            scheduleRelationship: exactCancelledLeg.openovRealtime.scheduleRelationship ?? null,
+          } : null,
+          ndovRealtime: exactCancelledLeg.ndovRealtime ? {
+            status: exactCancelledLeg.ndovRealtime.status ?? null,
+            source: exactCancelledLeg.ndovRealtime.source ?? null,
+            identity: exactCancelledLeg.ndovRealtime.identity ?? null,
+          } : null,
+        } : null,
+        interpretationLimit: "A source cancellation is only counted as propagated if the same exact trip is returned with a canceled status. If the planner does not return the trip, this probe is inconclusive because the trip may already have been filtered.",
+      };
+    }
+  } else if (!cancelledTripFeedFresh || !cancelledTripFeedComplete) {
+    cancelledTripProbe = {
+      status: "skipped_cancelled_feed_not_fresh_or_incomplete",
+      feedFresh: cancelledTripFeedFresh,
+      feedComplete: cancelledTripFeedComplete,
+      cancelledCandidateCount: cancelledFeedCandidates.length,
+    };
+  }
+  console.log("=== EXACT OPENOV CANCELLATION PROPAGATION PROBE ===");
+  console.log(JSON.stringify(cancelledTripProbe, null, 2));
+
   assert.ok(legs.length > 0, "Production /api/plan must return at least one leg.");
   console.log("PASS: production endpoint diagnostics finished; no data was changed.");
 }
