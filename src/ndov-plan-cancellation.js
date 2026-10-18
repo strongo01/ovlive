@@ -2232,6 +2232,8 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
         distanceSinceLastStop: valueOf(event, "distanceSinceLastStop") ?? null,
         rdX: valueOf(event, "rdX") ?? null,
         rdY: valueOf(event, "rdY") ?? null,
+        positionTimestamp: valueOf(event, "positionTimestamp") ?? null,
+        positionReceivedAt: valueOf(event, "positionReceivedAt") ?? null,
         eventType: eventType || null,
         timestamp: observedAt ?? null,
         receivedAt: event.receivedAt ?? event.punctualityReceivedAt ?? null,
