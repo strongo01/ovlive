@@ -2335,6 +2335,33 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
         env,
         delayItems.map((item) => item.identityKey).filter(Boolean)
       );
+
+      // Only metro legs with zero exact KV78 rows may use a bounded line/date/time
+      // lookup. The fallback never applies to KV17 cancellations or other modes.
+      const metroFallbackGroups = new Map();
+      for (const item of delayItems) {
+        const exactRows = item.identityKey ? (exactRowsByIdentity.get(item.identityKey) ?? []) : [];
+        if (exactRows.length) continue;
+        const lookup = metroKv78LookupForItem(item);
+        if (!lookup) continue;
+        const key = [lookup.owner, lookup.operationDate, lookup.linePlanningNumber].join("|");
+        const group = metroFallbackGroups.get(key) ?? { ...lookup, scheduledTimes: [], items: [] };
+        group.scheduledTimes.push(...lookup.scheduledTimes);
+        group.items.push(item);
+        metroFallbackGroups.set(key, group);
+      }
+      const metroFallbackRowsByGroup = new Map();
+      const metroLineLookupErrors = [];
+      for (const [key, group] of metroFallbackGroups) {
+        try {
+          const rows = await getCurrentKv78RowsNearScheduledTimes(env, group);
+          metroFallbackRowsByGroup.set(key, rows);
+        } catch (error) {
+          metroLineLookupErrors.push(error instanceof Error ? error.message : String(error));
+          metroFallbackRowsByGroup.set(key, []);
+        }
+      }
+
       const rowResults = await Promise.all(delayItems.map(async (item) => {
         const vehicleLookup = kv78VehicleLookupForItem(item);
         const exactRows = item.identityKey
@@ -2353,8 +2380,21 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
           kv78RowMatchesVehicleLookup(row, item, vehicleLookup) &&
           kv78RowWithinLegTimeWindow(row, item)
         );
+        const metroLookup = !exactRows.length ? metroKv78LookupForItem(item) : null;
+        const metroGroupKey = metroLookup
+          ? [metroLookup.owner, metroLookup.operationDate, metroLookup.linePlanningNumber].join("|")
+          : null;
+        const metroLineRows = metroGroupKey
+          ? (metroFallbackRowsByGroup.get(metroGroupKey) ?? [])
+          : [];
+        const filteredMetroRows = metroLookup ? metroLineRows.filter((row) =>
+          String(row?.dataOwnerCode ?? "").trim().toUpperCase() === metroLookup.owner &&
+          normalizeDate(row?.operationDate) === metroLookup.operationDate &&
+          String(row?.linePlanningNumber ?? "").trim().toUpperCase() === metroLookup.linePlanningNumber &&
+          kv78RowWithinLegTimeWindow(row, item)
+        ) : [];
         const uniqueRows = new Map();
-        for (const row of [...exactRows, ...filteredVehicleRows]) {
+        for (const row of [...exactRows, ...filteredVehicleRows, ...filteredMetroRows]) {
           const identity = toIdentity(
             row.dataOwnerCode,
             row.operationDate,
@@ -2370,13 +2410,15 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
           rows: [...uniqueRows.values()],
           vehicleLookup,
           vehicleLookupError,
+          lineTimeFallback: filteredMetroRows.length > 0,
         };
-      }));
+      }));;
       const vehicleLookupErrors = [...new Set(rowResults
         .map((result) => result.vehicleLookupError)
         .filter(Boolean))];
-      if (vehicleLookupErrors.length) {
-        kv78Error = vehicleLookupErrors.slice(0, 3).join("; ");
+      const allKv78LookupErrors = [...new Set([...metroLineLookupErrors, ...vehicleLookupErrors])];
+      if (allKv78LookupErrors.length) {
+        kv78Error = [kv78Error, ...allKv78LookupErrors.slice(0, 3)].filter(Boolean).join("; ");
       }
 
       const kv6PredictionItems = candidates.filter((item) => item.routePattern && item.kv6PredictionContext);
