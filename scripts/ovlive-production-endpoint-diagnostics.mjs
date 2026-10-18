@@ -489,6 +489,78 @@ async function main() {
     })),
   }, null, 2));
 
+  const ndovMeta = planResult.json.ndovRealtimeMeta ?? {};
+  const routeCrosswalkOutcomes = Array.isArray(ndovMeta.routeCrosswalkOutcomes)
+    ? ndovMeta.routeCrosswalkOutcomes
+    : [];
+  const openovNdovIdentityBridge = openovLegs.map((leg) => {
+    const tripId = String(leg.tripId ?? leg.trip?.id ?? "");
+    const outcome = routeCrosswalkOutcomes.find((item) =>
+      String(item?.tripId ?? "") === tripId
+    ) ?? null;
+    const realtimeTripId = String(outcome?.realtimeTripId ?? "");
+    const parts = realtimeTripId.split(":").map((part) => part.trim());
+    const serviceDate = String(outcome?.serviceDate ?? tripId.match(/^(\d{8})_/)?.[1] ?? "");
+    const expectedBisonIdentity = parts.length === 3 && parts.every(Boolean) && /^\d{8}$/.test(serviceDate)
+      ? parts[0] + "|" + serviceDate + "|" + parts[1] + "|" + parts[2] + "|0"
+      : null;
+    return {
+      mode: leg.mode ?? leg.transitMode ?? null,
+      routeId: leg.routeId ?? leg.route?.id ?? null,
+      tripId,
+      scheduledDeparture: plannedEndpoint(leg, "departure"),
+      scheduledArrival: plannedEndpoint(leg, "arrival"),
+      openovRealtime: leg.openovRealtime ? {
+        status: leg.openovRealtime.status ?? null,
+        reason: leg.openovRealtime.reason ?? null,
+        matchMethod: leg.openovRealtime.matchMethod ?? null,
+        updateAgeSeconds: leg.openovRealtime.updateAgeSeconds ?? null,
+      } : null,
+      ndovRealtimeMatch: leg.ndovRealtimeMatch ? {
+        status: leg.ndovRealtimeMatch.status ?? null,
+        reason: leg.ndovRealtimeMatch.reason ?? null,
+        candidateCount: leg.ndovRealtimeMatch.candidateCount ?? null,
+        candidateRealtimeTripIds: leg.ndovRealtimeMatch.candidateRealtimeTripIds ?? [],
+      } : null,
+      routeCrosswalk: outcome ? {
+        source: outcome.source ?? null,
+        reason: outcome.reason ?? null,
+        realtimeTripId: outcome.realtimeTripId ?? null,
+        parsedIdentity: outcome.parsedIdentity ?? null,
+        expectedBisonIdentity,
+        candidateCount: outcome.candidateCount ?? null,
+        candidateRealtimeTripIds: outcome.candidateRealtimeTripIds ?? [],
+        candidatePatternDetails: Array.isArray(outcome.candidatePatternDetails)
+          ? outcome.candidatePatternDetails.slice(0, 3)
+          : [],
+      } : null,
+      ndovRealtime: leg.ndovRealtime ? {
+        status: leg.ndovRealtime.status ?? null,
+        source: leg.ndovRealtime.source ?? null,
+        identity: leg.ndovRealtime.identity ?? null,
+        eventType: leg.ndovRealtime.eventType ?? leg.ndovRealtime.kv6?.eventType ?? null,
+        punctualitySeconds: leg.ndovRealtime.punctualitySeconds ?? leg.ndovRealtime.kv6?.punctualitySeconds ?? null,
+        kv6Status: leg.ndovRealtime.kv6?.status ?? null,
+        kv78Status: leg.ndovRealtime.kv78?.status ?? null,
+      } : null,
+    };
+  });
+  console.log("=== OPENOV TO NDOV IDENTITY BRIDGE (SEARCH THIS HEADING) ===");
+  console.log(JSON.stringify({
+    planCheckedAt: ndovMeta.checkedAt ?? null,
+    routeCrosswalkGeneratedAt: ndovMeta.openovRouteCrosswalkGeneratedAt ?? null,
+    routeCrosswalkMatchedLegCount: ndovMeta.routeCrosswalkMatchedLegCount ?? null,
+    tripIdCrosswalkFallbackMatchedLegCount: ndovMeta.tripIdCrosswalkFallbackMatchedLegCount ?? null,
+    routeCrosswalkError: ndovMeta.routeCrosswalkError ?? null,
+    kv6LookupDiagnostics: ndovMeta.kv6LookupDiagnostics ?? null,
+    kv6IdentityDiagnostics: ndovMeta.kv6IdentityDiagnostics ?? null,
+    kv78FeedState: ndovMeta.kv78FeedState ?? null,
+    kv78FeedAgeSeconds: ndovMeta.kv78FeedAgeSeconds ?? null,
+    kv78CollectorDiagnostics: ndovMeta.kv78CollectorDiagnostics ?? null,
+    kv78IdentityDiagnostics: ndovMeta.kv78IdentityDiagnostics ?? null,
+    legs: openovNdovIdentityBridge,
+  }, null, 2));
+
   // Print this section separately so it is easy to find in long Actions logs.
   console.log("=== EXACT OPENOV SOURCE EVIDENCE (SEARCH THIS HEADING) ===");
   console.log(JSON.stringify(exactOpenovSourceEvidence, null, 2));
