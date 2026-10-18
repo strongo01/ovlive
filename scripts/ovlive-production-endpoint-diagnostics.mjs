@@ -1155,18 +1155,63 @@ async function main() {
           candidateRealtimeTripIds: exactPublishedTripCrosswalk.candidateRealtimeTripIds ?? [],
         } : null,
       } : null,
-      candidatePlanLegs: probeLegs.slice(0, 10).map((leg) => ({
-        routeId: leg.routeId ?? leg.route?.id ?? null,
-        tripId: leg.tripId ?? leg.trip?.id ?? null,
-        fromStopId: normalizeOpenovId(leg.from?.stopId ?? leg.from?.id) || null,
-        toStopId: normalizeOpenovId(leg.to?.stopId ?? leg.to?.id) || null,
-        plannedDeparture: plannedEndpoint(leg, "departure"),
-        openovStatus: leg.openovRealtime?.status ?? null,
-        openovReason: leg.openovRealtime?.reason ?? null,
-        ndovStatus: leg.ndovRealtime?.status ?? null,
-        ndovIdentity: leg.ndovRealtime?.identity ?? null,
-        ndovMatchReason: leg.ndovRealtimeMatch?.reason ?? null,
-      })),
+      candidatePlanLegs: probeLegs.slice(0, 10).map((leg) => {
+        const candidateLegTripId = String(leg.tripId ?? leg.trip?.id ?? "");
+        const candidateCrosswalkOutcome = probeRouteCrosswalkOutcomes.find((item) =>
+          String(item?.tripId ?? "") === candidateLegTripId
+        ) ?? null;
+        const candidateRealtimeTripId = String(candidateCrosswalkOutcome?.realtimeTripId ?? "");
+        const candidateIdentityParts = candidateRealtimeTripId.split(":").map((part) => part.trim());
+        const candidateServiceDate = String(candidateCrosswalkOutcome?.serviceDate ??
+          candidateLegTripId.match(/^(\\d{8})_/)?.[1] ?? "");
+        const expectedCandidateBisonIdentity = candidateIdentityParts.length === 3 &&
+          candidateIdentityParts.every(Boolean) && /^\\d{8}$/.test(candidateServiceDate)
+          ? candidateIdentityParts[0] + "|" + candidateServiceDate + "|" +
+            candidateIdentityParts[1] + "|" + candidateIdentityParts[2] + "|0"
+          : null;
+        const kv6UnmatchedIdentitySamples = Array.isArray(probeMeta.kv6LookupDiagnostics?.unmatchedIdentitySamples)
+          ? probeMeta.kv6LookupDiagnostics.unmatchedIdentitySamples
+          : [];
+        const kv6Comparison = Array.isArray(probeMeta.kv6IdentityDiagnostics?.comparisons)
+          ? probeMeta.kv6IdentityDiagnostics.comparisons.find((item) =>
+            String(item?.requestedIdentity ?? "") === String(expectedCandidateBisonIdentity ?? "")
+          ) ?? null
+          : null;
+        const kv78Comparison = Array.isArray(probeMeta.kv78IdentityDiagnostics?.comparisons)
+          ? probeMeta.kv78IdentityDiagnostics.comparisons.find((item) =>
+            String(item?.requestedIdentity ?? "") === String(expectedCandidateBisonIdentity ?? "")
+          ) ?? null
+          : null;
+        return {
+          routeId: leg.routeId ?? leg.route?.id ?? null,
+          tripId: candidateLegTripId || null,
+          fromStopId: normalizeOpenovId(leg.from?.stopId ?? leg.from?.id) || null,
+          toStopId: normalizeOpenovId(leg.to?.stopId ?? leg.to?.id) || null,
+          plannedDeparture: plannedEndpoint(leg, "departure"),
+          openovStatus: leg.openovRealtime?.status ?? null,
+          openovReason: leg.openovRealtime?.reason ?? null,
+          ndovStatus: leg.ndovRealtime?.status ?? null,
+          ndovIdentity: leg.ndovRealtime?.identity ?? null,
+          ndovMatchReason: leg.ndovRealtimeMatch?.reason ?? null,
+          routeCrosswalk: candidateCrosswalkOutcome ? {
+            source: candidateCrosswalkOutcome.source ?? null,
+            reason: candidateCrosswalkOutcome.reason ?? null,
+            realtimeTripId: candidateCrosswalkOutcome.realtimeTripId ?? null,
+            expectedBisonIdentity: expectedCandidateBisonIdentity,
+            listedInKv6UnmatchedIdentitySamples: expectedCandidateBisonIdentity
+              ? kv6UnmatchedIdentitySamples.includes(expectedCandidateBisonIdentity)
+              : null,
+            kv6IdentitySampleComparison: kv6Comparison ? {
+              exactIdentityInReturnedSample: kv6Comparison.exactIdentityInReturnedSample ?? null,
+              sameOwnerDateSampleCount: kv6Comparison.sameOwnerDateSampleCount ?? null,
+            } : null,
+            kv78IdentitySampleComparison: kv78Comparison ? {
+              exactIdentityInReturnedSample: kv78Comparison.exactIdentityInReturnedSample ?? null,
+              sameOwnerDateSampleCount: kv78Comparison.sameOwnerDateSampleCount ?? null,
+            } : null,
+          } : null,
+        };
+      }),
       ndovRealtimeMeta: {
         routeCrosswalkGeneratedAt: probeMeta.openovRouteCrosswalkGeneratedAt ?? null,
         routeCrosswalkMatchedLegCount: probeMeta.routeCrosswalkMatchedLegCount ?? null,
