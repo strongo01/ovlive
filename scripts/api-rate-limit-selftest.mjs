@@ -127,6 +127,18 @@ assert.deepEqual(planCommon.calls, ["client:203.0.113.8"]);
 assert.deepEqual(planBlocked.calls, ["client:203.0.113.8"]);
 console.log("PASS: reisplanning heeft een aparte strengere limiet");
 
+const refreshCommon = limiter([true]);
+const refreshBlocked = limiter([false]);
+const refreshResponse = await enforcePublicApiRateLimit(
+  request("https://ovlive.example/api/realtime-refresh"),
+  { API_RATE_LIMITER: refreshCommon, PLAN_RATE_LIMITER: refreshBlocked },
+  headers
+);
+assert.equal(refreshResponse.status, 429);
+assert.deepEqual(refreshCommon.calls, ["client:203.0.113.8"]);
+assert.deepEqual(refreshBlocked.calls, ["client:203.0.113.8"]);
+console.log("PASS: realtime-verversing deelt de aparte strengere reisplanninglimiet");
+
 const failingLimiter = {
   async limit() { throw new Error("simulated limiter failure"); }
 };

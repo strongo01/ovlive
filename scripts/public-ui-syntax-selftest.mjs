@@ -19,6 +19,22 @@ for (const block of blocks) {
   }
 }
 
+// Realtime timings must refresh separately from the map's live vehicle-position poll.
+assert.ok(html.includes("const LIVE_PLAN_REALTIME_POLL_MS = 30000;"),
+  "itinerary realtime polling must use a 30-second interval");
+assert.ok(html.includes("fetch('/api/realtime-refresh'"),
+  "the UI must request fresh timetable realtime enrichments");
+assert.ok(html.includes("cache: 'no-store'"),
+  "realtime refresh requests must bypass browser HTTP cache");
+assert.ok(html.includes("}, LIVE_PLAN_REALTIME_POLL_MS);"),
+  "the 30-second realtime poll must be scheduled");
+assert.ok(html.includes('<div class="journey-leg-details">') &&
+  html.includes('data-leg-index="${index}"'),
+  "realtime refresh must target the journey-leg details without rebuilding the map");
+assert.ok(html.includes("startLivePlanRealtimeRefresh(data);"),
+  "automatic realtime refresh must start after a successful plan search");
+console.log("PASS: itinerary times and realtime badges are refreshed automatically every 30 seconds");
+
 // Regression guard: the itinerary summary must not read block-scoped values
 // before their declarations, which would abort the planner at runtime.
 const invalidChronologyDeclaration = html.indexOf("const invalidChronologyCount = itineraryCandidates");

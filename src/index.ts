@@ -461,7 +461,7 @@ function corsHeaders(origin: string | null) {
   // Same-origin frontend is the intended production deployment. CORS is deliberately
   // not wildcard-enabled to avoid turning this Worker into a public open proxy.
   const headers: Record<string, string> = {
-    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "content-type",
     "vary": "Origin"
   };
@@ -2308,10 +2308,96 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const headers = corsHeaders(origin);
 
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
-  if (request.method !== "GET") return json({ error: "Alleen GET is toegestaan." }, 405, headers);
+  const isRealtimeRefresh = url.pathname === "/api/realtime-refresh";
+  if (request.method !== "GET" &&
+      !(isRealtimeRefresh && request.method === "POST")) {
+    return json({ error: "Deze API-route accepteert alleen de gedocumenteerde HTTP-methode." }, 405, headers);
+  }
 
   const rateLimitResponse = await enforcePublicApiRateLimit(request, env, headers);
   if (rateLimitResponse) return rateLimitResponse;
+
+  if (isRealtimeRefresh && request.method === "POST") {
+    const declaredLength = Number(request.headers.get("content-length") ?? "0");
+    const maxRefreshBytes = 4 * 1024 * 1024;
+    if (Number.isFinite(declaredLength) && declaredLength > maxRefreshBytes) {
+      return json({ error: "De reisgegevens voor de realtime-update zijn te groot." }, 413, headers);
+    }
+    if (!String(request.headers.get("content-type") ?? "").toLowerCase().includes("application/json")) {
+      return json({ error: "Verstuur de reisgegevens als application/json." }, 415, headers);
+    }
+
+    let planData: any;
+    try {
+      const body = await request.text();
+      if (new TextEncoder().encode(body).byteLength > maxRefreshBytes) {
+        return json({ error: "De reisgegevens voor de realtime-update zijn te groot." }, 413, headers);
+      }
+      planData = JSON.parse(body);
+    } catch {
+      return json({ error: "De reisgegevens voor de realtime-update zijn geen geldige JSON." }, 400, headers);
+    }
+
+    const itineraries = Array.isArray(planData?.itineraries)
+      ? planData.itineraries
+      : Array.isArray(planData?.journeys)
+        ? planData.journeys
+        : [];
+    if (!planData || typeof planData !== "object" || Array.isArray(planData) ||
+        itineraries.length === 0 || itineraries.length > 12) {
+      return json({ error: "De reisgegevens zijn ongeldig of bevatten te veel reisopties." }, 400, headers);
+    }
+
+    const refreshLegCount = itineraries.reduce((count: number, itinerary: any) => {
+      const legs = Array.isArray(itinerary?.legs)
+        ? itinerary.legs
+        : Array.isArray(itinerary?.transitLegs)
+          ? itinerary.transitLegs
+          : [];
+      return count + legs.length;
+    }, 0);
+    if (refreshLegCount < 1 || refreshLegCount > 240) {
+      return json({ error: "De reisgegevens bevatten een ongeldig aantal reisdelen." }, 400, headers);
+    }
+
+    // Strip alle vorige live-uitkomsten zodat een mislukte nieuwe feed geen
+    // oude vertraging of annulering als actuele informatie blijft tonen.
+    delete planData.openovRealtimeMeta;
+    delete planData.openovAlerts;
+    delete planData.nsRealtimeMeta;
+    delete planData.ndovRealtimeMeta;
+    for (const leg of collectPlanLegs(planData)) {
+      const wasNdovCancelled = leg.ndovRealtime?.status === "cancelled";
+      delete leg.openovRealtime;
+      delete leg.nsRealtime;
+      delete leg.ndovRealtime;
+      delete leg.ndovRealtimeMatch;
+      delete leg.realtimePrediction;
+      if (wasNdovCancelled) delete leg.cancelled;
+    }
+
+    try {
+      await prepareNsTrainIdentities(planData, env);
+      await enrichNsTrainPlan(planData, env);
+      planData = await enrichTransitousPlan(planData);
+      await applyNdovCancellationsToPlan(planData, env);
+      return json(planData, 200, {
+        ...headers,
+        "cache-control": "no-store",
+        "x-upstream": "OVLive realtime refresh"
+      });
+    } catch (error) {
+      console.error(
+        "[OVLIVE_REALTIME_REFRESH_ERROR]",
+        error instanceof Error ? error.stack ?? error.message : error
+      );
+      return json({
+        error: "De realtimegegevens konden niet volledig worden vernieuwd.",
+        detail: error instanceof Error ? error.message : "Onbekende fout",
+        checkedAt: new Date().toISOString()
+      }, 502, headers);
+    }
+  }
 
   if (url.pathname === "/api/health") {
     // Decodeer de echte feeds in plaats van alleen HEAD/HTTP te controleren.

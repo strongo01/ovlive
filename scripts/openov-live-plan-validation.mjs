@@ -67,6 +67,36 @@ function collectLegs(root) {
   return legs;
 }
 
+function buildRealtimeRefreshPayload(plan) {
+  const payload = JSON.parse(JSON.stringify(plan));
+  delete payload.openovRealtimeMeta;
+  delete payload.openovAlerts;
+  delete payload.nsRealtimeMeta;
+  delete payload.ndovRealtimeMeta;
+  for (const leg of collectLegs(payload)) {
+    const wasNdovCancelled = leg.ndovRealtime?.status === "cancelled";
+    delete leg.openovRealtime;
+    delete leg.nsRealtime;
+    delete leg.ndovRealtime;
+    delete leg.ndovRealtimeMatch;
+    delete leg.realtimePrediction;
+    if (wasNdovCancelled) delete leg.cancelled;
+  }
+  return payload;
+}
+
+function openovLegKeys(root) {
+  return collectLegs(root)
+    .filter(leg => /^nl-OpenOV_/i.test(String(leg.routeId ?? leg.route?.id ?? "")))
+    .map(leg => [
+      String(leg.routeId ?? leg.route?.id ?? ""),
+      String(leg.tripId ?? leg.trip?.id ?? ""),
+      String(leg.from?.stopId ?? leg.from?.id ?? leg.from?.name ?? ""),
+      String(leg.to?.stopId ?? leg.to?.id ?? leg.to?.name ?? "")
+    ].join("|"))
+    .sort();
+}
+
 function scheduledValue(leg, kind) {
   return kind === "departure"
     ? leg.from?.scheduledDeparture ?? leg.scheduledStartTime ?? leg.startTime
@@ -106,6 +136,60 @@ async function main() {
     throw new Error("/api/plan gaf " + legs.length +
       " leg(s), maar geen OpenOV-OV-leg. Controleer de stops of Transitous.");
   }
+
+  console.log("=== LIVE realtime-only refresh ===");
+  const refreshPayload = buildRealtimeRefreshPayload(plan);
+  const refreshBody = JSON.stringify(refreshPayload);
+  const refreshResponse = await fetch(baseUrl + "/api/realtime-refresh", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json"
+    },
+    cache: "no-store",
+    body: refreshBody,
+    signal: AbortSignal.timeout(65000)
+  });
+  const refreshText = await refreshResponse.text();
+  let refreshedPlan;
+  try {
+    refreshedPlan = JSON.parse(refreshText);
+  } catch {
+    throw new Error("/api/realtime-refresh gaf geen geldige JSON terug (HTTP " +
+      refreshResponse.status + ").");
+  }
+  if (!refreshResponse.ok) {
+    throw new Error("/api/realtime-refresh gaf HTTP " + refreshResponse.status +
+      ": " + String(refreshedPlan?.error ?? refreshText).slice(0, 500));
+  }
+  const refreshedOpenovKeys = openovLegKeys(refreshedPlan);
+  const originalOpenovKeys = openovLegKeys(plan);
+  if (JSON.stringify(refreshedOpenovKeys) !== JSON.stringify(originalOpenovKeys)) {
+    throw new Error("/api/realtime-refresh veranderde de vaste route-/ritidentiteiten.");
+  }
+  const refreshItineraryCount = Array.isArray(refreshedPlan.itineraries)
+    ? refreshedPlan.itineraries.length
+    : Array.isArray(refreshedPlan.journeys)
+      ? refreshedPlan.journeys.length
+      : 0;
+  const originalItineraryCount = Array.isArray(plan.itineraries)
+    ? plan.itineraries.length
+    : Array.isArray(plan.journeys)
+      ? plan.journeys.length
+      : 0;
+  if (refreshItineraryCount !== originalItineraryCount) {
+    throw new Error("/api/realtime-refresh veranderde het aantal bestaande reisopties.");
+  }
+  if (!refreshedPlan.openovRealtimeMeta?.checkedAt) {
+    throw new Error("/api/realtime-refresh gaf geen verse OpenOV-controlemetadata terug.");
+  }
+  console.log("PASS: realtime-only refresh hercontroleert tijden en behoudt route-/ritidentiteiten.");
+  console.log(JSON.stringify({
+    payloadBytes: Buffer.byteLength(refreshBody),
+    itinerariesPreserved: refreshItineraryCount,
+    openovLegIdentitiesPreserved: refreshedOpenovKeys.length,
+    openovCheckedAt: refreshedPlan.openovRealtimeMeta.checkedAt
+  }, null, 2));
 
   const statusCounts = {};
   for (const leg of openovLegs) {

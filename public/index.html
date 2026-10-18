@@ -682,6 +682,10 @@ let liveLeafletPromise = null;
 const liveJourneyMapStates = new Map();
 const LIVE_VEHICLE_POLL_MS = 30000;
 const LIVE_VEHICLE_MAX_AGE_SECONDS = 180;
+const LIVE_PLAN_REALTIME_POLL_MS = 30000;
+let livePlanRealtimeTimer = null;
+let livePlanRealtimeInFlight = false;
+let livePlanRealtimeGeneration = 0;
 
 function normalizeLiveVehicleId(value) {
   return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
@@ -2198,7 +2202,7 @@ function renderLeg(leg, index = 0) {
     ? `<div class="muted">Aankomstperron/spoor: ${esc(toTrack)}</div>`
     : '';
 
-  return `<div class="leg">
+  return `<div class="leg" data-leg-index="${index}">
     <div class="leg-head">
       <span class="pill">${esc(modeName(leg.mode))}</span>
       <strong>${esc(title)}</strong>
@@ -2217,7 +2221,278 @@ function renderLeg(leg, index = 0) {
   </div>`;
 }
 
+function journeySourceLegs(journey) {
+  return Array.isArray(journey?.legs)
+    ? journey.legs
+    : Array.isArray(journey?.transitLegs)
+      ? journey.transitLegs
+      : [];
+}
+
+function prepareJourneyLegsForDisplay(journey, sourceLegs, maxInitialWaitSeconds) {
+  const legs = sourceLegs.map(leg => ({
+    ...leg,
+    from: leg.from && typeof leg.from === 'object' ? { ...leg.from } : leg.from,
+    to: leg.to && typeof leg.to === 'object' ? { ...leg.to } : leg.to
+  }));
+
+  let adjustedJourneyStart = null;
+  const firstWalk = legs[0];
+  const firstTransit = legs.find(leg => leg.mode !== 'WALK');
+
+  if (
+    firstWalk?.mode === 'WALK' &&
+    typeof firstWalk.distance === 'number' &&
+    firstTransit &&
+    Number.isFinite(maxInitialWaitSeconds)
+  ) {
+    const startValue = plannedEndpointTime(firstWalk, 'departure') ||
+      journey.startTime;
+    const transitStartValue = plannedEndpointTime(firstTransit, 'departure');
+    const startMs = Date.parse(startValue || '');
+    const transitStartMs = Date.parse(transitStartValue || '');
+    const estimatedWalkSeconds = Math.round(firstWalk.distance / 1.5);
+
+    if (
+      Number.isFinite(startMs) &&
+      Number.isFinite(transitStartMs) &&
+      transitStartMs > startMs &&
+      estimatedWalkSeconds > 0
+    ) {
+      firstWalk.endTime = transitStartValue;
+      firstWalk.to = {
+        ...(firstWalk.to && typeof firstWalk.to === 'object'
+          ? firstWalk.to
+          : {}),
+        arrival: transitStartValue
+      };
+
+      const currentWaitSeconds =
+        (transitStartMs - startMs) / 1000 - estimatedWalkSeconds;
+
+      if (currentWaitSeconds > maxInitialWaitSeconds) {
+        const shiftSeconds = currentWaitSeconds - maxInitialWaitSeconds;
+        adjustedJourneyStart = new Date(
+          startMs + shiftSeconds * 1000
+        ).toISOString();
+        firstWalk.startTime = adjustedJourneyStart;
+
+        if (firstWalk.from) {
+          firstWalk.from.departure = adjustedJourneyStart;
+        } else {
+          firstWalk.from = {
+            name: 'START',
+            departure: adjustedJourneyStart
+          };
+        }
+      }
+    }
+  }
+
+  return { legs, adjustedJourneyStart };
+}
+
+function itineraryRealtimeKey(journey) {
+  return journeySourceLegs(journey)
+    .map(leg => [
+      String(leg?.mode ?? ''),
+      String(leg?.routeId ?? leg?.route?.id ?? ''),
+      String(leg?.tripId ?? leg?.trip?.id ?? ''),
+      String(leg?.from?.stopId ?? leg?.from?.id ?? leg?.from?.name ?? ''),
+      String(leg?.to?.stopId ?? leg?.to?.id ?? leg?.to?.name ?? ''),
+      String(leg?.scheduledStartTime ?? leg?.from?.scheduledDeparture ?? leg?.startTime ?? '')
+    ].join('|'))
+    .join('>>');
+}
+
+function buildRealtimeRefreshBaseline(plan) {
+  const baseline = JSON.parse(JSON.stringify(plan));
+  delete baseline.openovRealtimeMeta;
+  delete baseline.openovAlerts;
+  delete baseline.nsRealtimeMeta;
+  delete baseline.ndovRealtimeMeta;
+
+  const itineraries = Array.isArray(baseline.itineraries)
+    ? baseline.itineraries
+    : Array.isArray(baseline.journeys)
+      ? baseline.journeys
+      : [];
+  for (const itinerary of itineraries) {
+    for (const leg of journeySourceLegs(itinerary)) {
+      const hadNdovCancellation = leg.ndovRealtime?.status === 'cancelled';
+      delete leg.openovRealtime;
+      delete leg.nsRealtime;
+      delete leg.ndovRealtime;
+      delete leg.ndovRealtimeMatch;
+      delete leg.realtimePrediction;
+      if (hadNdovCancellation) delete leg.cancelled;
+    }
+  }
+  return baseline;
+}
+
+function trackingLegCopy(leg) {
+  return {
+    ...leg,
+    label: lineTitle(leg),
+    routeId: leg.routeId ?? leg.route?.id,
+    legGeometry: leg.legGeometry ?? leg.geometry ?? null,
+    intermediateStops: Array.isArray(leg.intermediateStops) ? leg.intermediateStops : []
+  };
+}
+
+function updateJourneyRealtimeSummary(card, legs) {
+  const summary = card?.querySelector('.journey-realtime-summary');
+  if (!summary) return;
+  const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
+  const hasCancelledLeg = transitLegs.some(leg =>
+    leg.cancelled === true ||
+    leg.ndovRealtime?.status === 'cancelled' ||
+    leg.openovRealtime?.status === 'cancelled' ||
+    leg.nsRealtime?.status === 'cancelled'
+  );
+  if (hasCancelledLeg) {
+    summary.innerHTML = '<span class="journey-alert-tag">⚠ Uitval gemeld — controleer details</span>';
+    return;
+  }
+
+  const firstTransitLeg = transitLegs[0];
+  const scheduled = firstTransitLeg
+    ? plannedEndpointTime(firstTransitLeg, 'departure')
+    : null;
+  const prediction = firstTransitLeg
+    ? timelineRealtimePrediction(firstTransitLeg, 'departure', scheduled)
+    : null;
+  if (!prediction) {
+    summary.innerHTML = '';
+    return;
+  }
+
+  const scheduledMs = Date.parse(scheduled || '');
+  const predictedMs = Date.parse(prediction.time || '');
+  const diffMinutes = Number.isFinite(scheduledMs) && Number.isFinite(predictedMs)
+    ? Math.round((predictedMs - scheduledMs) / 60000)
+    : null;
+  if (diffMinutes !== null && diffMinutes >= 1) {
+    summary.innerHTML = `<span class="journey-live-tag">Vertrek +${diffMinutes} min</span>`;
+  } else if (diffMinutes !== null && diffMinutes <= -1) {
+    summary.innerHTML = `<span class="journey-live-tag">Vertrek ${diffMinutes} min</span>`;
+  } else {
+    summary.innerHTML = '<span class="journey-live-tag">Realtimevertrek beschikbaar</span>';
+  }
+}
+
+function stopLivePlanRealtimeRefresh() {
+  livePlanRealtimeGeneration += 1;
+  if (livePlanRealtimeTimer) {
+    window.clearInterval(livePlanRealtimeTimer);
+    livePlanRealtimeTimer = null;
+  }
+  livePlanRealtimeInFlight = false;
+  window.__ovliveRealtimeRefreshBaseline = null;
+  window.__ovliveDisplayedItineraryKeys = [];
+}
+
+async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) {
+  const baseline = window.__ovliveRealtimeRefreshBaseline;
+  const statusElement = document.getElementById('live-refresh-status');
+  if (!baseline || livePlanRealtimeInFlight ||
+      document.visibilityState !== 'visible' ||
+      generation !== livePlanRealtimeGeneration) return;
+
+  livePlanRealtimeInFlight = true;
+  if (statusElement) statusElement.textContent = 'Realtimegegevens vernieuwen…';
+  try {
+    const response = await fetch('/api/realtime-refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify(baseline)
+    });
+    const refreshed = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(refreshed.error || `HTTP ${response.status}`);
+    }
+    if (generation !== livePlanRealtimeGeneration) return;
+
+    const itineraries = Array.isArray(refreshed.itineraries)
+      ? refreshed.itineraries
+      : Array.isArray(refreshed.journeys)
+        ? refreshed.journeys
+        : [];
+    const byKey = new Map(itineraries.map(journey => [itineraryRealtimeKey(journey), journey]));
+    const displayedKeys = window.__ovliveDisplayedItineraryKeys ?? [];
+    for (let index = 0; index < displayedKeys.length; index += 1) {
+      const freshJourney = byKey.get(displayedKeys[index]);
+      if (!freshJourney) continue;
+      const sourceLegs = journeySourceLegs(freshJourney);
+      const { legs } = prepareJourneyLegsForDisplay(
+        freshJourney, sourceLegs, Number($('initialWaitLimit').value) * 60
+      );
+      const card = document.querySelector(`details.journey-card[data-tracking-index="${index}"]`);
+      const legContainer = card?.querySelector('.journey-leg-details');
+      if (legContainer) {
+        legContainer.innerHTML = legs.map(renderLeg).join('') ||
+          '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>';
+      }
+
+      const trackingData = window.__ovliveTrackingJourneys?.[index];
+      if (trackingData) trackingData.legs = legs.map(trackingLegCopy);
+      const mapState = liveJourneyMapStates.get(index);
+      if (mapState && trackingData) {
+        mapState.trackableLegs = trackingData.legs.filter(leg => parseLiveVehicleTripIdentity(leg));
+      }
+      const liveStops = document.getElementById('journey-live-stops-' + index);
+      if (liveStops) liveStops.innerHTML = renderLiveJourneyStopTimeline(legs);
+      updateJourneyRealtimeSummary(card, legs);
+    }
+
+    const checkedAt = new Date().toLocaleTimeString('nl-NL', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+    if (statusElement) {
+      statusElement.textContent = `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 30 sec.`;
+    }
+    window.__ovliveLastRealtimeRefreshAt = new Date().toISOString();
+    window.__ovliveLastRealtimeRefreshMeta = {
+      openov: refreshed.openovRealtimeMeta ?? null,
+      ns: refreshed.nsRealtimeMeta ?? null,
+      ndov: refreshed.ndovRealtimeMeta ?? null
+    };
+  } catch (error) {
+    console.warn('[OVLIVE_REALTIME_REFRESH]', error instanceof Error ? error.message : String(error));
+    if (statusElement) {
+      statusElement.textContent = 'Realtime-update mislukt; bestaande tijden blijven staan.';
+    }
+  } finally {
+    livePlanRealtimeInFlight = false;
+  }
+}
+
+function startLivePlanRealtimeRefresh(plan) {
+  stopLivePlanRealtimeRefresh();
+  try {
+    window.__ovliveRealtimeRefreshBaseline = buildRealtimeRefreshBaseline(plan);
+    window.__ovliveDisplayedItineraryKeys = (Array.isArray(plan.itineraries)
+      ? plan.itineraries
+      : Array.isArray(plan.journeys)
+        ? plan.journeys
+        : [])
+      .filter(journey => !journeyChronologyIssue(journeySourceLegs(journey)))
+      .slice(0, 8)
+      .map(itineraryRealtimeKey);
+    const generation = livePlanRealtimeGeneration;
+    if (livePlanRealtimeTimer) window.clearInterval(livePlanRealtimeTimer);
+    livePlanRealtimeTimer = window.setInterval(() => {
+      void refreshLivePlanRealtime(generation);
+    }, LIVE_PLAN_REALTIME_POLL_MS);
+  } catch (error) {
+    console.warn('[OVLIVE_REALTIME_REFRESH_SETUP]', error instanceof Error ? error.message : String(error));
+  }
+}
+
 $('planBtn').onclick = async () => {
+  stopLivePlanRealtimeRefresh();
   stopAllLiveJourneyTracking();
   window.__ovliveTrackingJourneys = [];
   $('planBtn').disabled = true;
@@ -2464,75 +2739,11 @@ q.set('pedestrianSpeed', '1.5');
     window.__ovliveTrackingJourneys = [];
     const cards = validItineraryCandidates.slice(0, 8).map(({ journey, sourceLegs }, index) => {
 
-      // Werk met kopieën: de oorspronkelijke API-resultaten blijven intact.
-      const legs = sourceLegs.map(leg => ({
-        ...leg,
-        from: leg.from && typeof leg.from === 'object' ? { ...leg.from } : leg.from,
-        to: leg.to && typeof leg.to === 'object' ? { ...leg.to } : leg.to
-      }));
-
-      let adjustedJourneyStart = null;
-      const firstWalk = legs[0];
-      const firstTransit = legs.find(leg => leg.mode !== 'WALK');
-      const maxInitialWaitSeconds = Number($('initialWaitLimit').value) * 60;
-
-      // Pas uitsluitend de eerste wandeling aan.
-      // De overige overstappen en wachttijden worden niet gewijzigd.
-      if (
-        firstWalk?.mode === 'WALK' &&
-        typeof firstWalk.distance === 'number' &&
-        firstTransit &&
-        Number.isFinite(maxInitialWaitSeconds)
-      ) {
-        const startValue = plannedEndpointTime(firstWalk, 'departure') ||
-          journey.startTime;
-
-        const transitStartValue = plannedEndpointTime(firstTransit, 'departure');
-
-        const startMs = Date.parse(startValue || '');
-        const transitStartMs = Date.parse(transitStartValue || '');
-        const estimatedWalkSeconds = Math.round(firstWalk.distance / 1.5);
-
-        if (
-          Number.isFinite(startMs) &&
-          Number.isFinite(transitStartMs) &&
-          transitStartMs > startMs &&
-          estimatedWalkSeconds > 0
-        ) {
-          // Gebruik de vertrektijd van het eerste voertuig als eindpunt
-          // van het oorspronkelijke eerste loop-/wachttijdblok.
-          firstWalk.endTime = transitStartValue;
-          firstWalk.to = {
-            ...(firstWalk.to && typeof firstWalk.to === 'object'
-              ? firstWalk.to
-              : {}),
-            arrival: transitStartValue
-          };
-
-          const currentWaitSeconds =
-            (transitStartMs - startMs) / 1000 - estimatedWalkSeconds;
-
-          if (currentWaitSeconds > maxInitialWaitSeconds) {
-            const shiftSeconds = currentWaitSeconds - maxInitialWaitSeconds;
-
-            adjustedJourneyStart = new Date(
-              startMs + shiftSeconds * 1000
-            ).toISOString();
-
-            firstWalk.startTime = adjustedJourneyStart;
-
-            if (firstWalk.from) {
-              firstWalk.from.departure = adjustedJourneyStart;
-            } else {
-              firstWalk.from = {
-                name: 'START',
-                departure: adjustedJourneyStart
-              };
-            }
-          }
-        }
-      }
-
+      const { legs, adjustedJourneyStart } = prepareJourneyLegsForDisplay(
+        journey,
+        sourceLegs,
+        Number($('initialWaitLimit').value) * 60
+      );
       const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
       const first = legs[0];
       const last = legs[legs.length - 1];
@@ -2579,13 +2790,8 @@ q.set('pedestrianSpeed', '1.5');
       const firstDeparturePrediction = firstTransitLeg
         ? timelineRealtimePrediction(firstTransitLeg, 'departure', firstScheduledDeparture)
         : null;
-      window.__ovliveTrackingJourneys[index] = { legs: legs.map(leg => ({
-        ...leg,
-        label: lineTitle(leg),
-        routeId: leg.routeId ?? leg.route?.id,
-        legGeometry: leg.legGeometry ?? leg.geometry ?? null,
-        intermediateStops: Array.isArray(leg.intermediateStops) ? leg.intermediateStops : []
-      })) };
+      window.__ovliveDisplayedItineraryKeys[index] = itineraryRealtimeKey(journey);
+      window.__ovliveTrackingJourneys[index] = { legs: legs.map(trackingLegCopy) };
       const trackingPanel = `<section class="live-follow" aria-label="Live voertuigkaart en halteverwachtingen">
         <div class="live-follow-heading"><h4>Live voertuig volgen</h4><span class="live-follow-caption">Echte voertuigposities · automatische controle elke 30 sec</span></div>
         <div id="journey-live-status-${index}" class="live-follow-status" role="status" aria-live="polite">Open deze reis om de livekaart te laden.</div>
@@ -2638,7 +2844,7 @@ q.set('pedestrianSpeed', '1.5');
             <span class="journey-meta">${esc(durationText)}</span>
             <span class="journey-meta">·</span>
             <span class="journey-meta">${transfers === 0 ? 'Rechtstreeks' : `${transfers} overstap${transfers === 1 ? '' : 'pen'}`}</span>
-            ${realtimeBadge ? `<span>${realtimeBadge}</span>` : ''}
+            <span class="journey-realtime-summary">${realtimeBadge}</span>
           </div>
           <div class="journey-route-tags">
             ${routeTags || '<span class="journey-line-tag">OV-route</span>'}
@@ -2648,18 +2854,19 @@ q.set('pedestrianSpeed', '1.5');
         <div class="journey-detail-body">
           ${trackingPanel}
           <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Realtime alleen waar bevestigd</span></div>
-          ${legs.map(renderLeg).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}
+          <div class="journey-leg-details">${legs.map(renderLeg).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}</div>
         </div>
       </details>`;
     }).join('');
 
     $('journeys').innerHTML =
       chronologyWarningHtml +
-      `<div class="results-heading"><h3>Reisopties</h3><span>Tik op een reis voor details</span></div>` +
+      `<div class="results-heading"><h3>Reisopties</h3><span>Tik op een reis voor details</span><span class="muted" id="live-refresh-status" role="status">Automatische realtime-update start na zoeken.</span></div>` +
       cards +
       renderAlerts(data.openovAlerts || []) +
       `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted">${esc(diagnosticPlanStatus)}</p>${feedInfo}${renderRealtimeLegend()}</div></details>`;
     bindLiveJourneyCards();
+    startLivePlanRealtimeRefresh(data);
     $('journeys').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   } catch (error) {

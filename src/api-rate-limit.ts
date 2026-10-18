@@ -60,8 +60,12 @@ export async function enforcePublicApiRateLimit(
     );
   }
 
+  const isExpensiveJourneyRefresh =
+    url.pathname === "/api/plan" ||
+    url.pathname === "/api/realtime-refresh";
+
   if (!env.API_RATE_LIMITER ||
-      (url.pathname === "/api/plan" && !env.PLAN_RATE_LIMITER)) {
+      (isExpensiveJourneyRefresh && !env.PLAN_RATE_LIMITER)) {
     return errorResponse(
       "De API-beveiliging is niet volledig geconfigureerd.",
       503,
@@ -82,7 +86,7 @@ export async function enforcePublicApiRateLimit(
       );
     }
 
-    if (url.pathname === "/api/plan") {
+    if (isExpensiveJourneyRefresh) {
       const plan = await env.PLAN_RATE_LIMITER!.limit({
         key: `client:${clientIp}`
       });
