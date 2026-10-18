@@ -2828,6 +2828,26 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         });
       }
 
+      // Route-only mode lets the UI show valid Transitous itineraries first.
+      // Realtime enrichment is requested separately via /api/realtime-refresh,
+      // so a slow NDOV/OpenOV source cannot keep the entire planner spinning.
+      // "deferRealtime" is intentionally not in MAX_ROUTE_PARAMS and is never
+      // forwarded to Transitous.
+      if (url.searchParams.get("deferRealtime") === "1") {
+        if (planData && typeof planData === "object" && !Array.isArray(planData)) {
+          planData.openovRealtimeMeta = {
+            status: "deferred",
+            message: "Reisopties zijn geladen; realtimecontrole wordt apart uitgevoerd."
+          };
+        }
+        return json(planData, response.status, {
+          ...headers,
+          "cache-control": "no-store",
+          "x-upstream": "Transitous MOTIS v6",
+          "x-ovlive-realtime": "deferred"
+        });
+      }
+
       try {
         // Prioritize the exact NS train identity and NS board requests before
         // OpenOV/NDOV enrichment loads route shards for many bus/tram legs.
