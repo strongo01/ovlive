@@ -1045,20 +1045,31 @@ async function main() {
   liveTripNearNowCandidates.sort((a, b) =>
     Math.abs(a.secondsFromAuditStart) - Math.abs(b.secondsFromAuditStart)
   );
-  const selectedPublishedTrip = liveTripNearNowCandidates[0] ?? null;
-  let publishedTripPlanProbe = {
+  // Probe one near-now source trip per route so a positive result on one route
+  // cannot hide a route-specific failure on another inspected route.
+  const selectedPublishedTrips = [];
+  const selectedPublishedRouteIds = new Set();
+  for (const candidate of liveTripNearNowCandidates) {
+    if (selectedPublishedRouteIds.has(candidate.routeId)) continue;
+    selectedPublishedRouteIds.add(candidate.routeId);
+    selectedPublishedTrips.push(candidate);
+    if (selectedPublishedTrips.length >= Math.max(1, Math.min(3, openovRouteIds.length || 1))) break;
+  }
+  const publishedTripPlanProbe = {
     status: !liveTripFeedFresh
       ? "skipped_feed_not_fresh"
-      : !selectedPublishedTrip
+      : selectedPublishedTrips.length === 0
         ? "no_near_now_published_trip_candidate"
-        : "selected_source_trip_probe_not_completed",
+        : "completed",
     feedFresh: liveTripFeedFresh,
     feedAgeSeconds: Number.isFinite(liveTripFeedAge) ? liveTripFeedAge : null,
     routeRecordCount: liveTripSourceRecords.length,
     nearNowCandidateCount: liveTripNearNowCandidates.length,
-    candidateSamples: liveTripNearNowCandidates.slice(0, 5),
+    selectedRouteCount: selectedPublishedTrips.length,
+    candidateSamples: liveTripNearNowCandidates.slice(0, 8),
+    probes: [],
   };
-  if (selectedPublishedTrip) {
+  for (const selectedPublishedTrip of selectedPublishedTrips) {
     const probeUrl = new URL("/api/plan", baseUrl);
     probeUrl.searchParams.set("fromPlace", "nl-OpenOV_" + selectedPublishedTrip.fromStopId);
     probeUrl.searchParams.set("toPlace", "nl-OpenOV_" + selectedPublishedTrip.toStopId);
@@ -1084,7 +1095,7 @@ async function main() {
     const exactPublishedTripCrosswalk = probeRouteCrosswalkOutcomes.find((item) =>
       String(item?.tripId ?? "") === String(sourceLegId ?? "")
     ) ?? null;
-    publishedTripPlanProbe = {
+    publishedTripPlanProbe.probes.push({
       status: !probeResult.ok || !probeResult.json
         ? "published_trip_plan_query_failed"
         : exactPublishedTripLeg
@@ -1166,7 +1177,7 @@ async function main() {
         kv78Error: probeMeta.kv78Error ?? null,
       },
       interpretationLimit: "A failed or non-exact match in this near-time probe is diagnostic evidence only; it is not alone proof of a production defect. Confirm service time zone and static trip/stop identity before attributing cause.",
-    };
+    });
   }
   console.log("=== NEAR-NOW PUBLISHED OPENOV TRIP END-TO-END PROBE ===");
   console.log(JSON.stringify(publishedTripPlanProbe, null, 2));
