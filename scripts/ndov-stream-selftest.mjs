@@ -103,6 +103,12 @@ assert.ok(hubSource.includes('const KV78_STOP_TIME_FUTURE_RETENTION_SECONDS = 4 
 assert.match(hubSource, /kv78RowScheduleInfo\(/);
 assert.match(hubSource, /selectKv78RowEvictionKeys\(/);
 assert.match(hubSource, /kv78RowCacheKey\(row\)/);
+assert.match(hubSource, /KV78_LINE_LOOKUP_MAX_ROWS = 250/);
+assert.match(hubSource, /KV78_LINE_LOOKUP_MAX_TIMES = 20/);
+assert.match(hubSource, /lineLookupRequested = url\.searchParams\.get\('lineLookup'\) === '1'/);
+assert.match(hubSource, /kv78LineLookupDistance\(row, scheduledTimes\)/);
+assert.match(hubSource, /KV78_LINE_LOOKUP_TOLERANCE_SECONDS = 180/);
+
 assert.match(hubSource, /rowCacheStats: \{ stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 \}/);
 assert.ok(planSource.includes('rowCacheStats: stream === "kv78" ? diagnostics?.rowCacheStats ?? null : undefined'));
 assert.match(planSource, /stopTimeFutureRetentionSeconds/);

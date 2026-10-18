@@ -53,6 +53,51 @@ const ROW_CHUNK_SIZE = 1000;
 const MUTATION_CHUNK_SIZE = 1000;
 const NDOV_SHARED_OBJECT_NAME = 'ndov-shared-collector-v1';
 
+
+const KV78_LINE_LOOKUP_MAX_ROWS = 250;
+const KV78_LINE_LOOKUP_MAX_TIMES = 20;
+const KV78_LINE_LOOKUP_TOLERANCE_SECONDS = 180;
+
+function kv78QueryClockSeconds(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const clock = text.match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  if (clock) {
+    const hour = Number(clock[1]);
+    const minute = Number(clock[2]);
+    const second = Number(clock[3] ?? 0);
+    if (minute > 59 || second > 59) return null;
+    return ((hour * 3600 + minute * 60 + second) % 86400 + 86400) % 86400;
+  }
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed)) return null;
+  const seconds = amsterdamClockSeconds(parsed);
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+function kv78QueryClockDistance(left, right) {
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return null;
+  let distance = Math.abs(left - right);
+  if (distance > 43200) distance = 86400 - distance;
+  return distance;
+}
+
+function kv78LineLookupDistance(row, scheduledTimes) {
+  const rowTimes = [
+    row?.targetDepartureTime ?? row?.TargetDepartureTime,
+    row?.targetArrivalTime ?? row?.TargetArrivalTime,
+  ].map(kv78QueryClockSeconds).filter(Number.isFinite);
+  if (!rowTimes.length) return null;
+  let best = Number.POSITIVE_INFINITY;
+  for (const rowTime of rowTimes) {
+    for (const scheduledTime of scheduledTimes) {
+      const distance = kv78QueryClockDistance(rowTime, scheduledTime);
+      if (distance !== null && distance < best) best = distance;
+    }
+  }
+  return Number.isFinite(best) ? best : null;
+}
+
 function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 function ndovCollectionWindow(nowMs = Date.now()) {
@@ -1163,23 +1208,54 @@ export class NdovFeedHub extends DurableObject {
       const vehicleLookupValid = Boolean(
         vehicleNumber && vehicleOwner && /^\d{8}$/.test(vehicleDate)
       );
-      if (!identities.length && !vehicleLookupValid) {
-        return Response.json({ ok: false, error: 'Geef een of meer identity=owner|YYYY-MM-DD|line|journey|reinforcement-parameters of vehicleNumber=...&owner=...&date=YYYYMMDD op.' }, { status: 400 });
+      const lineLookupRequested = url.searchParams.get('lineLookup') === '1';
+      const scheduledTimeValues = url.searchParams.getAll('scheduledTime');
+      const scheduledTimes = scheduledTimeValues.map(kv78QueryClockSeconds);
+      const lineLookupValid = Boolean(
+        lineLookupRequested &&
+        !identities.length &&
+        !vehicleNumber &&
+        vehicleOwner &&
+        /^\d{8}$/.test(vehicleDate) &&
+        vehicleLine &&
+        scheduledTimeValues.length > 0 &&
+        scheduledTimeValues.length <= KV78_LINE_LOOKUP_MAX_TIMES &&
+        scheduledTimes.every(Number.isFinite)
+      );
+      if (lineLookupRequested && !lineLookupValid) {
+        return Response.json({
+          ok: false,
+          error: `Voor lijn-/tijdmatching zijn owner, date=YYYYMMDD, line en 1–${KV78_LINE_LOOKUP_MAX_TIMES} geldige scheduledTime-waarden vereist; combineer dit niet met identity of vehicleNumber.`,
+        }, { status: 400 });
+      }
+      if (!identities.length && !vehicleLookupValid && !lineLookupValid) {
+        return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement-parameters, vehicleNumber=...&owner=...&date=YYYYMMDD, of lineLookup=1&owner=...&date=YYYYMMDD&line=...&scheduledTime=...' }, { status: 400 });
       }
       const now = Date.now();
-      const rows = [...state.rows.values()].filter((row) => identities.length
-        ? identities.some(identity => rowMatchesIdentity(row, identity))
-        : String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
+      const rows = [...state.rows.values()].filter((row) => {
+        if (identities.length) return identities.some(identity => rowMatchesIdentity(row, identity));
+        if (lineLookupValid) {
+          if (
+            String(row?.dataOwnerCode ?? '').trim().toUpperCase() !== vehicleOwner ||
+            normalizeOperatingDate(row?.operationDate) !== vehicleDate ||
+            String(row?.linePlanningNumber ?? '').trim().toUpperCase() !== vehicleLine
+          ) return false;
+          const distance = kv78LineLookupDistance(row, scheduledTimes);
+          return distance !== null && distance <= KV78_LINE_LOOKUP_TOLERANCE_SECONDS;
+        }
+        return String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
           String(row?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
           normalizeOperatingDate(row?.operationDate) === vehicleDate &&
-          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
-      );
+          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine);
+      });
       const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
       fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
 
-      // Preserve the previous 200-row per-identity cap while allowing a plan to
-      // retrieve multiple exact trips with one Durable Object subrequest.
+      // Exact identities retain their historical per-trip cap. The metro fallback
+      // first filters by owner/date/line and tight scheduled-time windows, then
+      // returns only the nearest bounded candidates to avoid serializing a whole line.
       let returnedRows;
+      let truncated = false;
       if (identities.length) {
         const rowsByIdentity = new Map([...identitiesByKey.keys()].map(key => [key, []]));
         for (const row of fresh) {
@@ -1195,6 +1271,15 @@ export class NdovFeedHub extends DurableObject {
           if (bucket) bucket.push(row);
         }
         returnedRows = [...rowsByIdentity.values()].flatMap(items => items.slice(-200));
+      } else if (lineLookupValid) {
+        const ranked = fresh.map((row) => ({
+          row,
+          distance: kv78LineLookupDistance(row, scheduledTimes),
+          receivedAt: Date.parse(row?.receivedAt ?? '') || 0,
+        })).filter((item) => item.distance !== null);
+        ranked.sort((a, b) => a.distance - b.distance || b.receivedAt - a.receivedAt);
+        truncated = ranked.length > KV78_LINE_LOOKUP_MAX_ROWS;
+        returnedRows = ranked.slice(0, KV78_LINE_LOOKUP_MAX_ROWS).map((item) => item.row);
       } else {
         returnedRows = fresh.slice(-200);
       }
@@ -1204,8 +1289,11 @@ export class NdovFeedHub extends DurableObject {
         ok: true,
         identity: identity ? identityKey(identity) : null,
         identities: identities.length > 1 ? normalizedIdentityKeys : undefined,
-        lookup: identities.length ? null : { vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
+        lookup: identities.length ? null : lineLookupValid
+          ? { mode: 'line_schedule_times', owner: vehicleOwner, date: vehicleDate, line: vehicleLine, scheduledTimeCount: scheduledTimes.length, toleranceSeconds: KV78_LINE_LOOKUP_TOLERANCE_SECONDS }
+          : { mode: 'vehicle', vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
         returnedCount: returnedRows.length,
+        truncated,
         staleCount: rows.length - fresh.length,
         rows: returnedRows,
       }, { headers: { 'cache-control': 'no-store' } });
