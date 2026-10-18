@@ -1114,6 +1114,34 @@ async function getCurrentKv78RowsByVehicle(env, lookup) {
   return data.rows;
 }
 
+async function getCurrentKv78RowsNearScheduledTimes(env, lookup) {
+  if (!lookup || !env?.NDOV_FEEDS) return [];
+  const scheduledTimes = [...new Set(
+    (Array.isArray(lookup.scheduledTimes) ? lookup.scheduledTimes : [])
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+  )];
+  if (!scheduledTimes.length) return [];
+  if (scheduledTimes.length > 20) {
+    throw new Error("KV78 metro-lijnmatching mag maximaal 20 dienstregelingstijden tegelijk opvragen.");
+  }
+
+  const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
+  const stub = env.NDOV_FEEDS.get(id);
+  const url = new URL(ASSET_ORIGIN + "/rows");
+  url.searchParams.set("stream", "kv78");
+  url.searchParams.set("lineLookup", "1");
+  url.searchParams.set("owner", String(lookup.owner ?? "").trim().toUpperCase());
+  url.searchParams.set("date", String(lookup.operationDate ?? "").replace(/-/g, ""));
+  url.searchParams.set("line", String(lookup.linePlanningNumber ?? "").trim().toUpperCase());
+  for (const time of scheduledTimes) url.searchParams.append("scheduledTime", time);
+  const response = await stub.fetch(url.toString());
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error ?? ("KV78-lijn-/tijdmatching gaf HTTP " + response.status + "."));
+  if (!Array.isArray(data?.rows)) throw new Error("KV78 gaf geen lijst met lijn-/tijdkandidaten terug.");
+  return data.rows;
+}
+
 function routeLineNumber(value) {
   const match = String(value ?? "").trim().toUpperCase().match(/(\d+)\s*$/);
   return match ? String(Number(match[1])) : null;
@@ -1181,6 +1209,42 @@ function kv78RowWithinLegTimeWindow(row, item, toleranceSeconds = 180) {
     : null;
   return (departureDistance !== null && departureDistance <= toleranceSeconds) ||
     (arrivalDistance !== null && arrivalDistance <= toleranceSeconds);
+}
+
+function isMetroLeg(item) {
+  const mode = String(item?.leg?.mode ?? item?.leg?.transitMode ?? item?.leg?.product?.category ?? "")
+    .trim().toUpperCase();
+  return mode === "SUBWAY" || mode === "METRO";
+}
+
+function metroKv78LookupForItem(item) {
+  if (!isMetroLeg(item)) return null;
+  const owner = String(item?.realtimeIdentity?.owner ?? "").trim().toUpperCase();
+  const linePlanningNumber = String(item?.realtimeIdentity?.line ?? "").trim().toUpperCase();
+  const operationDate = normalizeDate(item?.identity?.serviceDate);
+  const scheduledTimes = [
+    valueOf(item?.leg?.from, "departure") ?? valueOf(item?.leg, "startTime", "departureTime"),
+    valueOf(item?.leg?.to, "arrival") ?? valueOf(item?.leg, "endTime", "arrivalTime"),
+  ].filter((value) => value !== null && value !== undefined && String(value).trim());
+  if (!owner || !linePlanningNumber || !/^\d{8}$/.test(operationDate ?? "") || !scheduledTimes.length) {
+    return null;
+  }
+  return { owner, linePlanningNumber, operationDate, scheduledTimes };
+}
+
+function kv78RowTripIdentity(row) {
+  return toIdentity(
+    row?.dataOwnerCode,
+    row?.operationDate,
+    row?.linePlanningNumber,
+    row?.journeyNumber,
+    row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? "0",
+  );
+}
+
+function sameKv78RowJourney(left, right) {
+  const leftIdentity = kv78RowTripIdentity(left);
+  return Boolean(leftIdentity && leftIdentity === kv78RowTripIdentity(right));
 }
 
 function sameKv78TripIdentity(row, item) {
@@ -1277,13 +1341,12 @@ function normalizeStopPlaceIdentity(value) {
 function normalizeExpectedQuayName(value) {
   return String(value ?? "")
     .trim()
-    .replace(/^[^,]+,\\s*/, "")
+    .replace(/^[^,]+,\s*/, "")
     .normalize("NFD")
-    .replace(/[\\u0300-\\u036f]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLocaleLowerCase("nl-NL")
-    .replace(/\\s+/g, " ");
+    .replace(/\s+/g, " ");
 }
-
 function normalizeStopSide(value) {
   return String(value ?? "").trim().toUpperCase()
     .replace(/^(?:PERRON|PLATFORM|HALTEZIJDE)\s*/i, "")
