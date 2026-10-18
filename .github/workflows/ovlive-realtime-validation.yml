@@ -12,12 +12,17 @@ on:
       - assistant/kv6-live-ui-diagnostics-20261018
       - assistant/metro-kv78-time-crossmatch-clean-20261018
       - assistant/metro-resource-cache-prune-20261018
+      - assistant/fast-route-realtime-refresh-20261018
       - assistant/kv78-keep-late-predictions-20261018
       - assistant/live-vehicle-map-20261018
       - assistant/transitous-stop-geocoding-20261018
       - assistant/fix-itinerary-status-tdz-20261018
       - assistant/live-realtime-timetable-poll-20261018
       - assistant/realtime-poll-10s-no-overlap-20261018
+  pull_request:
+    branches:
+      - assistant/metro-resource-cache-prune-20261018
+
   workflow_dispatch:
 
 permissions:

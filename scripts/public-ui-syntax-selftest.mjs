@@ -36,6 +36,20 @@ assert.ok(html.includes('<div class="journey-leg-details">') &&
   "realtime refresh must target the journey-leg details without rebuilding the map");
 assert.ok(html.includes("startLivePlanRealtimeRefresh(data);"),
   "automatic realtime refresh must start after a successful plan search");
+assert.ok(html.includes("q.set('deferRealtime', '1');"),
+  "the initial search must request the fast route-only response");
+assert.ok(html.includes("void refreshLivePlanRealtime(generation);"),
+  "the realtime pass must start immediately instead of waiting for the first timer tick");
+assert.ok(html.includes("signal: AbortSignal.timeout(30000)"),
+  "a realtime refresh must time out so one slow source cannot lock the UI indefinitely");
+assert.ok(workerSource.includes('if (url.searchParams.get("deferRealtime") === "1")'),
+  "the Worker must have an explicit route-only response mode");
+const deferredStart = workerSource.indexOf('if (url.searchParams.get("deferRealtime") === "1")');
+const deferredReturn = workerSource.indexOf("return json(planData, response.status", deferredStart);
+const enrichmentAfterDeferred = workerSource.indexOf("await prepareNsTrainIdentities(planData, env);", deferredStart);
+assert.ok(deferredStart >= 0 && deferredReturn > deferredStart &&
+  enrichmentAfterDeferred > deferredReturn,
+  "route-only mode must return before the blocking realtime enrichment sequence");
 const refreshStart = html.indexOf("async function refreshLivePlanRealtime(");
 const refreshEnd = html.indexOf("function startLivePlanRealtimeRefresh(", refreshStart);
 assert.ok(refreshStart >= 0 && refreshEnd > refreshStart,
