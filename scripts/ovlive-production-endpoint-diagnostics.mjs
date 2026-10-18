@@ -74,6 +74,47 @@ function epochSeconds(value) {
   return null;
 }
 
+function openovTripStartBucket(tripId) {
+  const match = String(tripId ?? "").trim().match(/^\d{8}_(\d{1,3}):\d{2}(?::\d{2})?_/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  if (!Number.isFinite(hour) || hour < 0) return null;
+  return hour >= 24 ? "24" : hour >= 12 ? "12" : "00";
+}
+
+function gtfsClockSeconds(value) {
+  const match = String(value ?? "").trim().match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] ?? "0");
+  if (minute > 59 || second > 59) return null;
+  return hour * 3600 + minute * 60 + second;
+}
+
+function plannedServiceSeconds(value, serviceDate) {
+  const epoch = epochSeconds(value);
+  const dateMatch = String(serviceDate ?? "").match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (epoch == null || !dateMatch) return null;
+
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Amsterdam",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(epoch * 1000)).map((part) => [part.type, part.value]));
+
+  const targetDateMs = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day));
+  const serviceDateMs = Date.UTC(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
+  const dayOffset = Math.round((targetDateMs - serviceDateMs) / 86400000);
+  return dayOffset * 86400 + Number(parts.hour) * 3600 +
+    Number(parts.minute) * 60 + Number(parts.second);
+}
+
 function summarizeSourceRecord(record) {
   return {
     routeId: record?.routeId ?? null,
@@ -483,33 +524,166 @@ async function main() {
     }
   }
 
-  const shardChecks = [];
-  const routeIds = [...new Set(openovLegs.map(routeId).filter(Boolean))].slice(0, 8);
-  for (const id of routeIds) {
-    const files = routeManifest?.routes?.[id];
-    if (!Array.isArray(files) || !files.length) {
-      shardChecks.push({ routeId: id, manifestHasRoute: false });
+  // Match the same time-bucketed route shard selected by production,
+  // then compare its static stop order/times to the planned leg. Checking
+  // routes[id][0] alone can inspect the wrong half-day shard for an evening trip.
+  const serviceCalendarResult = await get("/ndov-openov-route-crosswalk/service-calendar.json");
+  const serviceCalendar = serviceCalendarResult.json;
+  const routeBucketTargets = new Map();
+  for (const leg of openovLegs) {
+    const id = routeId(leg);
+    const bucket = openovTripStartBucket(leg.tripId ?? leg.trip?.id);
+    if (!id) continue;
+    const key = id + "|" + String(bucket ?? "unknown");
+    if (!routeBucketTargets.has(key)) {
+      routeBucketTargets.set(key, { routeId: id, bucket, legs: [] });
+    }
+    routeBucketTargets.get(key).legs.push(leg);
+  }
+
+  const routePatternChecks = [];
+  for (const target of [...routeBucketTargets.values()].slice(0, 8)) {
+    const bucketFiles = routeManifest?.routesByStartBucket?.[target.routeId]?.[target.bucket];
+    const correctBucketAvailable = Array.isArray(bucketFiles) && bucketFiles.length > 0;
+    const allRouteFiles = routeManifest?.routes?.[target.routeId];
+    const files = correctBucketAvailable
+      ? bucketFiles
+      : Array.isArray(allRouteFiles) ? allRouteFiles.slice(0, 1) : [];
+
+    if (!files.length) {
+      routePatternChecks.push({
+        routeId: target.routeId,
+        tripStartBucket: target.bucket,
+        manifestHasRoute: Array.isArray(allRouteFiles) && allRouteFiles.length > 0,
+        correctBucketAvailable,
+        error: "Geen route-shard gevonden voor route/tijdvak.",
+      });
       continue;
     }
-    const file = String(files[0]);
-    const shardPath = "/ndov-openov-route-crosswalk/routes/" + file;
-    const shard = await get(shardPath);
-    shardChecks.push({
-      routeId: id,
-      manifestHasRoute: true,
-      filename: file,
-      status: shard.status,
-      contentType: shard.contentType ?? null,
-      bytes: shard.bytes ?? null,
-      validJsonArray: Array.isArray(shard.json),
-      patternCount: Array.isArray(shard.json) ? shard.json.length : null,
-      error: shard.error ?? null,
+
+    const patterns = [];
+    const shardSummaries = [];
+    for (const filenameValue of files) {
+      const filename = String(filenameValue);
+      if (!filename || filename.includes("..") || filename.includes("/")) continue;
+      const shardPath = "/ndov-openov-route-crosswalk/routes/" + filename;
+      const shard = await get(shardPath);
+      const sidecarPath = shardPath.replace(/\.json$/, "-services.json");
+      const sidecar = correctBucketAvailable ? await get(sidecarPath) : null;
+      const rows = Array.isArray(shard.json) ? shard.json : [];
+      const serviceRows = Array.isArray(sidecar?.json) ? sidecar.json : [];
+      shardSummaries.push({
+        filename,
+        status: shard.status,
+        bytes: shard.bytes ?? null,
+        validJsonArray: Array.isArray(shard.json),
+        patternCount: rows.length,
+        serviceSidecarStatus: sidecar?.status ?? null,
+        serviceSidecarAligned: serviceRows.length === rows.length,
+        error: shard.error ?? null,
+      });
+      rows.forEach((pattern, index) => {
+        patterns.push({
+          pattern,
+          serviceIds: Array.isArray(serviceRows[index]) ? serviceRows[index].map(String) : [],
+        });
+      });
+    }
+
+    const targetChecks = target.legs.map((leg) => {
+      const serviceDate = String(leg.tripId ?? leg.trip?.id ?? "").match(/^(\d{8})_/)?.[1] ?? null;
+      const targetDirection = leg.directionId ?? leg.trip?.directionId ?? null;
+      const fromStopId = normalizeOpenovId(leg.from?.stopId ?? leg.from?.id);
+      const toStopId = normalizeOpenovId(leg.to?.stopId ?? leg.to?.id);
+      const plannedDeparture = plannedEndpoint(leg, "departure");
+      const targetSeconds = plannedServiceSeconds(plannedDeparture, serviceDate);
+      const activeServices = Array.isArray(serviceCalendar?.[serviceDate])
+        ? new Set(serviceCalendar[serviceDate].map(String))
+        : null;
+      const candidates = patterns.map(({ pattern, serviceIds }) => {
+        const stops = Array.isArray(pattern?.stops) ? pattern.stops : [];
+        const normalizedStops = stops.map((stop) => normalizeOpenovId(stop?.stopId));
+        const fromIndex = fromStopId ? normalizedStops.indexOf(fromStopId) : -1;
+        const toIndex = toStopId ? normalizedStops.indexOf(toStopId) : -1;
+        const fromStop = fromIndex >= 0 ? stops[fromIndex] : null;
+        const clockValue = fromStop?.departureTime || fromStop?.arrivalTime || null;
+        const stopSeconds = gtfsClockSeconds(clockValue);
+        const differenceSeconds = targetSeconds == null || stopSeconds == null
+          ? null
+          : Math.round(stopSeconds - targetSeconds);
+        const directionCompatible = targetDirection == null ||
+          pattern?.directionId == null ||
+          String(pattern.directionId) === String(targetDirection);
+        const orderedStops = fromIndex >= 0 && (toIndex < 0 || toIndex > fromIndex);
+        const serviceActive = activeServices == null
+          ? null
+          : serviceIds.some((serviceId) => activeServices.has(serviceId));
+        return {
+          realtimeTripId: pattern?.realtimeTripId ?? null,
+          headsign: pattern?.headsign ?? null,
+          directionId: pattern?.directionId ?? null,
+          serviceIdsForDate: serviceIds,
+          serviceActiveOnDate: serviceActive,
+          fromStopPresent: fromIndex >= 0,
+          toStopPresent: toIndex >= 0,
+          fromStopIndex: fromIndex,
+          toStopIndex: toIndex,
+          orderedStops,
+          staticDepartureTimeAtFromStop: clockValue,
+          secondsFromPlannedDeparture: differenceSeconds,
+          withinThreeMinutes: differenceSeconds != null && Math.abs(differenceSeconds) <= 180,
+          directionCompatible,
+        };
+      });
+      const orderedCandidates = candidates
+        .filter((candidate) => candidate.fromStopPresent && candidate.orderedStops && candidate.directionCompatible)
+        .sort((a, b) => {
+          const aDistance = a.secondsFromPlannedDeparture == null ? Number.POSITIVE_INFINITY : Math.abs(a.secondsFromPlannedDeparture);
+          const bDistance = b.secondsFromPlannedDeparture == null ? Number.POSITIVE_INFINITY : Math.abs(b.secondsFromPlannedDeparture);
+          return aDistance - bDistance;
+        });
+      return {
+        routeId: leg.routeId ?? leg.route?.id ?? null,
+        transitousTripId: leg.tripId ?? leg.trip?.id ?? null,
+        serviceDate,
+        tripStartBucket: target.bucket,
+        directionId: targetDirection,
+        fromStopId: fromStopId || null,
+        toStopId: toStopId || null,
+        plannedDeparture,
+        plannedServiceSeconds: targetSeconds,
+        staticServiceCalendarAvailable: activeServices != null,
+        activeServiceCountForDate: activeServices?.size ?? null,
+        patternsScanned: patterns.length,
+        patternsWithOrderedEndpointStops: candidates.filter((candidate) => candidate.fromStopPresent && candidate.orderedStops).length,
+        orderedEndpointPatternsWithinThreeMinutes: orderedCandidates.filter((candidate) => candidate.withinThreeMinutes).length,
+        activeOrderedEndpointPatternsWithinThreeMinutes: orderedCandidates.filter((candidate) =>
+          candidate.withinThreeMinutes && candidate.serviceActiveOnDate === true
+        ).length,
+        closestStaticPatterns: orderedCandidates.slice(0, 5),
+      };
+    });
+
+    routePatternChecks.push({
+      routeId: target.routeId,
+      tripStartBucket: target.bucket,
+      correctBucketAvailable,
+      selectedShardCount: files.length,
+      shardSummaries,
+      targetChecks,
     });
   }
+
+  console.log("=== OPENOV STATIC SCHEDULE PATTERN CROSSCHECK (CORRECT TIME BUCKET) ===");
+  console.log(JSON.stringify({
+    serviceCalendarStatus: serviceCalendarResult.status,
+    serviceCalendarValid: Boolean(serviceCalendar && typeof serviceCalendar === "object" && !Array.isArray(serviceCalendar)),
+    routePatternChecks,
+  }, null, 2));
   console.log(JSON.stringify({
     check: "production-static-crosswalk-assets",
     assets: results,
-    routeShardChecks: shardChecks,
+    routePatternChecks,
   }, null, 2));
 
   assert.ok(legs.length > 0, "Production /api/plan must return at least one leg.");
