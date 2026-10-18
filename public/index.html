@@ -681,7 +681,8 @@ function openovVehiclePositionHtml(rt) {
 let liveLeafletPromise = null;
 const liveJourneyMapStates = new Map();
 const LIVE_VEHICLE_POLL_MS = 10000;
-const LIVE_VEHICLE_MAX_AGE_SECONDS = 180;
+const LIVE_VEHICLE_MAX_AGE_SECONDS = 30;
+const LIVE_NDOV_VEHICLE_MAX_AGE_SECONDS = 30;
 const LIVE_PLAN_REALTIME_POLL_MS = 10000;
 let livePlanRealtimeTimer = null;
 let livePlanRealtimeInFlight = false;
@@ -738,8 +739,9 @@ function selectExactLiveVehiclePosition(leg, positions, nowMs = Date.now()) {
         !Number.isFinite(latitude) || !Number.isFinite(longitude) ||
         latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) continue;
 
-    const ageSeconds = Math.round(nowSeconds - timestamp);
-    if (ageSeconds < -30 || ageSeconds > LIVE_VEHICLE_MAX_AGE_SECONDS) continue;
+    const rawAgeSeconds = nowSeconds - timestamp;
+    if (rawAgeSeconds < -30 || rawAgeSeconds > LIVE_VEHICLE_MAX_AGE_SECONDS) continue;
+    const ageSeconds = Math.max(0, Math.round(rawAgeSeconds));
 
     const positionDate = String(position?.startDate ?? "").replace(/\D/g, "").slice(0, 8);
     const positionStartTime = normalizeLiveVehicleClock(position?.startTime);
@@ -765,6 +767,92 @@ function selectExactLiveVehiclePosition(leg, positions, nowMs = Date.now()) {
 
   matches.sort((a, b) => a.ageSeconds - b.ageSeconds);
   return matches[0] ?? null;
+}
+
+function rdNewToWgs84(rdX, rdY) {
+  const x = Number(rdX);
+  const y = Number(rdY);
+  if (!Number.isFinite(x) || !Number.isFinite(y) ||
+      x < 0 || x > 300000 || y < 300000 || y > 650000) return null;
+
+  const dx = 1e-5 * (x - 155000);
+  const dy = 1e-5 * (y - 463000);
+  const latitude = 52.15517440 + (
+    3235.65389 * dy - 32.58297 * dx ** 2 - 0.24750 * dy ** 2
+    - 0.84978 * dx ** 2 * dy - 0.06550 * dy ** 3 - 0.01709 * dx ** 2 * dy ** 2
+    - 0.00738 * dx + 0.00530 * dx ** 4 - 0.00039 * dx ** 2 * dy ** 3
+    + 0.00033 * dx ** 4 * dy - 0.00012 * dx * dy
+  ) / 3600;
+  const longitude = 5.38720621 + (
+    5260.52916 * dx + 105.94684 * dx * dy + 2.45656 * dx * dy ** 2
+    - 0.81885 * dx ** 3 + 0.05594 * dx * dy ** 3 - 0.05607 * dx ** 3 * dy
+    + 0.01199 * dy - 0.00256 * dx ** 3 * dy ** 2 + 0.00128 * dx * dy ** 4
+    + 0.00022 * dy ** 2 - 0.00022 * dx ** 2 + 0.00026 * dx ** 5
+  ) / 3600;
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+      latitude < 50.5 || latitude > 53.8 || longitude < 3 || longitude > 7.3) return null;
+  return { latitude, longitude };
+}
+
+function selectExactLiveNdovVehiclePosition(leg, nowMs = Date.now()) {
+  const ndov = leg?.ndovRealtime;
+  const observation = ndov?.kv6 ??
+    (ndov?.source === "NDOV BISON KV6" ? ndov : null);
+  if (!observation || !String(observation.identity ?? "").trim()) return null;
+
+  const eventType = String(observation.eventType ?? "").trim().toUpperCase();
+  if (!["ONROUTE", "ONSTOP", "DEPARTURE", "ARRIVAL"].includes(eventType)) return null;
+
+  const point = rdNewToWgs84(observation.rdX, observation.rdY);
+  if (!point) return null;
+
+  // Use the timestamp from the message that actually carried these coordinates,
+  // not a newer activity/punctuality message for the same trip.
+  const receivedMs = Date.parse(String(observation.positionReceivedAt ?? ""));
+  if (!Number.isFinite(receivedMs)) return null;
+  const receivedAgeSeconds = (nowMs - receivedMs) / 1000;
+  if (receivedAgeSeconds < -30 || receivedAgeSeconds > LIVE_NDOV_VEHICLE_MAX_AGE_SECONDS) return null;
+
+  const sourceTime = String(observation.positionTimestamp ?? "").trim();
+  const sourceHasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(sourceTime);
+  let effectiveMs = receivedMs;
+  if (sourceHasTimezone) {
+    const sourceMs = Date.parse(sourceTime);
+    if (!Number.isFinite(sourceMs)) return null;
+    const sourceAgeSeconds = (nowMs - sourceMs) / 1000;
+    if (sourceAgeSeconds < -30 || sourceAgeSeconds > LIVE_NDOV_VEHICLE_MAX_AGE_SECONDS) return null;
+    effectiveMs = sourceMs;
+  }
+
+  return {
+    source: "NDOV BISON KV6",
+    tripId: String(observation.identity),
+    routeId: normalizeLiveVehicleId(leg?.routeId ?? leg?.route?.id),
+    vehicleId: observation.vehicleNumber || observation.blockCode || null,
+    latitude: point.latitude,
+    longitude: point.longitude,
+    stopId: null,
+    eventType,
+    observedAt: new Date(effectiveMs).toISOString(),
+    ageSeconds: Math.max(0, Math.round((nowMs - effectiveMs) / 1000)),
+  };
+}
+
+function liveVehiclePopupContent(leg, position, confirmed, nowMs = Date.now()) {
+  const observedMs = Date.parse(String(position?.observedAt ?? ""));
+  const ageSeconds = Number.isFinite(observedMs)
+    ? Math.max(0, Math.round((nowMs - observedMs) / 1000))
+    : Math.max(0, Number(position?.ageSeconds) || 0);
+  const source = position?.source || "OpenOV GTFS-Realtime";
+  return "<strong>" + esc(leg?.label || lineTitle(leg)) + "</strong>" +
+    "<br>Bron: " + esc(source) +
+    "<br>" + (confirmed ? "Bijgewerkt: " : "Laatst bekend: ") +
+    esc(clock(position?.observedAt)) +
+    "<br>" + esc(String(ageSeconds)) + " sec oud" +
+    (confirmed ? "" : " · niet opnieuw bevestigd") +
+    (position?.eventType ? "<br>Voertuigstatus: " + esc(position.eventType) : "") +
+    (position?.vehicleId ? "<br>Voertuig: " + esc(position.vehicleId) : "");
 }
 
 function decodeLivePolyline(points, precision = 6) {
@@ -1033,7 +1121,7 @@ async function createLiveJourneyMap(index) {
     interval: null,
     cardOpen: true,
     refreshing: false,
-    trackableLegs: data.legs.filter(leg => parseLiveVehicleTripIdentity(leg)),
+    trackableLegs: data.legs.filter(leg => String(leg?.mode ?? "").toUpperCase() !== "WALK"),
     didInitialFit: bounds.length > 0
   };
   liveJourneyMapStates.set(index, state);
@@ -1074,40 +1162,78 @@ async function refreshLiveJourneyPositions(index) {
   if (!state || !data || !state.cardOpen || state.refreshing) return;
   const trackable = state.trackableLegs;
   if (!trackable.length) {
-    setLiveJourneyStatus(index, "Voor deze reis is geen exact OpenOV-rit-ID beschikbaar om de voertuigpositie veilig te volgen. De kaart toont alleen route en haltes.", "warning");
+    setLiveJourneyStatus(index, "Deze reis bevat geen OV-ritten die gevolgd kunnen worden.", "warning");
     return;
   }
 
   state.refreshing = true;
   try {
-    const params = new URLSearchParams({
-      kind: "vehiclePositions",
-      tripId: [...new Set(trackable.map(leg => leg.tripId))].join(","),
-      routeId: [...new Set(trackable.map(leg => leg.routeId ?? leg.route?.id))].join(","),
-      limit: "250"
-    });
-    const response = await fetch("/api/realtime?" + params.toString(), { cache: "no-store" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
-    if (payload.freshness !== "fresh") {
-      setLiveJourneyStatus(index, "De voertuigfeed is niet vers genoeg. Een eerder punt blijft alleen als laatst bekende locatie zichtbaar; deze is niet als live bevestigd.", "warning");
-      for (const marker of state.vehicleMarkers.values()) marker.setOpacity(0.55);
-      return;
-    }
-
-    const found = [];
     const now = Date.now();
+    const positionsByLegIndex = new Map();
+
+    // First use the already exact-matched BISON/KV6 observation returned with
+    // the itinerary's normal realtime refresh. This avoids another source hop.
     for (const leg of trackable) {
-      const position = selectExactLiveVehiclePosition(leg, payload.entities ?? [], now);
-      if (position) found.push({ leg, position });
+      const legIndex = data.legs.indexOf(leg);
+      if (legIndex < 0) continue;
+      const position = selectExactLiveNdovVehiclePosition(leg, now);
+      if (position) positionsByLegIndex.set(legIndex, { leg, position });
     }
 
-    const currentLegIndexes = new Set(found.map(item => data.legs.indexOf(item.leg)));
+    // OpenOV is a fallback for legs without a fresh coordinate observation.
+    // Do not wait on it for legs that already have a verified current KV6 point.
+    const openovNeeded = trackable.filter(leg =>
+      parseLiveVehicleTripIdentity(leg) &&
+      !positionsByLegIndex.has(data.legs.indexOf(leg))
+    );
+    let openovError = null;
+    let openovStale = false;
+    if (openovNeeded.length) {
+      const params = new URLSearchParams({
+        kind: "vehiclePositions",
+        tripId: [...new Set(openovNeeded.map(leg => leg.tripId))].join(","),
+        routeId: [...new Set(openovNeeded.map(leg => leg.routeId ?? leg.route?.id))].join(","),
+        limit: "250"
+      });
+      try {
+        const response = await fetch("/api/realtime?" + params.toString(), {
+          cache: "no-store",
+          signal: AbortSignal.timeout(8000)
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
+        if (payload.freshness !== "fresh") {
+          openovStale = true;
+        } else {
+          const checkedAt = Date.now();
+          for (const leg of openovNeeded) {
+            const position = selectExactLiveVehiclePosition(leg, payload.entities ?? [], checkedAt);
+            const legIndex = data.legs.indexOf(leg);
+            if (position && legIndex >= 0) {
+              const existing = positionsByLegIndex.get(legIndex);
+              if (!existing || position.ageSeconds < existing.position.ageSeconds) {
+                positionsByLegIndex.set(legIndex, { leg, position });
+              }
+            }
+          }
+        }
+      } catch (error) {
+        openovError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const found = [...positionsByLegIndex.values()];
+    const currentLegIndexes = new Set([...positionsByLegIndex.keys()]);
+    // Keep the last known point for context, but visibly fade it as soon as
+    // we can no longer confirm a source timestamp within the 30-second window.
     for (const [legIndex, marker] of state.vehicleMarkers.entries()) {
       if (!currentLegIndexes.has(legIndex)) {
-        state.map.removeLayer(marker);
-        state.vehicleMarkers.delete(legIndex);
-        state.lastPositions.delete(legIndex);
+        marker.setOpacity(0.32);
+        const oldLeg = data.legs[legIndex];
+        const oldPosition = state.lastPositions.get(legIndex);
+        if (oldLeg && oldPosition) {
+          marker.setPopupContent(liveVehiclePopupContent(oldLeg, oldPosition, false, now));
+        }
       }
     }
 
@@ -1116,11 +1242,7 @@ async function refreshLiveJourneyPositions(index) {
       if (legIndex < 0) continue;
       const position = item.position;
       const point = [position.latitude, position.longitude];
-      const details = "<strong>" + esc(item.leg.label || lineTitle(item.leg)) + "</strong>" +
-        "<br>Laatste gemelde voertuigpositie" +
-        "<br>Bijgewerkt: " + esc(clock(position.observedAt)) +
-        "<br>" + esc(String(position.ageSeconds)) + " sec oud" +
-        (position.vehicleId ? "<br>Voertuig: " + esc(position.vehicleId) : "");
+      const details = liveVehiclePopupContent(item.leg, position, true, Date.now());
       let marker = state.vehicleMarkers.get(legIndex);
       if (marker) {
         marker.setLatLng(point);
@@ -1146,15 +1268,17 @@ async function refreshLiveJourneyPositions(index) {
       const newest = found.reduce((best, item) =>
         item.position.ageSeconds < best.position.ageSeconds ? item : best
       );
-      setLiveJourneyStatus(index,
-        found.length + " verse voertuigpositie(s) · laatste update " +
-        new Date(newest.position.observedAt).toLocaleTimeString("nl-NL") +
-        ". De kaart controleert elke 10 seconden zolang deze reis openstaat.",
-        "live");
+      const sources = [...new Set(found.map(item => item.position.source || "OpenOV GTFS-Realtime"))];
+      let message = found.length + " verse voertuigpositie(s) · nieuwste bron " +
+        sources.join(" + ") + " · " + newest.position.ageSeconds + " sec oud. Controle elke 10 sec.";
+      if (openovStale) message += " De OpenOV-reservefeed is verouderd; oude punten zijn niet als live bevestigd.";
+      if (openovError) message += " OpenOV-reservefeed tijdelijk onbereikbaar.";
+      setLiveJourneyStatus(index, message, "live");
     } else {
-      setLiveJourneyStatus(index,
-        "Geen verse positie gevonden voor de exacte rit(ten). De route en haltes blijven zichtbaar; OVLive verzint geen voertuiglocatie.",
-        "warning");
+      let message = "Geen exact gematchte voertuigpositie jonger dan 30 sec. Laatst bekende locaties zijn vervaagd en niet als live bevestigd.";
+      if (openovStale) message += " De OpenOV-reservefeed is verouderd.";
+      if (openovError) message += " OpenOV: " + openovError;
+      setLiveJourneyStatus(index, message, "warning");
     }
   } catch (error) {
     const old = [...state.lastPositions.values()].sort((a, b) => a.ageSeconds - b.ageSeconds)[0];
@@ -1162,6 +1286,7 @@ async function refreshLiveJourneyPositions(index) {
       ? "Live-update mislukt. Laatst gemelde positie: " + new Date(old.observedAt).toLocaleTimeString("nl-NL") + "; locatie niet opnieuw bevestigd."
       : "Voertuigpositie tijdelijk niet beschikbaar: " + (error instanceof Error ? error.message : String(error)),
       "warning");
+    for (const marker of state.vehicleMarkers.values()) marker.setOpacity(0.32);
   } finally {
     state.refreshing = false;
   }
@@ -2456,7 +2581,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       if (trackingData) trackingData.legs = legs.map(trackingLegCopy);
       const mapState = liveJourneyMapStates.get(index);
       if (mapState && trackingData) {
-        mapState.trackableLegs = trackingData.legs.filter(leg => parseLiveVehicleTripIdentity(leg));
+        mapState.trackableLegs = trackingData.legs.filter(leg => String(leg?.mode ?? "").toUpperCase() !== "WALK");
       }
       const liveStops = document.getElementById('journey-live-stops-' + index);
       if (liveStops) liveStops.innerHTML = renderLiveJourneyStopTimeline(legs);
