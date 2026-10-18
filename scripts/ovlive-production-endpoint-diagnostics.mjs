@@ -168,14 +168,34 @@ async function main() {
       }));
       const hasExactSourceRecord = Object.values(tripEvidence)
         .some((evidence) => evidence.exactRouteAndTripCount > 0);
+      const exactRecordInFreshFeed = Object.entries(tripEvidence).some(([kind, evidence]) => {
+        const feed = sourceFeeds[kind];
+        return evidence.exactRouteAndTripCount > 0 &&
+          feed?.ok === true &&
+          feed?.freshness === "fresh" &&
+          Number.isFinite(Number(feed?.ageSeconds)) &&
+          Number(feed.ageSeconds) >= -60 &&
+          Number(feed.ageSeconds) <= 180;
+      });
+      const atLeastOneFreshSourceFeed = Object.values(sourceFeeds).some((feed) =>
+        feed?.ok === true &&
+        feed?.freshness === "fresh" &&
+        Number.isFinite(Number(feed?.ageSeconds)) &&
+        Number(feed.ageSeconds) >= -60 &&
+        Number(feed.ageSeconds) <= 180
+      );
       const secondsUntilDeparture = departureSeconds == null
         ? null
         : Math.round(departureSeconds - auditStartedMs / 1000);
-      const sourceStatus = hasExactSourceRecord
-        ? "exact_openov_source_record_found"
-        : secondsUntilDeparture != null && secondsUntilDeparture > 300
-          ? "trip_may_not_be_published_to_realtime_yet"
-          : "no_exact_openov_source_record_for_near_departure";
+      const sourceStatus = exactRecordInFreshFeed
+        ? "exact_fresh_openov_source_record_found"
+        : hasExactSourceRecord
+          ? "exact_openov_record_found_but_feed_not_fresh"
+          : !atLeastOneFreshSourceFeed
+            ? "source_feeds_not_fresh_enough_to_judge"
+            : secondsUntilDeparture != null && secondsUntilDeparture > 300
+              ? "trip_may_not_be_published_to_realtime_yet"
+              : "no_exact_openov_source_record_for_near_departure";
       return {
         mode: leg.mode ?? leg.transitMode ?? null,
         routeId: leg.routeId ?? leg.route?.id ?? null,
