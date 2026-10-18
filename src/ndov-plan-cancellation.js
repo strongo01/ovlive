@@ -2513,6 +2513,7 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     crosswalkGeneratedAt: (await getManifest(env).catch(() => null))?.generatedAt ?? null,
     openovRouteCrosswalkGeneratedAt: routeCrosswalkGeneratedAt,
     routeCrosswalkMatchedLegCount,
+    tripIdCrosswalkFallbackMatchedLegCount,
     routeCrosswalkError,
     nsTrainIdentities: buildNsTrainIdentities(routeCrosswalkOutcomes),
     routeCrosswalkOutcomes: routeCrosswalkOutcomes.slice(0, 12),
