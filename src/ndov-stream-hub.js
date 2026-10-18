@@ -11,7 +11,7 @@ import {
   parseCommandBody,
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
-import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
+import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
 import { amsterdamClockSeconds, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
@@ -1819,6 +1819,7 @@ export class NdovFeedHub extends DurableObject {
               const key = canonicalBisonTripIdentity(ev);
               if (!key) continue;
               const previous = state.events.get(key) ?? {};
+              const positionMetadata = mergeKv6PositionMetadata(previous, ev, receivedAt);
               const hasPunctuality = ev.punctualitySeconds !== null && ev.punctualitySeconds !== undefined;
               const terminalEvent = ['END', 'CANCEL'].includes(String(ev.eventType ?? '').toUpperCase());
               const next = {
@@ -1827,8 +1828,10 @@ export class NdovFeedHub extends DurableObject {
                 passageSequenceNumber: ev.passageSequenceNumber ?? previous.passageSequenceNumber ?? null,
                 vehicleNumber: ev.vehicleNumber ?? previous.vehicleNumber ?? null,
                 blockCode: ev.blockCode ?? previous.blockCode ?? null,
-                rdX: ev.rdX ?? previous.rdX ?? null,
-                rdY: ev.rdY ?? previous.rdY ?? null,
+                rdX: positionMetadata.rdX,
+                rdY: positionMetadata.rdY,
+                positionTimestamp: positionMetadata.positionTimestamp,
+                positionReceivedAt: positionMetadata.positionReceivedAt,
                 distanceSinceLastStop: ev.distanceSinceLastStop ?? previous.distanceSinceLastStop ?? null,
                 punctualitySeconds: terminalEvent ? null : hasPunctuality ? ev.punctualitySeconds : (previous.punctualitySeconds ?? null),
                 punctualityTimestamp: terminalEvent ? null : hasPunctuality ? (ev.timestamp ?? receivedAt) : (previous.punctualityTimestamp ?? null),

@@ -248,4 +248,35 @@ const stopPlaceIndex = { stopPlaces: {
   console.log("PASS: feed-header-only OpenOV predictions are downgraded and clearly labelled");
 }
 
+
+{
+  const now = Date.now();
+  const staleOpenov = {
+    status: "matched",
+    timestampBasis: "trip_update",
+    updateAgeSeconds: 95,
+    departure: {
+      time: new Date(now + 60_000).toISOString(),
+      delaySeconds: 60,
+      delayBasis: "absolute_prediction_minus_scheduled_time",
+    },
+  };
+  const freshNdov = {
+    status: "kv6_live",
+    prediction: {
+      departure: {
+        time: new Date(now + 120_000).toISOString(),
+        delaySeconds: 120,
+        source: "NDOV BISON KV6",
+      },
+    },
+  };
+  const selected = buildUnifiedRealtimePrediction({
+    ...leg, openovRealtime: staleOpenov, ndovRealtime: freshNdov,
+  });
+  assert.equal(selected.departure.source, "NDOV BISON KV6",
+    "a 95-second-old OpenOV prediction must not outrank a fresh exact NDOV projection");
+  console.log("PASS: stale OpenOV predictions are ignored in favor of fresh exact NDOV data");
+}
+
 console.log("All NDOV prediction regression tests passed.");
