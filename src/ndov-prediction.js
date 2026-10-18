@@ -1,4 +1,4 @@
-const MAX_FRESH_MS = 180_000;
+const MAX_FRESH_MS = 60_000;
 // A KV6 timestamp adjusted by its measured punctuality should identify a
 // stop close to the corresponding timetable clock. A narrow window keeps route
 // crosswalk lookups small and fails closed rather than loading dozens of stop shards.
@@ -358,7 +358,7 @@ function validOpenovPrediction(leg, kind, direct) {
   if (!item || timeMs === null) return null;
 
   const age = typeof openov.updateAgeSeconds === "number" ? openov.updateAgeSeconds : null;
-  if (age !== null && (age < -30 || age > 180)) return null;
+  if (age !== null && (age < -30 || age > MAX_FRESH_MS / 1000)) return null;
 
   const timestampBasis = String(openov.timestampBasis ?? "unknown").toLowerCase();
   const hasPerTripTimestamp = timestampBasis === "trip_update" &&
