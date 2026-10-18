@@ -129,6 +129,38 @@ function summarizeSourceRecord(record) {
   };
 }
 
+
+function fnv1aShardNumber(value, shardCount) {
+  if (!Number.isInteger(shardCount) || shardCount < 1) return null;
+  const bytes = new TextEncoder().encode(String(value));
+  let hash = 0x811c9dc5;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash % shardCount;
+}
+
+function openovStopPlaceKey(value) {
+  const match = String(value ?? "").trim().match(/^(?:nl-openov_)?(\\d+)$/i);
+  return match ? match[1] : null;
+}
+
+function compactKv78StopEvent(event) {
+  if (!event || typeof event !== "object") return null;
+  return {
+    stopCode: event.stopCode ?? null,
+    targetTime: event.targetTime ?? null,
+    stopSideCode: event.stopSideCode ?? null,
+    quayName: event.quayName ?? null,
+    quayCode: event.quayCode ?? null,
+    stopPlaceCode: event.stopPlaceCode ?? null,
+    stopPlaceRef: event.stopPlaceRef ?? null,
+    stopAssignmentStatus: event.stopAssignmentStatus ?? null,
+    matchMethod: event.matchMethod ?? null,
+  };
+}
+
 async function main() {
   const auditStartedMs = Date.now();
   const requestedPlanTime = new Date(auditStartedMs + 120_000).toISOString();
@@ -542,6 +574,14 @@ async function main() {
         punctualitySeconds: leg.ndovRealtime.punctualitySeconds ?? leg.ndovRealtime.kv6?.punctualitySeconds ?? null,
         kv6Status: leg.ndovRealtime.kv6?.status ?? null,
         kv78Status: leg.ndovRealtime.kv78?.status ?? null,
+        kv78: leg.ndovRealtime.kv78 ? {
+          matchMethod: leg.ndovRealtime.kv78.matchMethod ?? null,
+          matchedKv78TripIdentity: leg.ndovRealtime.kv78.matchedKv78TripIdentity ?? null,
+          feedAgeSeconds: leg.ndovRealtime.kv78.feedAgeSeconds ?? null,
+          stopCrosswalkGeneratedAt: leg.ndovRealtime.kv78.stopCrosswalkGeneratedAt ?? null,
+          departure: compactKv78StopEvent(leg.ndovRealtime.kv78.departure),
+          arrival: compactKv78StopEvent(leg.ndovRealtime.kv78.arrival),
+        } : null,
       } : null,
     };
   });
@@ -571,9 +611,12 @@ async function main() {
     "/ndov-openov-route-crosswalk/manifest.json",
     "/ndov-trip-crosswalk/manifest.json",
     "/ndov-stop-crosswalk/manifest.json",
+    "/ndov-openov-stopplace-crosswalk/manifest.json",
   ];
   const results = [];
   let routeManifest = null;
+  let stopAssignmentManifest = null;
+  let openovStopPlaceManifest = null;
   for (const path of manifests) {
     const result = await get(path);
     const data = result.json;
@@ -593,6 +636,12 @@ async function main() {
     results.push(summary);
     if (path === "/ndov-openov-route-crosswalk/manifest.json" && result.ok && data?.routes) {
       routeManifest = data;
+    }
+    if (path === "/ndov-stop-crosswalk/manifest.json" && result.ok && Number.isInteger(Number(data?.shardCount))) {
+      stopAssignmentManifest = data;
+    }
+    if (path === "/ndov-openov-stopplace-crosswalk/manifest.json" && result.ok && data?.schemaVersion === 1) {
+      openovStopPlaceManifest = data;
     }
   }
 
@@ -745,6 +794,183 @@ async function main() {
       targetChecks,
     });
   }
+
+
+  // Independently probe the production stop-crosswalk assets for the exact
+  // OpenOV endpoint IDs selected by /api/plan. This distinguishes a missing
+  // mapping in the published assets from a mapping that exists but was not
+  // applied by the bounded per-request shard loader.
+  const openovEndpointTargets = openovLegs.flatMap((leg) => [
+    { leg, endpoint: "from", stop: leg?.from },
+    { leg, endpoint: "to", stop: leg?.to },
+  ]).map(({ leg, endpoint, stop }) => ({
+    routeId: leg.routeId ?? leg.route?.id ?? null,
+    tripId: leg.tripId ?? leg.trip?.id ?? null,
+    endpoint,
+    rawStopId: stop?.stopId ?? stop?.id ?? null,
+    key: openovStopPlaceKey(stop?.stopId ?? stop?.id),
+    onPlanCrosswalk: stop?.ndovOpenovStopCrosswalk ?? null,
+    existingStopPlace: stop?.stopPlaceCode ?? stop?.stopPlaceRef ?? stop?.parentId ?? stop?.parentStation ?? null,
+  })).filter((item) => item.key);
+
+  const openovStopPlaceShardNumbers = [...new Set(openovEndpointTargets
+    .map((target) => fnv1aShardNumber(target.key, Number(openovStopPlaceManifest?.shardCount)))
+    .filter((number) => number !== null))];
+  const openovStopPlaceShardResults = new Map();
+  for (const shardNumber of openovStopPlaceShardNumbers) {
+    const path = "/ndov-openov-stopplace-crosswalk/shards/openov-stop-places-" + shardNumber + ".json";
+    openovStopPlaceShardResults.set(shardNumber, await get(path));
+  }
+  const openovStopPlaceTargetChecks = openovEndpointTargets.map((target) => {
+    const shardNumber = fnv1aShardNumber(target.key, Number(openovStopPlaceManifest?.shardCount));
+    const shardResult = shardNumber === null ? null : openovStopPlaceShardResults.get(shardNumber);
+    const mapping = shardResult?.json?.stopPlaces?.[target.key] ?? null;
+    const plannedMapping = target.onPlanCrosswalk && typeof target.onPlanCrosswalk === "object"
+      ? target.onPlanCrosswalk
+      : null;
+    const existingPlace = String(target.existingStopPlace ?? "").trim();
+    const mappedPlace = String(mapping?.stopPlaceCode ?? "").trim();
+    return {
+      routeId: target.routeId,
+      tripId: target.tripId,
+      endpoint: target.endpoint,
+      stopId: target.rawStopId,
+      shardNumber,
+      shardHttpStatus: shardResult?.status ?? null,
+      shardValidJson: Boolean(shardResult?.json && typeof shardResult.json === "object" && !Array.isArray(shardResult.json)),
+      publishedAssetMappingPresent: Boolean(mapping),
+      mappingMethod: mapping?.method ?? null,
+      mappedStopPlaceCode: mapping?.stopPlaceCode ?? null,
+      mappedQuayCode: mapping?.quayCode ?? null,
+      mappedDistanceMeters: mapping?.distanceMeters ?? null,
+      mappingAppliedToPlan: Boolean(plannedMapping),
+      planMappingStopPlaceCode: plannedMapping?.stopPlaceCode ?? null,
+      preExistingStopPlaceIdentity: target.existingStopPlace,
+      possibleConflictingPlanIdentity: Boolean(mapping && existingPlace && mappedPlace && existingPlace !== mappedPlace),
+    };
+  });
+
+  // For any KV78 stop codes surfaced on the returned legs, probe the exact
+  // PSA/CHB assignment shard too. This is bounded by the observed endpoint
+  // events; missing events remain explicitly unprobed rather than guessed.
+  const observedAssignmentTargets = [];
+  for (const leg of openovLegs) {
+    const kv78 = leg?.ndovRealtime?.kv78;
+    if (!kv78 || typeof kv78 !== "object") continue;
+    const identity = String(kv78.identity ?? leg?.ndovRealtime?.identity ?? "");
+    const identityParts = identity.split("|");
+    const owner = String(identityParts[0] ?? "").trim().toUpperCase();
+    const operationDate = String(identityParts[1] ?? "");
+    for (const endpoint of ["departure", "arrival"]) {
+      const event = kv78[endpoint];
+      const stopCode = String(event?.stopCode ?? "").trim();
+      if (!owner || !stopCode) continue;
+      observedAssignmentTargets.push({
+        tripId: leg.tripId ?? leg.trip?.id ?? null,
+        identity,
+        owner,
+        operationDate,
+        endpoint,
+        stopCode,
+        key: owner + "|" + stopCode,
+        planEvent: compactKv78StopEvent(event),
+      });
+    }
+  }
+  const assignmentShardCount = Number(stopAssignmentManifest?.shardCount);
+  const assignmentShardNumbers = [...new Set(observedAssignmentTargets
+    .map((target) => fnv1aShardNumber(target.key, assignmentShardCount))
+    .filter((number) => number !== null))];
+  const assignmentShardResults = new Map();
+  for (const shardNumber of assignmentShardNumbers) {
+    const path = "/ndov-stop-crosswalk/shards/stop-assignments-" + shardNumber + ".json";
+    assignmentShardResults.set(shardNumber, await get(path));
+  }
+  const observedAssignmentChecks = observedAssignmentTargets.map((target) => {
+    const shardNumber = fnv1aShardNumber(target.key, assignmentShardCount);
+    const shardResult = shardNumber === null ? null : assignmentShardResults.get(shardNumber);
+    const records = shardResult?.json?.assignments?.[target.key] ?? [];
+    const activeRecords = records.filter((record) => {
+      const day = String(target.operationDate ?? "").replace(/-/g, "");
+      const dateKey = (value) => {
+        const match = String(value ?? "").match(/(\\d{4})-?(\\d{2})-?(\\d{2})/);
+        return match ? match[1] + match[2] + match[3] : null;
+      };
+      const from = dateKey(record?.validFrom);
+      const thru = dateKey(record?.validThru);
+      return !day || ((!from || from <= day) && (!thru || day <= thru));
+    });
+    return {
+      tripId: target.tripId,
+      identity: target.identity,
+      endpoint: target.endpoint,
+      owner: target.owner,
+      stopCode: target.stopCode,
+      shardNumber,
+      shardHttpStatus: shardResult?.status ?? null,
+      shardValidJson: Boolean(shardResult?.json && typeof shardResult.json === "object" && !Array.isArray(shardResult.json)),
+      publishedAssignmentRecordCount: records.length,
+      activeAssignmentRecordCountForOperationDate: activeRecords.length,
+      assignmentRecords: activeRecords.slice(0, 3).map((record) => ({
+        stopPlaceCode: record?.stopPlaceCode ?? null,
+        stopSideCode: record?.stopSideCode ?? null,
+        quayCode: record?.quayCode ?? null,
+        quayName: record?.quayName ?? null,
+        validFrom: record?.validFrom ?? null,
+        validThru: record?.validThru ?? null,
+      })),
+      planStopAssignmentStatus: target.planEvent?.stopAssignmentStatus ?? null,
+      planMatchMethod: target.planEvent?.matchMethod ?? null,
+    };
+  });
+
+  console.log("=== OPENOV/CHB STOPPLACE SHARD DIAGNOSTIC ===");
+  console.log(JSON.stringify({
+    manifest: {
+      httpStatus: results.find((item) => item.path === "/ndov-openov-stopplace-crosswalk/manifest.json")?.status ?? null,
+      generatedAt: openovStopPlaceManifest?.generatedAt ?? null,
+      sourceGtfs: openovStopPlaceManifest?.sourceGtfs ?? null,
+      sourceChb: openovStopPlaceManifest?.sourceChb ?? null,
+      shardCount: openovStopPlaceManifest?.shardCount ?? null,
+      keyCount: openovStopPlaceManifest?.keyCount ?? null,
+    },
+    targetEndpointCount: openovEndpointTargets.length,
+    distinctRequiredShardCount: openovStopPlaceShardNumbers.length,
+    shardProbes: openovStopPlaceShardNumbers.map((shardNumber) => {
+      const shard = openovStopPlaceShardResults.get(shardNumber);
+      return {
+        shardNumber,
+        httpStatus: shard?.status ?? null,
+        bytes: shard?.bytes ?? null,
+        validJson: Boolean(shard?.json && typeof shard.json === "object" && !Array.isArray(shard.json)),
+        error: shard?.error ?? null,
+      };
+    }),
+    targets: openovStopPlaceTargetChecks,
+  }, null, 2));
+  console.log("=== OBSERVED KV78 PSA/CHB ASSIGNMENT SHARD DIAGNOSTIC ===");
+  console.log(JSON.stringify({
+    manifest: {
+      httpStatus: results.find((item) => item.path === "/ndov-stop-crosswalk/manifest.json")?.status ?? null,
+      generatedAt: stopAssignmentManifest?.generatedAt ?? null,
+      shardCount: assignmentShardCount || null,
+      assignmentCount: stopAssignmentManifest?.assignmentCount ?? null,
+    },
+    observedStopEventCount: observedAssignmentTargets.length,
+    distinctRequiredShardCount: assignmentShardNumbers.length,
+    shardProbes: assignmentShardNumbers.map((shardNumber) => {
+      const shard = assignmentShardResults.get(shardNumber);
+      return {
+        shardNumber,
+        httpStatus: shard?.status ?? null,
+        bytes: shard?.bytes ?? null,
+        validJson: Boolean(shard?.json && typeof shard.json === "object" && !Array.isArray(shard.json)),
+        error: shard?.error ?? null,
+      };
+    }),
+    targets: observedAssignmentChecks,
+    limitation: "PSA/CHB records are probed only for KV78 stop codes returned by /api/plan; no stop code is inferred for unmatched trips.",
+  }, null, 2));
 
   console.log("=== OPENOV STATIC SCHEDULE PATTERN CROSSCHECK (CORRECT TIME BUCKET) ===");
   console.log(JSON.stringify({
