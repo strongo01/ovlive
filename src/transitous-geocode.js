@@ -27,10 +27,12 @@ function uniqueParts(values) {
  */
 export function transitousMatchesToFeatureCollection(matches) {
   const features = [];
+  const seenIds = new Set();
   for (const match of Array.isArray(matches) ? matches : []) {
     if (String(match?.type ?? "").toUpperCase() !== "STOP") continue;
     const id = String(match?.id ?? "").trim();
     const name = String(match?.name ?? "").trim();
+    if (id && seenIds.has(id)) continue;
     const lat = Number(match?.lat);
     const lon = Number(match?.lon);
     if (!id || !name ||
@@ -40,6 +42,7 @@ export function transitousMatchesToFeatureCollection(matches) {
     const areas = Array.isArray(match?.areas)
       ? match.areas.map(area => area?.name).filter(Boolean)
       : [];
+    seenIds.add(id);
     const displayName = uniqueParts([
       name,
       match?.street,
