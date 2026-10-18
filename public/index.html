@@ -135,6 +135,38 @@
       .search-options>summary{align-items:flex-start}
     }
 
+
+    /* Live kaart en halte-tijdlijn in de uitgeklapte reisdetails. */
+    .live-follow{border:1px solid var(--line);border-radius:14px;padding:12px;margin:8px 0 16px;background:rgba(255,255,255,.02)}
+    .live-follow-heading{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin:0 0 7px}
+    .live-follow-heading h4{font-size:16px;margin:0}
+    .live-follow-caption,.live-follow-status{font-size:12px;color:var(--muted)}
+    .live-follow-status{margin:8px 0;padding:8px 10px;background:#20262e;border-radius:8px;line-height:1.45}
+    .live-follow-status.is-live{color:var(--green)}
+    .live-follow-status.is-warning{color:#facc15}
+    .live-map{height:285px;min-height:220px;width:100%;border-radius:11px;overflow:hidden;background:#20262e;border:1px solid var(--line)}
+    .live-map-attribution{font-size:10px;color:var(--muted);text-align:right;margin:4px 0 12px}
+    .live-map-attribution a{color:inherit}
+    .ovlive-vehicle-marker{background:transparent;border:0}
+    .ovlive-vehicle-marker span{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border:2px solid white;border-radius:50%;box-shadow:0 1px 8px #0009;background:var(--accent);font-size:17px}
+    .live-stop-heading{font-size:14px;margin:12px 0 7px}
+    .live-stop-leg{margin-top:10px}
+    .live-stop-line{font-size:12px;color:var(--accent);font-weight:800;margin:0 0 4px}
+    .live-stop-row{position:relative;display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:9px;align-items:start;padding:7px 2px;border-bottom:1px solid rgba(255,255,255,.05)}
+    .live-stop-dot{width:8px;height:8px;border:2px solid #a8b0ba;border-radius:50%;margin:5px 0 0 1px}
+    .live-stop-row.live-stop-last-reported .live-stop-dot{border-color:var(--accent);background:var(--accent);box-shadow:0 0 0 3px rgba(251,146,60,.17)}
+    .live-stop-main{min-width:0}
+    .live-stop-name{font-size:13px;font-weight:650;overflow-wrap:anywhere}
+    .live-stop-sub{font-size:11px;color:var(--muted);line-height:1.4}
+    .live-stop-times{text-align:right;font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+    .live-stop-times strong{font-size:14px}
+    .live-stop-state{display:block;color:#fdba74;font-size:10px;white-space:normal;max-width:150px;margin-top:2px}
+    .live-follow-legend{display:flex;gap:6px 12px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--muted)}
+    .live-follow-legend span{display:inline-flex;align-items:center;gap:5px}
+    .live-legend-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#fb923c}
+    .live-legend-line{display:inline-block;width:16px;height:3px;background:#f59e0b;border-radius:3px}
+    @media(max-width:600px){.live-follow{padding:9px}.live-map{height:245px}.live-stop-row{gap:6px}.live-stop-times{font-size:11px}.live-stop-times strong{font-size:13px}}
+
 </style>
 </head>
 <body>
@@ -622,6 +654,546 @@ function openovVehiclePositionHtml(rt) {
     ${esc(ageText)}${stop} ·
     <a href="${esc(mapUrl)}" target="_blank" rel="noopener noreferrer">Bekijk positie op kaart</a>.
   </div>`;
+}
+
+
+let liveLeafletPromise = null;
+const liveJourneyMapStates = new Map();
+const LIVE_VEHICLE_POLL_MS = 30000;
+const LIVE_VEHICLE_MAX_AGE_SECONDS = 180;
+
+function normalizeLiveVehicleId(value) {
+  return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
+}
+
+function normalizeLiveVehicleClock(value) {
+  if (value == null || value === "") return null;
+  const match = String(value).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  return match[1].padStart(2, "0") + ":" + match[2] + ":" + (match[3] ?? "00");
+}
+
+function parseLiveVehicleTripIdentity(leg) {
+  const tripMatch = String(leg?.tripId ?? "").match(
+    /^(\d{8})_(\d{2}:\d{2}(?::\d{2})?)_nl-OpenOV_(.+)$/i
+  );
+  const routeId = normalizeLiveVehicleId(leg?.routeId ?? leg?.route?.id);
+  if (!tripMatch || !routeId) return null;
+  return {
+    startDate: tripMatch[1],
+    startTime: normalizeLiveVehicleClock(tripMatch[2]),
+    tripId: normalizeLiveVehicleId(tripMatch[3]),
+    routeId
+  };
+}
+
+// Alleen een verse positie van exact dezelfde ritinstantie accepteren.
+// Een gelijk lijnnummer alleen is nooit voldoende.
+function selectExactLiveVehiclePosition(leg, positions, nowMs = Date.now()) {
+  const expected = parseLiveVehicleTripIdentity(leg);
+  if (!expected) return null;
+  const nowSeconds = nowMs / 1000;
+  const plannedValue =
+    leg?.from?.scheduledDeparture ??
+    leg?.scheduledStartTime ??
+    leg?.startTime ??
+    leg?.from?.departure;
+  const plannedMs = typeof plannedValue === "string" ? Date.parse(plannedValue) : Number.NaN;
+  const matches = [];
+
+  for (const position of positions ?? []) {
+    if (normalizeLiveVehicleId(position?.tripId) !== expected.tripId ||
+        normalizeLiveVehicleId(position?.routeId) !== expected.routeId) continue;
+
+    const timestampValue = Number(position?.timestamp);
+    const timestamp = timestampValue > 1e12 ? timestampValue / 1000 : timestampValue;
+    const latitude = Number(position?.latitude);
+    const longitude = Number(position?.longitude);
+    if (!Number.isFinite(timestamp) ||
+        !Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+        latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) continue;
+
+    const ageSeconds = Math.round(nowSeconds - timestamp);
+    if (ageSeconds < -30 || ageSeconds > LIVE_VEHICLE_MAX_AGE_SECONDS) continue;
+
+    const positionDate = String(position?.startDate ?? "").replace(/\D/g, "").slice(0, 8);
+    const positionStartTime = normalizeLiveVehicleClock(position?.startTime);
+    if (!positionDate && !positionStartTime) continue;
+    if (positionDate && positionDate !== expected.startDate) continue;
+    if (positionStartTime && positionStartTime !== expected.startTime) continue;
+    if (Number.isFinite(plannedMs) &&
+        Math.abs(timestamp * 1000 - plannedMs) > 4 * 60 * 60 * 1000) continue;
+
+    matches.push({
+      tripId: expected.tripId,
+      routeId: expected.routeId,
+      vehicleId: position?.vehicleId || null,
+      startDate: positionDate || null,
+      startTime: positionStartTime || null,
+      latitude,
+      longitude,
+      stopId: position?.stopId || null,
+      observedAt: new Date(timestamp * 1000).toISOString(),
+      ageSeconds
+    });
+  }
+
+  matches.sort((a, b) => a.ageSeconds - b.ageSeconds);
+  return matches[0] ?? null;
+}
+
+function decodeLivePolyline(points, precision = 6) {
+  if (typeof points !== "string" || !points.length) return [];
+  const factor = Math.pow(10, Math.max(0, Math.min(7, Number(precision) || 6)));
+  const decoded = [];
+  let index = 0, lat = 0, lon = 0;
+  try {
+    while (index < points.length) {
+      let result = 0, shift = 0, byte;
+      do {
+        byte = points.charCodeAt(index++) - 63;
+        if (byte < 0 || byte > 63 || shift > 30) return [];
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20 && index <= points.length);
+      lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+
+      result = 0; shift = 0;
+      do {
+        byte = points.charCodeAt(index++) - 63;
+        if (byte < 0 || byte > 63 || shift > 30) return [];
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20 && index <= points.length);
+      lon += (result & 1) ? ~(result >> 1) : (result >> 1);
+      const latitude = lat / factor;
+      const longitude = lon / factor;
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+          Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return [];
+      decoded.push([latitude, longitude]);
+      if (decoded.length > 20000) return [];
+    }
+  } catch {
+    return [];
+  }
+  return decoded;
+}
+
+function livePlaceCoordinates(place) {
+  if (!place || typeof place !== "object") return null;
+  const latitude = Number(place.lat ?? place.latitude ?? place.coordinates?.lat);
+  const longitude = Number(place.lon ?? place.lng ?? place.longitude ?? place.coordinates?.lon ?? place.coordinates?.lng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+  return [latitude, longitude];
+}
+
+function liveLegCoordinates(leg) {
+  const geometry = leg?.legGeometry ?? leg?.geometry ?? leg?.shape;
+  if (Array.isArray(geometry)) {
+    return geometry.map(point => {
+      if (Array.isArray(point) && point.length >= 2) return [Number(point[1]), Number(point[0])];
+      return livePlaceCoordinates(point);
+    }).filter(point => point && point.every(Number.isFinite) &&
+      Math.abs(point[0]) <= 90 && Math.abs(point[1]) <= 180);
+  }
+  if (geometry?.type === "LineString" && Array.isArray(geometry.coordinates)) {
+    return geometry.coordinates.map(point => [Number(point[1]), Number(point[0])])
+      .filter(point => point.every(Number.isFinite) &&
+        Math.abs(point[0]) <= 90 && Math.abs(point[1]) <= 180);
+  }
+  const encoded = typeof geometry === "string" ? geometry : geometry?.points;
+  const precision = typeof geometry === "object" && geometry?.precision != null
+    ? Number(geometry.precision) : 6;
+  return decodeLivePolyline(encoded, precision);
+}
+
+function liveModeEmoji(mode) {
+  const normalized = String(mode ?? "").toUpperCase();
+  if (normalized === "BUS" || normalized === "COACH") return "🚌";
+  if (normalized === "TRAM") return "🚊";
+  if (normalized === "METRO" || normalized === "SUBWAY") return "🚇";
+  if (["RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL", "HIGHSPEED_RAIL", "NIGHT_RAIL", "TRAIN"].includes(normalized)) return "🚆";
+  if (normalized === "FERRY") return "⛴️";
+  return "🚍";
+}
+
+function liveModeColor(mode) {
+  const normalized = String(mode ?? "").toUpperCase();
+  if (normalized === "TRAM") return "#22c55e";
+  if (normalized === "METRO" || normalized === "SUBWAY") return "#38bdf8";
+  if (["RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL", "HIGHSPEED_RAIL", "NIGHT_RAIL", "TRAIN"].includes(normalized)) return "#c084fc";
+  if (normalized === "FERRY") return "#60a5fa";
+  return "#f59e0b";
+}
+
+function normalizeLiveStopId(value) {
+  return normalizeLiveVehicleId(value).toLocaleLowerCase("nl-NL");
+}
+
+function loadLiveLeaflet() {
+  if (window.L) return Promise.resolve(window.L);
+  if (liveLeafletPromise) return liveLeafletPromise;
+  liveLeafletPromise = new Promise((resolve, reject) => {
+    if (!document.querySelector('link[data-ovlive-leaflet="1"]')) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      link.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=";
+      link.crossOrigin = "";
+      link.dataset.ovliveLeaflet = "1";
+      document.head.appendChild(link);
+    }
+    const script = document.createElement("script");
+    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    script.integrity = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=";
+    script.crossOrigin = "";
+    script.onload = () => window.L ? resolve(window.L) : reject(new Error("De kaartbibliotheek is niet beschikbaar."));
+    script.onerror = () => reject(new Error("De kaartbibliotheek kon niet worden geladen."));
+    document.head.appendChild(script);
+  }).catch(error => {
+    liveLeafletPromise = null;
+    throw error;
+  });
+  return liveLeafletPromise;
+}
+
+function stopTimelinePlaceRow(place, opts = {}) {
+  if (!place) return "";
+  const name = String(place.name ?? place.stopName ?? "Halte");
+  const stopKeys = [place.id, place.stopCode, place.code].map(normalizeLiveStopId).filter(Boolean);
+  let shownTime = null;
+  let status = "Tijd niet bevestigd";
+  let scheduled = null;
+
+  if (opts.endpoint === "departure" || opts.endpoint === "arrival") {
+    scheduled = plannedEndpointTime(opts.leg, opts.endpoint);
+    const prediction = timelineRealtimePrediction(opts.leg, opts.endpoint, scheduled);
+    if (prediction?.time) {
+      shownTime = prediction.time;
+      status = "verwacht · " + String(prediction.source || "realtimebron");
+    } else {
+      shownTime = scheduled;
+      status = scheduled ? "gepland · realtime niet bevestigd" : "tijd onbekend";
+    }
+  } else {
+    const kind = opts.kind === "departure" ? "departure" : "arrival";
+    scheduled = kind === "departure" ? (place.scheduledDeparture ?? null) : (place.scheduledArrival ?? null);
+    const routePlannerTime = place[kind] ?? null;
+    const scheduledMs = Date.parse(scheduled || "");
+    const routePlannerMs = Date.parse(routePlannerTime || "");
+    const changed = Number.isFinite(scheduledMs) && Number.isFinite(routePlannerMs) &&
+      Math.abs(scheduledMs - routePlannerMs) >= 30000;
+    if (changed) {
+      shownTime = routePlannerTime;
+      status = "afwijkende tijd volgens routeplanner";
+    } else {
+      shownTime = scheduled || routePlannerTime;
+      status = scheduled ? "gepland · niet als realtime bevestigd" : "tijd volgens routeplanner";
+    }
+  }
+
+  const shownClock = shownTime ? clock(shownTime) : "—";
+  const scheduledClock = scheduled && shownTime &&
+    Math.abs(Date.parse(scheduled) - Date.parse(shownTime)) >= 30000 ? clock(scheduled) : null;
+  const cancelled = place.cancelled === true;
+  const track = place.track ?? place.scheduledTrack;
+  return '<div class="live-stop-row' + (cancelled ? ' rt-cancelled' : '') +
+    '" data-live-stop-ids="' + esc(stopKeys.join("|")) + '">' +
+    '<span class="live-stop-dot" aria-hidden="true"></span><div class="live-stop-main">' +
+    '<div class="live-stop-name">' + esc(name) + '</div>' +
+    '<div class="live-stop-sub">' + esc(status) +
+    (track ? ' · spoor/perron ' + esc(track) : '') +
+    (cancelled ? ' · uitval/stopwijziging volgens planner' : '') + '</div>' +
+    '<span class="live-stop-state" hidden>Laatst gemelde halte in voertuigbericht</span></div>' +
+    '<div class="live-stop-times"><strong>' + esc(shownClock) + '</strong>' +
+    (scheduledClock ? '<span class="live-stop-sub"> gepland ' + esc(scheduledClock) + '</span>' : '') +
+    '</div></div>';
+}
+
+function renderLiveJourneyStopTimeline(legs) {
+  const transitLegs = (legs ?? []).filter(leg => String(leg?.mode ?? "").toUpperCase() !== "WALK");
+  if (!transitLegs.length) return '<p class="muted">Deze reis bevat geen OV-ritten.</p>';
+  return transitLegs.map(leg => {
+    const title = lineTitle(leg);
+    const stops = [];
+    if (leg.from) stops.push(stopTimelinePlaceRow(leg.from, { leg, endpoint: "departure" }));
+    for (const stop of Array.isArray(leg.intermediateStops) ? leg.intermediateStops : []) {
+      stops.push(stopTimelinePlaceRow(stop, { leg, kind: "arrival" }));
+    }
+    if (leg.to) stops.push(stopTimelinePlaceRow(leg.to, { leg, endpoint: "arrival" }));
+    return '<div class="live-stop-leg"><div class="live-stop-line">' + esc(title) +
+      (leg.headsign ? ' · richting ' + esc(leg.headsign) : '') + '</div>' +
+      (stops.join("") || '<div class="muted">Geen haltegegevens ontvangen.</div>') + '</div>';
+  }).join("");
+}
+
+function trackingPositionIcon(L, mode) {
+  const emoji = liveModeEmoji(mode);
+  return L.divIcon({
+    className: "ovlive-vehicle-marker",
+    html: "<span>" + emoji + "</span>",
+    iconSize: [32, 32],
+    iconAnchor: [16, 16]
+  });
+}
+
+async function createLiveJourneyMap(index) {
+  const data = window.__ovliveTrackingJourneys?.[index];
+  const container = document.getElementById("journey-live-map-" + index);
+  if (!data || !container) return null;
+  const L = await loadLiveLeaflet();
+  if (!container.isConnected) return null;
+
+  const map = L.map(container, { scrollWheelZoom: false }).setView([52.1, 5.1], 7);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+
+  const bounds = [];
+  const addCoordinateToBounds = point => {
+    if (point && Number.isFinite(point[0]) && Number.isFinite(point[1])) bounds.push(point);
+  };
+
+  for (const leg of data.legs) {
+    const lineCoordinates = liveLegCoordinates(leg);
+    if (lineCoordinates.length > 1) {
+      L.polyline(lineCoordinates, {
+        color: liveModeColor(leg.mode),
+        weight: 5,
+        opacity: 0.82,
+        lineCap: "round",
+        lineJoin: "round"
+      }).addTo(map);
+      lineCoordinates.forEach(addCoordinateToBounds);
+    }
+
+    const places = [leg.from, ...(Array.isArray(leg.intermediateStops) ? leg.intermediateStops : []), leg.to].filter(Boolean);
+    for (let i = 0; i < places.length; i += 1) {
+      const place = places[i];
+      const point = livePlaceCoordinates(place);
+      if (!point) continue;
+      addCoordinateToBounds(point);
+      const isFirst = i === 0;
+      const isLast = i === places.length - 1;
+      const color = isFirst ? "#86efac" : isLast ? "#fca5a5" : liveModeColor(leg.mode);
+      const radius = isFirst || isLast ? 6 : 3.5;
+      const marker = L.circleMarker(point, {
+        radius,
+        color: "#101317",
+        weight: 1.5,
+        fillColor: color,
+        fillOpacity: 0.95
+      }).addTo(map);
+      const stopName = esc(place.name || "Halte");
+      const timeValue = isFirst
+        ? plannedEndpointTime(leg, "departure")
+        : isLast
+          ? plannedEndpointTime(leg, "arrival")
+          : (place.scheduledArrival || place.arrival || place.scheduledDeparture || place.departure);
+      marker.bindPopup("<strong>" + stopName + "</strong>" +
+        (timeValue ? "<br>" + esc(clock(timeValue)) : ""));
+    }
+  }
+
+  if (bounds.length >= 2) map.fitBounds(L.latLngBounds(bounds), { padding: [24, 24], maxZoom: 15 });
+  else if (bounds.length === 1) map.setView(bounds[0], 14);
+
+  const state = {
+    index,
+    map,
+    vehicleMarkers: new Map(),
+    lastPositions: new Map(),
+    interval: null,
+    cardOpen: true,
+    refreshing: false,
+    trackableLegs: data.legs.filter(leg => parseLiveVehicleTripIdentity(leg)),
+    didInitialFit: bounds.length > 0
+  };
+  liveJourneyMapStates.set(index, state);
+  window.setTimeout(() => map.invalidateSize(), 150);
+  return state;
+}
+
+function setLiveJourneyStatus(index, message, kind = "") {
+  const element = document.getElementById("journey-live-status-" + index);
+  if (!element) return;
+  element.textContent = message;
+  element.classList.toggle("is-live", kind === "live");
+  element.classList.toggle("is-warning", kind === "warning");
+}
+
+function updateLiveJourneyStopHighlights(index, matches) {
+  const container = document.getElementById("journey-live-stops-" + index);
+  if (!container) return;
+  container.querySelectorAll(".live-stop-row").forEach(row => {
+    row.classList.remove("live-stop-last-reported");
+    const badge = row.querySelector(".live-stop-state");
+    if (badge) badge.hidden = true;
+    const rowKeys = String(row.dataset.liveStopIds || "").split("|").filter(Boolean);
+    const matched = matches.some(item => {
+      const stopId = normalizeLiveStopId(item.position.stopId);
+      return stopId && rowKeys.includes(stopId);
+    });
+    if (matched) {
+      row.classList.add("live-stop-last-reported");
+      if (badge) badge.hidden = false;
+    }
+  });
+}
+
+async function refreshLiveJourneyPositions(index) {
+  const state = liveJourneyMapStates.get(index);
+  const data = window.__ovliveTrackingJourneys?.[index];
+  if (!state || !data || !state.cardOpen || state.refreshing) return;
+  const trackable = state.trackableLegs;
+  if (!trackable.length) {
+    setLiveJourneyStatus(index, "Voor deze reis is geen exact OpenOV-rit-ID beschikbaar om de voertuigpositie veilig te volgen. De kaart toont alleen route en haltes.", "warning");
+    return;
+  }
+
+  state.refreshing = true;
+  try {
+    const params = new URLSearchParams({
+      kind: "vehiclePositions",
+      tripId: [...new Set(trackable.map(leg => leg.tripId))].join(","),
+      routeId: [...new Set(trackable.map(leg => leg.routeId ?? leg.route?.id))].join(","),
+      limit: "250"
+    });
+    const response = await fetch("/api/realtime?" + params.toString(), { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
+    if (payload.freshness !== "fresh") {
+      setLiveJourneyStatus(index, "De voertuigfeed is niet vers genoeg. Een eerder punt blijft alleen als laatst bekende locatie zichtbaar; deze is niet als live bevestigd.", "warning");
+      for (const marker of state.vehicleMarkers.values()) marker.setOpacity(0.55);
+      return;
+    }
+
+    const found = [];
+    const now = Date.now();
+    for (const leg of trackable) {
+      const position = selectExactLiveVehiclePosition(leg, payload.entities ?? [], now);
+      if (position) found.push({ leg, position });
+    }
+
+    const currentLegIndexes = new Set(found.map(item => data.legs.indexOf(item.leg)));
+    for (const [legIndex, marker] of state.vehicleMarkers.entries()) {
+      if (!currentLegIndexes.has(legIndex)) {
+        state.map.removeLayer(marker);
+        state.vehicleMarkers.delete(legIndex);
+        state.lastPositions.delete(legIndex);
+      }
+    }
+
+    for (const item of found) {
+      const legIndex = data.legs.indexOf(item.leg);
+      if (legIndex < 0) continue;
+      const position = item.position;
+      const point = [position.latitude, position.longitude];
+      const details = "<strong>" + esc(item.leg.label || lineTitle(item.leg)) + "</strong>" +
+        "<br>Laatste gemelde voertuigpositie" +
+        "<br>Bijgewerkt: " + esc(clock(position.observedAt)) +
+        "<br>" + esc(String(position.ageSeconds)) + " sec oud" +
+        (position.vehicleId ? "<br>Voertuig: " + esc(position.vehicleId) : "");
+      let marker = state.vehicleMarkers.get(legIndex);
+      if (marker) {
+        marker.setLatLng(point);
+        marker.setOpacity(1);
+        marker.setPopupContent(details);
+      } else {
+        marker = window.L.marker(point, {
+          icon: trackingPositionIcon(window.L, item.leg.mode),
+          title: "Live voertuigpositie: " + String(item.leg.label || lineTitle(item.leg))
+        }).addTo(state.map);
+        marker.bindPopup(details);
+        state.vehicleMarkers.set(legIndex, marker);
+      }
+      state.lastPositions.set(legIndex, position);
+      if (!state.didInitialFit) {
+        state.map.setView(point, 14);
+        state.didInitialFit = true;
+      }
+    }
+
+    updateLiveJourneyStopHighlights(index, found);
+    if (found.length) {
+      const newest = found.reduce((best, item) =>
+        item.position.ageSeconds < best.position.ageSeconds ? item : best
+      );
+      setLiveJourneyStatus(index,
+        found.length + " verse voertuigpositie(s) · laatste update " +
+        new Date(newest.position.observedAt).toLocaleTimeString("nl-NL") +
+        ". De kaart controleert elke 30 seconden zolang deze reis openstaat.",
+        "live");
+    } else {
+      setLiveJourneyStatus(index,
+        "Geen verse positie gevonden voor de exacte rit(ten). De route en haltes blijven zichtbaar; OVLive verzint geen voertuiglocatie.",
+        "warning");
+    }
+  } catch (error) {
+    const old = [...state.lastPositions.values()].sort((a, b) => a.ageSeconds - b.ageSeconds)[0];
+    setLiveJourneyStatus(index, old
+      ? "Live-update mislukt. Laatst gemelde positie: " + new Date(old.observedAt).toLocaleTimeString("nl-NL") + "; locatie niet opnieuw bevestigd."
+      : "Voertuigpositie tijdelijk niet beschikbaar: " + (error instanceof Error ? error.message : String(error)),
+      "warning");
+  } finally {
+    state.refreshing = false;
+  }
+}
+
+async function startLiveJourneyTracking(index, card) {
+  const data = window.__ovliveTrackingJourneys?.[index];
+  if (!data || !card?.open) return;
+  let state = liveJourneyMapStates.get(index);
+  if (!state) {
+    setLiveJourneyStatus(index, "Interactieve kaart en actuele voertuigpositie laden…");
+    try {
+      state = await createLiveJourneyMap(index);
+    } catch (error) {
+      setLiveJourneyStatus(index, "De interactieve kaart kon niet laden. Controleer de internetverbinding en probeer de reis opnieuw te openen.", "warning");
+      return;
+    }
+  }
+  if (!state || !card.open) return;
+  state.cardOpen = true;
+  state.map.invalidateSize();
+  await refreshLiveJourneyPositions(index);
+  if (state.interval) window.clearInterval(state.interval);
+  if (state.trackableLegs.length) {
+    state.interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshLiveJourneyPositions(index);
+    }, LIVE_VEHICLE_POLL_MS);
+  }
+}
+
+function stopLiveJourneyTracking(index) {
+  const state = liveJourneyMapStates.get(index);
+  if (!state) return;
+  state.cardOpen = false;
+  if (state.interval) {
+    window.clearInterval(state.interval);
+    state.interval = null;
+  }
+}
+
+function stopAllLiveJourneyTracking() {
+  for (const state of liveJourneyMapStates.values()) {
+    state.cardOpen = false;
+    if (state.interval) window.clearInterval(state.interval);
+    state.map.remove();
+  }
+  liveJourneyMapStates.clear();
+}
+
+function bindLiveJourneyCards() {
+  document.querySelectorAll("details.journey-card[data-tracking-index]").forEach(card => {
+    const index = Number(card.dataset.trackingIndex);
+    card.addEventListener("toggle", () => {
+      if (card.open) void startLiveJourneyTracking(index, card);
+      else stopLiveJourneyTracking(index);
+    });
+  });
 }
 
 function canCompareOpenovWithKv78(openovTripTimestampMissing, kv78Event) {
@@ -1625,6 +2197,8 @@ function renderLeg(leg, index = 0) {
 }
 
 $('planBtn').onclick = async () => {
+  stopAllLiveJourneyTracking();
+  window.__ovliveTrackingJourneys = [];
   $('planBtn').disabled = true;
   $('planStatus').textContent = 'Reizen ophalen en realtime controleren…';
   $('journeys').innerHTML = '';
@@ -1861,6 +2435,7 @@ q.set('pedestrianSpeed', '1.5');
       ? `<div class="status rt-unknown"><strong>${invalidChronologyCount} reisoptie(s) verborgen.</strong><div class="rt-details">Transitous gaf een tijdvolgorde terug die niet aansluit: een OV-deel vertrekt voordat je bij de halte kunt zijn. Deze opties worden niet getoond.</div></div>`
       : '';
 
+    window.__ovliveTrackingJourneys = [];
     const cards = validItineraryCandidates.slice(0, 5).map(({ journey, sourceLegs }, index) => {
 
       // Werk met kopieën: de oorspronkelijke API-resultaten blijven intact.
@@ -1978,6 +2553,23 @@ q.set('pedestrianSpeed', '1.5');
       const firstDeparturePrediction = firstTransitLeg
         ? timelineRealtimePrediction(firstTransitLeg, 'departure', firstScheduledDeparture)
         : null;
+      window.__ovliveTrackingJourneys[index] = { legs: legs.map(leg => ({
+        ...leg,
+        label: lineTitle(leg),
+        routeId: leg.routeId ?? leg.route?.id,
+        legGeometry: leg.legGeometry ?? leg.geometry ?? null,
+        intermediateStops: Array.isArray(leg.intermediateStops) ? leg.intermediateStops : []
+      })) };
+      const trackingPanel = `<section class="live-follow" aria-label="Live voertuigkaart en halteverwachtingen">
+        <div class="live-follow-heading"><h4>Live voertuig volgen</h4><span class="live-follow-caption">Echte voertuigposities · automatische controle elke 30 sec</span></div>
+        <div id="journey-live-status-${index}" class="live-follow-status" role="status" aria-live="polite">Open deze reis om de livekaart te laden.</div>
+        <div id="journey-live-map-${index}" class="live-map" aria-label="Kaart met route, haltes en laatst gemelde voertuigposities"></div>
+        <div class="live-map-attribution">Kaartgegevens © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a> · kaartweergave door Leaflet</div>
+        <div class="live-follow-legend"><span><i class="live-legend-dot"></i>Voertuigpositie uit realtimefeed</span><span><i class="live-legend-line"></i>Route uit routeplanner</span></div>
+        <h5 class="live-stop-heading">Haltes en verwachte tijden</h5>
+        <p class="muted" style="font-size:11px;margin:0 0 5px">Een verwachte tijd staat alleen als realtime wanneer de bron en ritkoppeling dit ondersteunen. Anders is de tijd gepland of afkomstig van de routeplanner.</p>
+        <div id="journey-live-stops-${index}" class="live-stop-timeline">${renderLiveJourneyStopTimeline(legs)}</div>
+      </section>`;
       let realtimeBadge = '';
       if (hasCancelledLeg) {
         realtimeBadge = '<span class="journey-alert-tag">⚠ Uitval gemeld — controleer details</span>';
@@ -1996,7 +2588,7 @@ q.set('pedestrianSpeed', '1.5');
         }
       }
 
-      return `<details class="journey-card">
+      return `<details class="journey-card" data-tracking-index="${index}">
         <summary class="journey-card-summary" aria-label="Bekijk details van reis ${index + 1}">
           <div class="journey-card-top">
             <span class="journey-number">REIS ${index + 1}</span>
@@ -2028,6 +2620,7 @@ q.set('pedestrianSpeed', '1.5');
           </div>
         </summary>
         <div class="journey-detail-body">
+          ${trackingPanel}
           <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Realtime alleen waar bevestigd</span></div>
           ${legs.map(renderLeg).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}
         </div>
@@ -2040,6 +2633,7 @@ q.set('pedestrianSpeed', '1.5');
       cards +
       renderAlerts(data.openovAlerts || []) +
       `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted">${esc(diagnosticPlanStatus)}</p>${feedInfo}${renderRealtimeLegend()}</div></details>`;
+    bindLiveJourneyCards();
     $('journeys').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   } catch (error) {

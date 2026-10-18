@@ -13,6 +13,7 @@ on:
       - assistant/metro-kv78-time-crossmatch-clean-20261018
       - assistant/metro-resource-cache-prune-20261018
       - assistant/kv78-keep-late-predictions-20261018
+      - assistant/live-vehicle-map-20261018
   workflow_dispatch:
 
 permissions:
@@ -77,6 +78,9 @@ jobs:
 
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
+
+      - name: Exact live vehicle map matching regression tests
+        run: node scripts/vehicle-map-selftest.mjs
 
       - name: OVAPI comparison tests for tram and metro
         run: npm run ovapi:match-selftest
