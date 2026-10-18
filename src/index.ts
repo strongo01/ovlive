@@ -461,7 +461,7 @@ function corsHeaders(origin: string | null) {
   // Same-origin frontend is the intended production deployment. CORS is deliberately
   // not wildcard-enabled to avoid turning this Worker into a public open proxy.
   const headers: Record<string, string> = {
-    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "content-type",
     "vary": "Origin"
   };
