@@ -22,7 +22,8 @@
     "api:rate-limit-selftest": "node scripts/api-rate-limit-selftest.mjs",
     "ndov:autocollect-safety-selftest": "node scripts/ndov-autocollect-safety-selftest.mjs",
     "ndov:validate-assets": "node scripts/validate-realtime-assets.mjs",
-    "ndov:prediction-selftest": "node scripts/ndov-prediction-selftest.mjs"
+    "ndov:prediction-selftest": "node scripts/ndov-prediction-selftest.mjs",
+    "ndov:metro-kv78-fallback-selftest": "node scripts/ndov-metro-kv78-fallback-selftest.mjs"
   },
   "dependencies": {
     "gtfs-realtime-bindings": "^1.1.1"
