@@ -1274,6 +1274,16 @@ function normalizeStopPlaceIdentity(value) {
   return text || null;
 }
 
+function normalizeExpectedQuayName(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^[^,]+,\\s*/, "")
+    .normalize("NFD")
+    .replace(/[\\u0300-\\u036f]/g, "")
+    .toLocaleLowerCase("nl-NL")
+    .replace(/\\s+/g, " ");
+}
+
 function normalizeStopSide(value) {
   return String(value ?? "").trim().toUpperCase()
     .replace(/^(?:PERRON|PLATFORM|HALTEZIJDE)\s*/i, "")
@@ -1434,6 +1444,9 @@ function resolveKv78StopAssignment(row, context) {
   const key = `${owner}|${code}`;
   const records = index?.assignments?.[key];
   if (!Array.isArray(records) || !records.length) {
+    if (context?.requireOfficialStopMatch) {
+      return { matched: false, reason: "official_psa_mapping_missing" };
+    }
     return { matched: true, assignment: null, status: "time_only_unverified", matchMethod: "unique-scheduled-time-only (no PSA mapping)" };
   }
   const active = records.filter((record) => assignmentIsActive(record, context?.operationDate));
@@ -1443,6 +1456,22 @@ function resolveKv78StopAssignment(row, context) {
     expectedStop?.parentId ?? expectedStop?.parentStation ?? expectedStop?.stopPlaceRef ?? expectedStop?.stopPlaceCode,
   );
   if (!expectedPlace) {
+    const expectedName = normalizeExpectedQuayName(expectedStop?.name ?? expectedStop?.stopName ?? expectedStop?.description);
+    const sameQuayName = expectedName
+      ? active.filter((record) => normalizeExpectedQuayName(record?.quayName) === expectedName)
+      : [];
+    const distinctQuays = new Set(sameQuayName.map((record) => record.quayRef || record.quayCode || "")).size;
+    if (context?.allowQuayNameFallback && expectedName && sameQuayName.length && distinctQuays === 1) {
+      return {
+        matched: true,
+        assignment: sameQuayName[0],
+        status: "confirmed_quay_name",
+        matchMethod: "exact official PSA/CHB quay name + scheduled time (planned StopPlace unavailable)",
+      };
+    }
+    if (context?.requireOfficialStopMatch) {
+      return { matched: false, reason: "official_psa_quay_name_mismatch" };
+    }
     return { matched: true, assignment: null, status: "time_only_unverified", matchMethod: "unique-scheduled-time-only (planned parent station unavailable)" };
   }
   const samePlace = active.filter((record) => normalizeStopPlaceIdentity(
