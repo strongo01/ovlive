@@ -162,7 +162,7 @@ async function inspectExactOpenovSource(leg) {
   if (!isOpenovLeg(leg)) return null;
   const routeId = normalizeId(leg.routeId ?? leg.route?.id);
   const tripId = String(leg.tripId ?? leg.trip?.id ?? "");
-  const kinds = ["tripUpdates", "vehiclePositions"];
+  const kinds = ["tripUpdates", "trainUpdates", "vehiclePositions"];
   const result = {};
   for (const kind of kinds) {
     const url = new URL("/api/realtime", baseUrl);
@@ -181,7 +181,7 @@ async function inspectExactOpenovSource(leg) {
         matchingCount: data.matchingCount ?? data.entityCount ?? null,
         returnedCount: data.returnedCount ?? (data.entities ?? []).length,
         entities: (data.entities ?? []).slice(0, 3).map(entity =>
-          kind === "tripUpdates"
+          kind !== "vehiclePositions"
             ? tripUpdateSummary(entity, leg)
             : {
                 tripId: entity.tripId ?? null,
@@ -254,6 +254,17 @@ async function runScenario(scenario) {
       expectedModeLegCount: matchingModeLegs.length,
       modeCoverage: matchingModeLegs.length ? "route_found" : "no_matching_mode_leg",
       openovRealtimeMeta: plan.openovRealtimeMeta ?? null,
+      nsRealtimeMeta: plan.nsRealtimeMeta ? {
+        status: plan.nsRealtimeMeta.status ?? null,
+        candidateLegCount: plan.nsRealtimeMeta.candidateLegCount ?? null,
+        matchedLegCount: plan.nsRealtimeMeta.matchedLegCount ?? null,
+        departureDeviationKnownLegCount: plan.nsRealtimeMeta.departureDeviationKnownLegCount ?? null,
+        arrivalDeviationKnownLegCount: plan.nsRealtimeMeta.arrivalDeviationKnownLegCount ?? null,
+        unknownLegCount: plan.nsRealtimeMeta.unknownLegCount ?? null,
+        stationLookupSource: plan.nsRealtimeMeta.stationLookupSource ?? null,
+        stationListError: plan.nsRealtimeMeta.stationListError ?? null,
+        message: plan.nsRealtimeMeta.message ?? null,
+      } : null,
       ndovRealtimeMeta: plan.ndovRealtimeMeta ? {
         kv6MatchedLegCount: plan.ndovRealtimeMeta.kv6MatchedLegCount ?? null,
         kv6DelayLegCount: plan.ndovRealtimeMeta.kv6DelayLegCount ?? null,
@@ -301,6 +312,7 @@ console.log(JSON.stringify({
     openovExactSourceRecords: result.exactOpenovSourceEvidence
       ? {
           tripUpdates: result.exactOpenovSourceEvidence.tripUpdates?.matchingCount ?? null,
+          trainUpdates: result.exactOpenovSourceEvidence.trainUpdates?.matchingCount ?? null,
           vehiclePositions: result.exactOpenovSourceEvidence.vehiclePositions?.matchingCount ?? null,
         }
       : null,
