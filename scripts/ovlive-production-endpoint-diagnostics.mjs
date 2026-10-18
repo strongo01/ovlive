@@ -141,6 +141,41 @@ async function main() {
       error: data?.error ?? result?.error ?? null,
     }];
   }));
+  // Also sample records for the routes themselves. Exact-trip queries alone cannot
+  // distinguish "this future trip has not been published yet" from "the feed has
+  // no usable records for the selected routes". These are bounded read-only calls.
+  const openovRouteIds = [...new Set(openovLegs
+    .map((leg) => normalizeOpenovId(leg.routeId ?? leg.route?.id))
+    .filter(Boolean))];
+  const routeLevelFeedResults = await Promise.all(["tripUpdates", "vehiclePositions"].map(async (kind) => {
+    if (!openovRouteIds.length) return { kind, result: null };
+    const query = new URLSearchParams({
+      kind,
+      routeId: openovRouteIds.join(","),
+      limit: "30",
+    });
+    const result = await get("/api/realtime?" + query.toString(), 45000);
+    return { kind, result };
+  }));
+  const routeLevelSourceEvidence = {
+    checkedRouteIds: openovRouteIds,
+    feeds: Object.fromEntries(routeLevelFeedResults.map(({ kind, result }) => {
+      const data = result?.json;
+      const records = Array.isArray(data?.entities) ? data.entities : [];
+      return [kind, {
+        httpStatus: result?.status ?? null,
+        ok: data?.ok === true,
+        freshness: data?.freshness ?? null,
+        ageSeconds: data?.ageSeconds ?? null,
+        feedTimestamp: data?.feedTimestamp ?? null,
+        matchingCount: data?.matchingCount ?? null,
+        returnedCount: data?.returnedCount ?? records.length,
+        sampleRecords: records.slice(0, 10).map(summarizeSourceRecord),
+        error: data?.error ?? result?.error ?? null,
+      }];
+    })),
+  };
+
   const exactOpenovSourceEvidence = {
     requestedPlanTime,
     auditStartedAt: new Date(auditStartedMs).toISOString(),
@@ -272,6 +307,8 @@ async function main() {
   // Print this section separately so it is easy to find in long Actions logs.
   console.log("=== EXACT OPENOV SOURCE EVIDENCE (SEARCH THIS HEADING) ===");
   console.log(JSON.stringify(exactOpenovSourceEvidence, null, 2));
+  console.log("=== OPENOV ROUTE-LEVEL SOURCE EVIDENCE (SEARCH THIS HEADING) ===");
+  console.log(JSON.stringify(routeLevelSourceEvidence, null, 2));
 
   const manifests = [
     "/ndov-openov-route-crosswalk/manifest.json",
