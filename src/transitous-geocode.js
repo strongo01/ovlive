@@ -85,6 +85,22 @@ function isMapTransportStop(feature) {
   return /(bus_stop|tram_stop|stop_position|platform|station|public_transport|transit_stop)/.test(description);
 }
 
+function sameStopName(mapName, transitousName) {
+  const left = normalizeName(mapName);
+  const right = normalizeName(transitousName);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  // Some Transitous geocoder labels prefix a stop name with its city, e.g.
+  // "Utrecht, Klifrakplantsoen", while the map geocoder calls it
+  // "Klifrakplantsoen". Avoid showing the same stop twice, but don't merge
+  // short generic names such as "Centraal" with unrelated locations.
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length <= right.length ? right : left;
+  if (shorter.length < 10) return false;
+  return longer.endsWith(" " + shorter) || longer.startsWith(shorter + " ");
+}
+
 /**
  * Put real Transitous stops first. Keep address/POI coordinate search working,
  * but remove duplicate OpenStreetMap stop pins by exact normalized stop name
@@ -103,13 +119,13 @@ export function mergeTransitousAndMapFeatureCollections(transitousData, mapData)
         feature?.properties && Array.isArray(feature?.geometry?.coordinates)
       )
     : [];
-  const transitousStopNames = new Set(
-    transitousFeatures.map(feature => normalizeName(feature.properties.name)).filter(Boolean)
-  );
+  const transitousStopNames = transitousFeatures
+    .map(feature => feature.properties.name)
+    .filter(Boolean);
   const remainingMapFeatures = mapFeatures.filter(feature => {
     if (!isMapTransportStop(feature)) return true;
-    const name = normalizeName(feature.properties?.name);
-    return !name || !transitousStopNames.has(name);
+    const name = feature.properties?.name;
+    return !name || !transitousStopNames.some(stopName => sameStopName(name, stopName));
   });
   return {
     type: "FeatureCollection",
