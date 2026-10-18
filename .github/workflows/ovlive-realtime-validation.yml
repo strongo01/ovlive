@@ -147,3 +147,9 @@ jobs:
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/metro-kv6-production-diagnostic.mjs
+
+      - name: Compare live bus, tram, metro and train realtime coverage
+        if: github.ref == 'refs/heads/assistant/metro-kv6-production-diagnostic-20261018'
+        env:
+          OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
+        run: node scripts/multimode-live-coverage-diagnostic.mjs
