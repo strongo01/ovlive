@@ -1679,6 +1679,20 @@ q.set('pedestrianSpeed', '1.5');
           (nsMeta.stationLookupSource === 'builtin_fallback'
             ? ` NS-stationslijst: ${nsMeta.stationListError || 'onbekende fout'}; lokale reserve-stationcodes gebruikt.`
             : '');
+    const kv6Lookup = data.ndovRealtimeMeta?.kv6LookupDiagnostics;
+    const kv6UnmatchedSamples = Array.isArray(kv6Lookup?.unmatchedIdentitySamples)
+      ? kv6Lookup.unmatchedIdentitySamples.filter((identity) => typeof identity === 'string').slice(0, 3)
+      : [];
+    const kv6LookupState = kv6Lookup?.lookupCompleted === true
+      ? 'voltooid'
+      : kv6Lookup?.error
+        ? 'mislukt'
+        : 'onbekend';
+    const kv6LookupSummary = kv6Lookup
+      ? ` KV6-lookup ${kv6LookupState}: ${kv6Lookup.requestedIdentityCount ?? 'onbekend'} ritidentiteiten aangevraagd; ${kv6Lookup.returnedExactEventCount ?? 'onbekend'} exacte events terug; ${kv6Lookup.freshExactMatchCount ?? 0} verse exacte matches; ${kv6Lookup.unmatchedIdentityCount ?? 0} zonder exacte match` +
+        (kv6UnmatchedSamples.length ? `; voorbeelden: ${kv6UnmatchedSamples.join(', ')}` : '') +
+        (kv6Lookup.error ? `; fout: ${String(kv6Lookup.error).slice(0, 160)}` : '') + '.'
+      : '';
     if (meta?.status === 'enrichment_failed') {
       $('planStatus').textContent =
         `Reisplanner klaar · realtimeverwerking mislukt. ` +
@@ -1692,8 +1706,9 @@ q.set('pedestrianSpeed', '1.5');
         `${meta.noPredictionLegCount ?? meta.unknownLegCount ?? 0} zonder bruikbare halteprognose. ` +
         `Storingsmeldingen: ${(data.openovAlerts || []).length}.` +
         (data.ndovRealtimeMeta
-          ? ` NDOV KV6: ${data.ndovRealtimeMeta.kv6MatchedLegCount ?? 0} live ritmatches (${data.ndovRealtimeMeta.kv6DelayLegCount ?? 0} met vertraging); KV78: ${data.ndovRealtimeMeta.kv78DataLegCount ?? 0} reisdelen met haltegegevens (${data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0} met bevestigde PSA/CHB-halte, ${Math.max(0, (data.ndovRealtimeMeta.kv78DataLegCount ?? 0) - (data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0))} zonder bevestigde halte-match; ${data.ndovRealtimeMeta.kv78VehicleFallbackLegCount ?? 0} via waargenomen voertuig + halte/tijd gekoppeld zonder exacte NDOV-rit-ID; ${data.ndovRealtimeMeta.kv78DelayLegCount ?? 0} met gemelde vertraging); KV17: ${data.ndovRealtimeMeta.cancelledLegCount ?? 0} exacte annuleringen.`
+          ? ` NDOV KV6: ${data.ndovRealtimeMeta.kv6MatchedLegCount ?? 0} live ritmatches (${data.ndovRealtimeMeta.kv6DelayLegCount ?? 0} met vertraging); KV78: ${data.ndovRealtimeMeta.kv78DataLegCount ?? 0} reisdelen met haltegegevens (${data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0} met bevestigde PSA/CHB-station (StopPlace), ${Math.max(0, (data.ndovRealtimeMeta.kv78DataLegCount ?? 0) - (data.ndovRealtimeMeta.kv78ConfirmedStopLegCount ?? 0))} zonder bevestigde PSA/CHB-stationmatch; ${data.ndovRealtimeMeta.kv78VehicleFallbackLegCount ?? 0} via waargenomen voertuig + halte/tijd gekoppeld zonder exacte NDOV-rit-ID; ${data.ndovRealtimeMeta.kv78DelayLegCount ?? 0} met gemelde vertraging); KV17: ${data.ndovRealtimeMeta.cancelledLegCount ?? 0} exacte annuleringen.`
           : ' NDOV-status niet ontvangen.') +
+        kv6LookupSummary +
         nsSummary;
     } else {
       $('planStatus').textContent =
