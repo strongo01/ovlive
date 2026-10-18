@@ -14,6 +14,13 @@ assert.deepEqual(selectCrosswalkShardNumbers([4, 3], 0), []);
 assert.match(planCancellationSource, /MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 2/);
 assert.match(planCancellationSource, /MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 2/);
 assert.match(planCancellationSource, /AMSTERDAM_CLOCK_FORMATTER\.formatToParts/);
+assert.match(planCancellationSource, /for \(const key of validKeys\) \{\s*if \(stopAssignmentShardNumber\(key, shardCount\) !== shardNumber\) continue;\s*const records = shard\?\.assignments\?\.\[key\]/,
+  'stop-assignment loading must project only the requested stop keys instead of copying every mapping in a large shard');
+assert.doesNotMatch(planCancellationSource, /Object\.assign\(assignments, shard\?\.assignments \?\? \{\}\)/,
+  'plan-local stop assignment maps must not duplicate whole parsed asset shards');
+assert.match(planCancellationSource, /for \(const key of keys\) \{\s*if \(openovStopPlaceShardNumber\(key, shardCount\) !== shardNumber\) continue;\s*const mapping = shard\?\.stopPlaces\?\.\[key\]/,
+  'OpenOV stop-place resolution must retain only stop mappings requested by the current plan');
+
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
 assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 8,
