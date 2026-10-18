@@ -129,6 +129,7 @@ jobs:
             exit 1
           fi
 
+          OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/transitous-geocode-live-validation.mjs
           OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/openov-live-plan-validation.mjs
 
       - name: Actual deployed OVLive production endpoint diagnostic
