@@ -43,9 +43,15 @@ async function verifyStopSearch(query, expectedStopName) {
   assert.equal(body.features[0]?.properties?.isTransitousStop, true,
     "Native Transitous stop suggestions must be ranked before ordinary map locations");
   console.log("PASS: " + expectedStopName + " is returned as a native Transitous stop ID " +
-    stop.properties.transitousId + " (" + (stop.properties.name || expectedStopName) + ")");
+    stop.properties.transitousId + " (" + (stop.properties.name || expectedStopName) + ")" +
+    (matchingStops.length > 1
+      ? "; same-name native stops: " + matchingStops.map(item =>
+          item.properties.transitousId + " modes=" + JSON.stringify(item.properties.modes || [])
+        ).join(" | ")
+      : ""));
 }
 
 await verifyStopSearch("Klifrakplantsoen", "Klifrakplantsoen");
+await verifyStopSearch("Klifrakplantsoen, Langerakbaan, 3544 RR, Utrecht, Utrecht", "Klifrakplantsoen");
 await verifyStopSearch("Taagdreef", "Taagdreef");
 console.log("All live Transitous stop geocoding checks passed.");
