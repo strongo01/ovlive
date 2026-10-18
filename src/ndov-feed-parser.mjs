@@ -11,6 +11,32 @@ function clean(value) {
   return v;
 }
 
+/**
+ * Retain the timestamp for the last actual Dutch RD coordinate pair.
+ * A later KV6 message may update activity/punctuality without containing
+ * new coordinates; it must not make an old position look newly observed.
+ */
+export function mergeKv6PositionMetadata(previous, event, receivedAt) {
+  const x = Number(event?.rdX);
+  const y = Number(event?.rdY);
+  const hasCurrentDutchRdPosition =
+    event?.rdX !== null && event?.rdX !== undefined && String(event.rdX).trim() !== "" &&
+    event?.rdY !== null && event?.rdY !== undefined && String(event.rdY).trim() !== "" &&
+    Number.isFinite(x) && Number.isFinite(y) &&
+    x >= 0 && x <= 300000 && y >= 300000 && y <= 650000;
+
+  return {
+    rdX: hasCurrentDutchRdPosition ? event.rdX : (previous?.rdX ?? null),
+    rdY: hasCurrentDutchRdPosition ? event.rdY : (previous?.rdY ?? null),
+    positionTimestamp: hasCurrentDutchRdPosition
+      ? (clean(event?.timestamp) ?? receivedAt)
+      : (previous?.positionTimestamp ?? null),
+    positionReceivedAt: hasCurrentDutchRdPosition
+      ? receivedAt
+      : (previous?.positionReceivedAt ?? null),
+  };
+}
+
 function secondsOfDay(v) {
   const s = clean(v);
   if (!s || !/^\d{1,3}:\d{2}:\d{2}$/.test(s)) return null;
