@@ -288,4 +288,16 @@ assert.equal(ovapiPanelSource.includes("!== 'BUS'"), false,
   "OVAPI comparison panel must not retain the old bus-only filter");
 console.log("PASS: OVAPI comparison panel accepts tram/metro and labels them correctly");
 
+assert.ok(html.includes("kv6LookupDiagnostics") &&
+  html.includes("returnedExactEventCount") &&
+  html.includes("unmatchedIdentitySamples") &&
+  html.includes("KV6-lookup") &&
+  html.includes("verse exacte matches"),
+  "planner summary must expose bounded KV6 lookup diagnostics needed to investigate zero exact metro matches");
+assert.ok(html.includes("met bevestigde PSA/CHB-station (StopPlace)") &&
+  html.includes("zonder bevestigde PSA/CHB-stationmatch"),
+  "planner summary must distinguish station-level StopPlace confirmation from an exact quay/platform match");
+
+console.log("PASS: planner summary exposes bounded KV6 lookup diagnostics");
+console.log("PASS: KV78 summary labels StopPlace confirmation accurately");
 console.log("All public UI JavaScript checks passed.");
