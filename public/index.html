@@ -2401,11 +2401,6 @@ q.set('pedestrianSpeed', '1.5');
     }
 
     const diagnosticPlanStatus = $('planStatus').textContent;
-    $('planStatus').textContent = meta?.status === 'enrichment_failed'
-      ? 'Reisopties gevonden, maar de realtimecontrole kon niet volledig worden afgerond. Onbevestigde tijden worden niet als realtime getoond.'
-      : `${validItineraryCandidates.length} bruikbare reisopties gevonden` +
-        (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
-        '. Tik op een reis voor alle haltes en realtime-informatie.';
 
     const feedInfo = meta?.feeds
       ? `<div class="muted">Realtimefeeds: ${
@@ -2444,6 +2439,14 @@ q.set('pedestrianSpeed', '1.5');
       .length;
     const validItineraryCandidates = itineraryCandidates
       .filter(item => !item.chronologyIssue);
+
+    // Render pas na initialisatie van de kandidaatverzamelingen; eerder lezen
+    // veroorzaakt een Temporal Dead Zone-fout en breekt de hele reisplanner.
+    $('planStatus').textContent = meta?.status === 'enrichment_failed'
+      ? 'Reisopties gevonden, maar de realtimecontrole kon niet volledig worden afgerond. Onbevestigde tijden worden niet als realtime getoond.'
+      : `${validItineraryCandidates.length} bruikbare reisopties gevonden` +
+        (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
+        '. Tik op een reis voor alle haltes en realtime-informatie.';
 
     if (validItineraryCandidates.length === 0) {
       $('journeys').innerHTML =
