@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue, selectCachedCrosswalkShardNumbers } from '../src/ndov-plan-cancellation.js';
+import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue, selectCachedCrosswalkShardNumbers, prioritizeKv78AssignmentCandidateRows, matchKv78RowByScheduleTime } from '../src/ndov-plan-cancellation.js';
 
 assert.equal(openovTripStartBucket('20261011_11:59_nl-OpenOV_390000001'), '00');
 assert.equal(openovTripStartBucket('20261011_12:00_nl-OpenOV_390000001'), '12');
@@ -41,6 +41,100 @@ console.log('PASS: service-day trip start selects the correct 00/12/24 route buc
   console.log("PASS: stop-crosswalk selection reuses cached shards and rotates to missing shards");
 }
 
+// Prioritize the best-matching rows for both endpoints before nearby stops.
+// With a two-new-shard budget, the origin and destination keys must not be
+// displaced by earlier-in-array candidates 70 seconds away.
+{
+  const receivedAt = new Date().toISOString();
+  const row = (stopCode, clock) => ({
+    dataOwnerCode: "GVB",
+    operationDate: "2026-10-18",
+    linePlanningNumber: "52",
+    journeyNumber: "88775",
+    userStopCode: stopCode,
+    targetDepartureTime: clock,
+    targetArrivalTime: clock,
+    receivedAt,
+  });
+  const result = prioritizeKv78AssignmentCandidateRows([{
+    item: { leg: {
+      from: { departure: "2026-10-18T10:28:00.000Z" },
+      to: { arrival: "2026-10-18T10:38:00.000Z" },
+    } },
+    rows: [
+      row("09599", "12:26:50"),
+      row("09575", "12:28:00"),
+      row("09586", "12:36:50"),
+      row("09585", "12:38:00"),
+    ],
+  }]);
+  assert.deepEqual(
+    result.map((candidate) => `${candidate.dataOwnerCode}|${candidate.userStopCode}`),
+    ["GVB|09575", "GVB|09585", "GVB|09599", "GVB|09586"],
+    "best departure and arrival stops must be loaded before less likely nearby stops",
+  );
+  console.log("PASS: KV78 crosswalk priority selects both endpoint stops before nearby candidates");
+}
+
+// A stop whose PSA/CHB shard was not loaded can only remain a time-based
+// diagnostic; a known conflicting StopPlace must still be rejected. This keeps
+// useful exact-trip/time data visible without ever claiming platform confirmation.
+{
+  const receivedAt = new Date().toISOString();
+  const row = (stopCode, targetTime) => ({
+    dataOwnerCode: "GVB",
+    operationDate: "2026-10-18",
+    linePlanningNumber: "52",
+    journeyNumber: "88775",
+    userStopCode: stopCode,
+    targetDepartureTime: targetTime,
+    receivedAt,
+  });
+  const expectedStop = { parentStation: "NL:S:30009585" };
+  const partialIndex = {
+    shardCount: 16,
+    requestedShardNumbers: [3, 4],
+    loadedShardNumbers: [4],
+    assignments: {
+      "GVB|09575": [{ stopPlaceCode: "NL:S:30009575", stopSideCode: "A" }],
+    },
+  };
+  const unverifiedUnloadedShard = matchKv78RowByScheduleTime(
+    [row("09585", "12:38:00")],
+    "2026-10-18T10:38:00.000Z",
+    "targetDepartureTime",
+    180,
+    { expectedStop, assignmentIndex: partialIndex, operationDate: "2026-10-18" },
+  );
+  assert.equal(unverifiedUnloadedShard?.stopAssignmentStatus, "time_only_unverified",
+    "an unselected shard can supply diagnostic exact-trip/time data, but cannot imply stop confirmation");
+
+  const knownWrongStop = matchKv78RowByScheduleTime(
+    [row("09575", "12:38:00")],
+    "2026-10-18T10:38:00.000Z",
+    "targetDepartureTime",
+    180,
+    { expectedStop, assignmentIndex: partialIndex, operationDate: "2026-10-18" },
+  );
+  assert.equal(knownWrongStop, null,
+    "a loaded PSA/CHB assignment to another StopPlace must still be rejected");
+
+  const loadedButUnmapped = matchKv78RowByScheduleTime(
+    [row("09585", "12:38:00")],
+    "2026-10-18T10:38:00.000Z",
+    "targetDepartureTime",
+    180,
+    { expectedStop, assignmentIndex: {
+      shardCount: 16,
+      requestedShardNumbers: [3],
+      loadedShardNumbers: [3],
+      assignments: {},
+    }, operationDate: "2026-10-18" },
+  );
+  assert.equal(loadedButUnmapped?.stopAssignmentStatus, "time_only_unverified",
+    "a genuinely unmapped stop in a loaded shard also remains low-confidence");
+  console.log("PASS: partial or missing PSA/CHB mappings remain low-confidence; known wrong-stop matches are rejected");
+}
 const patterns = [{
   routeId: '146903', realtimeTripId: 'CXX:U073:7054', headsign: 'Maarssenbroek', directionId: '1',
   stops: [

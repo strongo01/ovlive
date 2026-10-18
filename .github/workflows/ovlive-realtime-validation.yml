@@ -8,6 +8,7 @@ on:
       - assistant/tram-metro-realtime-coverage-20261017
       - assistant/metro-exact-trip-id-fallback-20261018
       - assistant/metro-ui-confidence-20261018
+      - assistant/kv78-stop-crosswalk-priority-20261018
   workflow_dispatch:
 
 permissions:
