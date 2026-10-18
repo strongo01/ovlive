@@ -1,6 +1,6 @@
 import process from "node:process";
 
-const baseUrl = (process.env.OVLIVE_BASE_URL ?? "").replace(/\\/+$/, "");
+const baseUrl = (process.env.OVLIVE_BASE_URL ?? "").replace(/\/+$/, "");
 if (!baseUrl) throw new Error("OVLIVE_BASE_URL is required.");
 
 const railModes = [
