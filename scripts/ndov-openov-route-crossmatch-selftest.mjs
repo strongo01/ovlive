@@ -92,8 +92,8 @@ console.log('PASS: service-day trip start selects the correct 00/12/24 route buc
   const expectedStop = { parentStation: "NL:S:30009585" };
   const partialIndex = {
     shardCount: 16,
-    requestedShardNumbers: [3, 4],
-    loadedShardNumbers: [4],
+    requestedShardNumbers: [7, 8],
+    loadedShardNumbers: [8],
     assignments: {
       "GVB|09575": [{ stopPlaceCode: "NL:S:30009575", stopSideCode: "A" }],
     },
@@ -115,8 +115,8 @@ console.log('PASS: service-day trip start selects the correct 00/12/24 route buc
     180,
     { expectedStop, assignmentIndex: {
       shardCount: 16,
-      requestedShardNumbers: [3],
-      loadedShardNumbers: [3],
+      requestedShardNumbers: [7],
+      loadedShardNumbers: [7],
       assignments: {},
     }, operationDate: "2026-10-18" },
   );
