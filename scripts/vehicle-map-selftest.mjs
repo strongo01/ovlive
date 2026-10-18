@@ -100,13 +100,13 @@ assert.ok(html.includes('data-tracking-index="' + dollar + '{index}"'),
   "each expandable journey card must be wired to its tracking state");
 assert.ok(html.includes('kind: "vehiclePositions"'),
   "the live map must query the OpenOV vehicle-position feed");
-assert.ok(html.includes("LIVE_VEHICLE_POLL_MS = 30000"),
-  "vehicle locations should refresh every 30 seconds while details are open");
+assert.ok(html.includes("LIVE_VEHICLE_POLL_MS = 10000"),
+  "vehicle locations should refresh every 10 seconds while details are open");
 assert.ok(html.includes("map.remove()"),
   "live maps must be disposed when a new plan replaces results");
 assert.ok(html.includes('L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png"'),
   "map tiles must be served with an OpenStreetMap layer");
 assert.ok(html.includes("renderLiveJourneyStopTimeline(legs)"),
   "each journey must include a per-stop time line");
-console.log("PASS: live map markup, 30-second polling, route timeline and lifecycle are wired");
+console.log("PASS: live map markup, 10-second polling, route timeline and lifecycle are wired");
 console.log("All live vehicle map selftests passed.");
