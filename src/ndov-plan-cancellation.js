@@ -722,6 +722,39 @@ async function resolveRealtimeTripForLeg(env, item) {
         }
       }
 
+      // If the current route-pattern index has no candidate at all, try the
+      // exact GTFS-NL trip_id -> realtime_trip_id crosswalk as an identity-only
+      // fallback. This is a literal numeric trip-ID lookup, not a fuzzy match.
+      // Downstream code still requires a fresh exact KV6/KV78 observation before
+      // it can attach live status or a delay to the leg.
+      if (
+        !match.realtimeTripId &&
+        match.reason === "no_exact_route_time_stop_match" &&
+        Number(match.candidateCount ?? 0) === 0 &&
+        item?.identity?.tripId
+      ) {
+        try {
+          const exactTripEntry = await getCrosswalkEntry(env, item.identity.tripId);
+          const mappedRealtimeTripId = String(exactTripEntry?.realtimeTripId ?? "").trim();
+          const parsedIdentity = parseRealtimeTripId(mappedRealtimeTripId);
+          if (parsedIdentity) {
+            return {
+              parsed: parsedIdentity,
+              realtimeTripId: mappedRealtimeTripId,
+              source: "gtfs-nl-trip-crosswalk",
+              method: "exact GTFS-NL trip_id -> realtime_trip_id lookup; no route-pattern candidates",
+              generatedAt: exactTripEntry?.manifest?.generatedAt ?? crosswalk.generatedAt ?? null,
+              indexedRoute: true,
+              reason: "exact_numeric_trip_id_fallback",
+              candidateCount: 0,
+              candidateRealtimeTripIds: [],
+            };
+          }
+        } catch {
+          // Keep the original route-pattern miss; no approximate fallback.
+        }
+      }
+
       return {
         parsed: parseRealtimeTripId(match.realtimeTripId),
         realtimeTripId: match.realtimeTripId,
@@ -1734,12 +1767,14 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
   }
 
   let routeCrosswalkMatchedLegCount = 0;
+  let tripIdCrosswalkFallbackMatchedLegCount = 0;
   let routeCrosswalkGeneratedAt = null;
   let routeCrosswalkError = null;
   const routeCrosswalkOutcomes = [];
   const routeCrosswalkMeta = () => ({
     openovRouteCrosswalkGeneratedAt: routeCrosswalkGeneratedAt,
     routeCrosswalkMatchedLegCount,
+    tripIdCrosswalkFallbackMatchedLegCount,
     routeCrosswalkError,
     // Full compact exact identities for NS; detailed diagnostic candidates
     // remain bounded to protect the public API payload.
@@ -1771,6 +1806,9 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
         candidateRealtimeTripIds: resolution.candidateRealtimeTripIds ?? [],
         candidatePatternDetails: resolution.candidatePatternDetails ?? [],
       });
+      if (resolution.source === "gtfs-nl-trip-crosswalk") {
+        tripIdCrosswalkFallbackMatchedLegCount += 1;
+      }
       if (!resolution.parsed) {
         // Keep the failure reason attached to the affected leg. A missing or
         // stale mapping is not proof that NDOV has no live data for this trip.
