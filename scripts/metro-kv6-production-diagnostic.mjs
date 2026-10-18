@@ -303,6 +303,9 @@ async function main() {
   const kv6IdentityDiagnostics = compactComparisons(meta.kv6IdentityDiagnostics);
   const kv78IdentityDiagnostics = compactComparisons(meta.kv78IdentityDiagnostics);
   const rawOpenovFeedDiagnostic = await inspectRawOpenovFeeds(legs);
+  if (!rawOpenovFeedDiagnostic.targetTripCount) {
+    throw new Error("Raw OpenOV comparison found no parseable planned trip IDs; refusing to treat an empty comparison as source evidence.");
+  }
   const gvbLineTrips = (kv6IdentityDiagnostics?.byOwnerLine ?? [])
     .filter((item) => String(item.owner ?? "").toUpperCase() === "GVB" ||
       String(item.line ?? "").toUpperCase().includes("52"));
