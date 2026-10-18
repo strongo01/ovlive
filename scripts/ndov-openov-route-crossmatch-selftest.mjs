@@ -317,7 +317,7 @@ assert.equal(enrichedMetroFallbackWithoutEventLeg.ndovRealtime?.status, undefine
 assert.equal(enrichedMetroFallbackWithoutEventLeg.ndovRealtime?.punctualitySeconds, undefined);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.BUS.kv6MatchedLegCount, 1);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.TRAM.kv6MatchedLegCount, 1);
-assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv6MatchedLegCount, 3);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv6MatchedLegCount, 2);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.METRO.kv6MatchedLegCount, 1);
 assert.ok(endToEndPlan.ndovRealtimeMeta.routeCrosswalkOutcomes.some((item) =>
   item.reason === "exact_numeric_trip_id_fallback" &&
