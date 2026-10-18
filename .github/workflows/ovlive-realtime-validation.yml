@@ -10,6 +10,7 @@ on:
       - assistant/metro-ui-confidence-20261018
       - assistant/kv78-stop-crosswalk-priority-20261018
       - assistant/kv6-live-ui-diagnostics-20261018
+      - assistant/metro-kv78-time-crossmatch-clean-20261018
   workflow_dispatch:
 
 permissions:
@@ -56,6 +57,9 @@ jobs:
 
       - name: NDOV KV6 live regression tests
         run: npm run ndov:kv6-live-selftest
+
+      - name: Metro KV78 identity fallback regression tests
+        run: npm run ndov:metro-kv78-fallback-selftest
 
       - name: NDOV prediction regression tests
         run: npm run ndov:prediction-selftest
