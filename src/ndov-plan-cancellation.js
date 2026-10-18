@@ -1215,9 +1215,6 @@ async function getStopAssignmentIndex(env, keys = []) {
   if (!validKeys.length) {
     return {
       assignments: Object.create(null),
-      shardCount: 0,
-      requestedShardNumbers: [],
-      loadedShardNumbers: [],
       requestedShardCount: 0,
       loadedShardCount: 0,
       partial: false,
@@ -1263,8 +1260,6 @@ async function getStopAssignmentIndex(env, keys = []) {
   return {
     ...manifest,
     assignments,
-    requestedShardNumbers: shardNumbers,
-    loadedShardNumbers: selectedShardNumbers,
     requestedShardCount: shardNumbers.length,
     loadedShardCount: selectedShardNumbers.length,
     partial: selectedShardNumbers.length < shardNumbers.length,
@@ -1437,22 +1432,6 @@ function resolveKv78StopAssignment(row, context) {
   const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
   const code = String(row?.userStopCode ?? "").trim();
   const key = `${owner}|${code}`;
-  const shardCount = Number(index?.shardCount);
-  const requestedShardNumbers = index?.requestedShardNumbers;
-  const loadedShardNumbers = index?.loadedShardNumbers;
-  if (
-    Number.isInteger(shardCount) && shardCount > 0 &&
-    Array.isArray(requestedShardNumbers) &&
-    Array.isArray(loadedShardNumbers)
-  ) {
-    const neededShard = stopAssignmentShardNumber(key, shardCount);
-    if (
-      requestedShardNumbers.includes(neededShard) &&
-      !loadedShardNumbers.includes(neededShard)
-    ) {
-      return { matched: false, reason: "psa_assignment_shard_not_loaded" };
-    }
-  }
   const records = index?.assignments?.[key];
   if (!Array.isArray(records) || !records.length) {
     return { matched: true, assignment: null, status: "time_only_unverified", matchMethod: "unique-scheduled-time-only (no PSA mapping)" };
