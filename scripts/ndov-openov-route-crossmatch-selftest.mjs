@@ -187,11 +187,14 @@ const makeModeEvent = (owner, line, journey, punctualitySeconds, vehicleNumber) 
 const tramIdentity = "RIG|20261011|3|56057|0";
 const subwayIdentity = "GVB|20261011|52|66051|0";
 const metroIdentity = "GVB|20261011|50|56059|0";
+const exactTripIdFallbackIdentity = "GVB|20261011|52|88641|0";
+const exactTripIdFallbackMissingObservationIdentity = "GVB|20261011|52|88642|0";
 const modeEvents = [
   event,
   makeModeEvent("RIG", "3", "56057", 180, "2201"),
   makeModeEvent("GVB", "52", "66051", -15, "3001"),
   makeModeEvent("GVB", "50", "56059", 45, "3002"),
+  makeModeEvent("GVB", "52", "88641", 75, "3003"),
 ];
 const tramPattern = { ...patterns[0], routeId: "120024", realtimeTripId: "RIG:3:56057" };
 const subwayPattern = { ...patterns[0], routeId: "120052", realtimeTripId: "GVB:52:66051" };
@@ -206,7 +209,11 @@ const planEnv = {
     async fetch(request) {
       const url = new URL(request.url);
       assetFetchPaths.push(url.pathname);
-      if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: [] });
+      if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: ['3905'] });
+      if (url.pathname === '/ndov-trip-crosswalk/trips-3905.json') return Response.json({
+        '390511123': 'GVB:52:88641',
+        '390511124': 'GVB:52:88642',
+      });
       if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({
         generatedAt: now, serviceCalendarDateCount: 1, serviceIdsEmbedded: false,
         routes: {
@@ -266,14 +273,27 @@ const planEnv = {
     },
   },
 };
+const makeExactTripIdFallbackLeg = (sourceTripId) => ({
+  ...makeModeLeg("SUBWAY", "120052", sourceTripId),
+  // Deliberately make the static route-pattern anchors disagree. The numeric
+  // trip-ID crosswalk may still resolve identity, but it cannot itself create
+  // realtime data without the exact collector observation below.
+  tripTo: { ...leg.tripTo, scheduledArrival: "2026-10-11T14:44:00Z" },
+  to: { ...leg.to, scheduledArrival: "2026-10-11T14:44:00Z" },
+});
 const endToEndPlan = { itineraries: [{ legs: [
   { ...leg },
   makeModeLeg("TRAM", "120024", "391225407"),
   makeModeLeg("SUBWAY", "120052", "391225408"),
   makeModeLeg("METRO", "120050", "391225409"),
+  makeExactTripIdFallbackLeg("390511123"),
+  makeExactTripIdFallbackLeg("390511124"),
 ] }] };
 await applyNdovCancellationsToPlan(endToEndPlan, planEnv);
-const [enrichedLeg, enrichedTramLeg, enrichedSubwayLeg, enrichedMetroLeg] = endToEndPlan.itineraries[0].legs;
+const [
+  enrichedLeg, enrichedTramLeg, enrichedSubwayLeg, enrichedMetroLeg,
+  enrichedMetroFallbackLeg, enrichedMetroFallbackWithoutEventLeg,
+] = endToEndPlan.itineraries[0].legs;
 for (const [modeName, actualLeg, expectedIdentity, expectedDelay, expectedVehicle] of [
   ["BUS", enrichedLeg, identity, 102, "9633"],
   ["TRAM", enrichedTramLeg, tramIdentity, 180, "2201"],
@@ -286,11 +306,24 @@ for (const [modeName, actualLeg, expectedIdentity, expectedDelay, expectedVehicl
   assert.equal(actualLeg.ndovRealtime?.vehicleNumber, expectedVehicle);
 }
 assert.equal(endToEndPlan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 4);
-assert.equal(endToEndPlan.ndovRealtimeMeta.kv6MatchedLegCount, 4);
+assert.equal(endToEndPlan.ndovRealtimeMeta.tripIdCrosswalkFallbackMatchedLegCount, 2);
+assert.equal(endToEndPlan.ndovRealtimeMeta.kv6MatchedLegCount, 5);
+assert.equal(enrichedMetroFallbackLeg.ndovRealtime?.status, "kv6_live",
+  "the exact GTFS-NL trip-ID mapping may resolve identity when the route-pattern index has no candidates");
+assert.equal(enrichedMetroFallbackLeg.ndovRealtime?.identity, exactTripIdFallbackIdentity);
+assert.equal(enrichedMetroFallbackLeg.ndovRealtime?.punctualitySeconds, 75,
+  "the delay must come from the fresh exact BISON event, never the static crosswalk");
+assert.equal(enrichedMetroFallbackWithoutEventLeg.ndovRealtime?.status, undefined,
+  "an exact trip-ID mapping alone must not attach a realtime status when no exact BISON event exists");
+assert.equal(enrichedMetroFallbackWithoutEventLeg.ndovRealtime?.punctualitySeconds, undefined);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.BUS.kv6MatchedLegCount, 1);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.TRAM.kv6MatchedLegCount, 1);
-assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv6MatchedLegCount, 1);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv6MatchedLegCount, 3);
 assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.METRO.kv6MatchedLegCount, 1);
+assert.ok(endToEndPlan.ndovRealtimeMeta.routeCrosswalkOutcomes.some((item) =>
+  item.reason === "exact_numeric_trip_id_fallback" &&
+  item.realtimeTripId === "GVB:52:88641"
+), "the fallback must expose the exact resolved GVB identity in diagnostics");
 assert.ok(assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t12-0-services.json'),
   'the exact matching route shard must have its service IDs checked');
 assert.ok(!assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t12-1-services.json'),
