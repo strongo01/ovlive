@@ -9,12 +9,20 @@ const stopMatches = [
   {
     type: "STOP",
     id: "nl-OpenOV_3924329",
-    name: "Klifrakplantsoen",
+    name: "Utrecht, Klifrakplantsoen",
     lat: 52.07321,
     lon: 5.04567,
     zip: "3544 RR",
     street: "Langerakbaan",
     areas: [{ name: "Utrecht", adminLevel: 8 }],
+    modes: ["BUS"]
+  },
+  {
+    type: "STOP",
+    id: "nl-OpenOV_3924329",
+    name: "Utrecht, Klifrakplantsoen",
+    lat: 52.07321,
+    lon: 5.04567,
     modes: ["BUS"]
   },
   {
@@ -39,7 +47,7 @@ const stop = transitous.features[0];
 assert.equal(stop.properties.transitousId, "nl-OpenOV_3924329",
   "the actual Transitous stop ID must be preserved");
 assert.equal(stop.properties.isTransitousStop, true);
-assert.equal(stop.properties.name, "Klifrakplantsoen");
+assert.equal(stop.properties.name, "Utrecht, Klifrakplantsoen");
 assert.deepEqual(stop.geometry.coordinates, [5.04567, 52.07321]);
 assert.deepEqual(stop.properties.modes, ["BUS"]);
 assert.ok(stop.properties.display_name.includes("Utrecht"));
