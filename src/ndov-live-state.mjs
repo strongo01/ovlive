@@ -163,8 +163,9 @@ export function kv78RowCacheKey(row) {
 }
 
 /**
- * Evaluate schedule relevance against a single precomputed Amsterdam wall clock.
- * KV78 target times are local clock values rather than absolute instants.
+ * Evaluate schedule relevance against one precomputed Amsterdam wall clock.
+ * Both target (timetable) and expected (predicted) times are local clock values.
+ * This keeps a heavily delayed but still-current prediction in the bounded cache.
  */
 export function kv78RowScheduleInfo(
   row, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
@@ -172,9 +173,14 @@ export function kv78RowScheduleInfo(
   if (!Number.isFinite(nowSeconds)) {
     return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
   }
+  // Target times preserve timetable alignment, while expected times preserve
+  // a delayed stop that is now expected near the current clock. Keeping only the
+  // target time wrongly pruned fresh records once a delay exceeded this past window.
   const eventTimes = [
     kv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime),
     kv78ClockSeconds(row?.targetArrivalTime ?? row?.TargetArrivalTime),
+    kv78ClockSeconds(row?.expectedDepartureTime ?? row?.ExpectedDepartureTime),
+    kv78ClockSeconds(row?.expectedArrivalTime ?? row?.ExpectedArrivalTime),
   ].filter((value) => value !== null);
   if (!eventTimes.length) {
     // Unknown times are kept until capacity pressure; they cannot be ranked
@@ -207,9 +213,9 @@ export function isKv78RowScheduleRelevant(
 }
 
 /**
- * If capacity is reached, prefer stop rows closest to the current time and
- * evict unknown-time/farthest-future rows first. This is safer than FIFO, which
- * can discard a just-received near-term row before an irrelevant later run.
+ * If capacity is reached, rank by the nearest target OR expected time and
+ * evict unknown-time/farthest-away rows first. A late stop predicted for now
+ * must outrank an unrelated future stop even when its timetable time has passed.
  */
 export function selectKv78RowEvictionKeys(
   entries, limit, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,

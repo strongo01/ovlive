@@ -32,8 +32,9 @@ const FRESH_ROW_MS = 180 * 1000;
 const ROW_RETENTION_MS = FRESH_ROW_MS;
 // Periodically prune stale rows before the 30k cap forces eviction of potentially fresh rows.
 const KV78_ROW_PRUNE_INTERVAL_MS = 30 * 1000;
-// Match logic compares target stop times within +/- 180 seconds; older stop rows
-// cannot match any current/future itinerary and should not consume cache capacity.
+// Keep a fresh KV78 row when either its timetable target or its expected
+// prediction is within the time window. A large delay can put the target time
+// in the past while the expected arrival is still imminent.
 const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180;
 // Keep upcoming stop predictions up to four hours ahead; farther future rows
 // cannot serve immediate plans and otherwise crowd out trips starting sooner.
