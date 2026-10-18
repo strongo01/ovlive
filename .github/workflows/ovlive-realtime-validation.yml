@@ -6,6 +6,7 @@ on:
       - assistant/realtime-propagation-validation-20261015
       - assistant/ns-priority-subrequest-budget-20261017
       - assistant/tram-metro-realtime-coverage-20261017
+      - assistant/metro-exact-trip-id-fallback-20261018
   workflow_dispatch:
 
 permissions:
