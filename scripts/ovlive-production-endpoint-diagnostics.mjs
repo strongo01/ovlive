@@ -157,6 +157,111 @@ async function main() {
     const result = await get("/api/realtime?" + query.toString(), 45000);
     return { kind, result };
   }));
+  const routeTripTimeStopCrossCheck = openovLegs.map((leg) => {
+    const expectedRouteId = normalizeOpenovId(leg.routeId ?? leg.route?.id);
+    const expectedTripId = openovTripId(leg.tripId ?? leg.trip?.id);
+    const expectedServiceDate = String(leg.tripId ?? leg.trip?.id ?? "").match(/^(\d{8})_/)?.[1] ?? null;
+    const expectedDirection = leg.directionId ?? leg.trip?.directionId ?? null;
+    const fromStopId = normalizeOpenovId(leg.from?.stopId ?? leg.from?.id);
+    const toStopId = normalizeOpenovId(leg.to?.stopId ?? leg.to?.id);
+    const plannedDeparture = plannedEndpoint(leg, "departure");
+    const plannedDepartureSeconds = epochSeconds(plannedDeparture);
+    const tripFeedResult = routeLevelFeedResults.find(({ kind }) => kind === "tripUpdates")?.result;
+    const tripFeedData = tripFeedResult?.json;
+    const allRecords = Array.isArray(tripFeedData?.entities) ? tripFeedData.entities : [];
+    const routeRecords = allRecords.filter((record) =>
+      normalizeOpenovId(record?.routeId) === expectedRouteId
+    );
+    const dateRecords = routeRecords.filter((record) =>
+      String(record?.startDate ?? "") === expectedServiceDate
+    );
+    const directionRecords = dateRecords.filter((record) =>
+      expectedDirection == null ||
+      record?.directionId == null ||
+      String(record.directionId) === String(expectedDirection)
+    );
+    const normalizedClock = (value) => {
+      const match = String(value ?? "").match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+      return match ? match[1].padStart(2, "0") + ":" + match[2] + ":" + (match[3] ?? "00") : null;
+    };
+    const candidates = directionRecords.map((record) => {
+      const stopUpdates = Array.isArray(record?.stopUpdates) ? record.stopUpdates : [];
+      const stopIds = stopUpdates.map((stop) => normalizeOpenovId(stop?.stopId)).filter(Boolean);
+      const fromIndex = fromStopId ? stopIds.indexOf(fromStopId) : -1;
+      const toIndex = toStopId ? stopIds.indexOf(toStopId) : -1;
+      const fromUpdate = fromIndex >= 0 ? stopUpdates[fromIndex] : null;
+      const events = [];
+      for (const kind of ["departure", "arrival"]) {
+        const time = fromUpdate?.[kind + "Time"];
+        if (typeof time !== "number" || !Number.isFinite(time)) continue;
+        const cap = kind[0].toUpperCase() + kind.slice(1);
+        const delay = fromUpdate?.["effective" + cap + "DelaySeconds"] ?? fromUpdate?.[kind + "DelaySeconds"];
+        const reconstructed = typeof delay === "number" && Number.isFinite(delay);
+        events.push({
+          kind,
+          seconds: reconstructed ? time - delay : time,
+          delaySeconds: reconstructed ? delay : null,
+          reconstructed,
+        });
+      }
+      const event = events.find((candidate) => candidate.reconstructed) ?? events[0] ?? null;
+      const differenceSeconds = event && plannedDepartureSeconds != null
+        ? Math.round(event.seconds - plannedDepartureSeconds)
+        : null;
+      const toleranceSeconds = event?.reconstructed ? 180 : 300;
+      const orderedStops = fromIndex >= 0 && (toIndex < 0 || toIndex > fromIndex);
+      return {
+        tripId: record?.tripId ?? null,
+        startDate: record?.startDate ?? null,
+        startTime: record?.startTime ?? null,
+        normalizedStartTime: normalizedClock(record?.startTime),
+        directionId: record?.directionId ?? null,
+        scheduleRelationship: record?.scheduleRelationship ?? null,
+        stopUpdateCount: stopUpdates.length,
+        fromStopPresent: fromIndex >= 0,
+        toStopPresent: toIndex >= 0,
+        fromStopIndex: fromIndex,
+        toStopIndex: toIndex,
+        orderedStops,
+        fromStopEventKind: event?.kind ?? null,
+        sourceDelaySeconds: event?.delaySeconds ?? null,
+        reconstructedOrReportedEventTime: event ? new Date(event.seconds * 1000).toISOString() : null,
+        differenceFromPlannedDepartureSeconds: differenceSeconds,
+        candidateToleranceSeconds: event ? toleranceSeconds : null,
+        withinTimeTolerance: differenceSeconds != null && Math.abs(differenceSeconds) <= toleranceSeconds,
+        explicitCancellation: /CANCEL|DELETE/i.test(String(record?.scheduleRelationship ?? "")),
+      };
+    });
+    const rankedCandidates = [...candidates].sort((a, b) => {
+      const aDistance = a.differenceFromPlannedDepartureSeconds == null ? Number.POSITIVE_INFINITY : Math.abs(a.differenceFromPlannedDepartureSeconds);
+      const bDistance = b.differenceFromPlannedDepartureSeconds == null ? Number.POSITIVE_INFINITY : Math.abs(b.differenceFromPlannedDepartureSeconds);
+      return aDistance - bDistance;
+    });
+    const boardingStopCandidates = rankedCandidates.filter((candidate) =>
+      candidate.fromStopPresent && candidate.orderedStops && candidate.differenceFromPlannedDepartureSeconds != null
+    );
+    return {
+      routeId: leg.routeId ?? leg.route?.id ?? null,
+      openovRouteId: expectedRouteId || null,
+      transitousTripId: leg.tripId ?? leg.trip?.id ?? null,
+      openovFeedTripId: expectedTripId || null,
+      serviceDate: expectedServiceDate,
+      directionId: expectedDirection,
+      fromStopId: fromStopId || null,
+      toStopId: toStopId || null,
+      plannedDeparture,
+      fullRouteRecordsReturned: routeRecords.length,
+      sameServiceDateRecordCount: dateRecords.length,
+      compatibleDirectionRecordCount: directionRecords.length,
+      recordsContainingBoardingStop: candidates.filter((candidate) => candidate.fromStopPresent).length,
+      recordsWithOrderedBoardingAndAlightingStops: candidates.filter((candidate) => candidate.fromStopPresent && candidate.orderedStops).length,
+      recordsWithBoardingEventWithinMatcherTolerance: candidates.filter((candidate) =>
+        candidate.fromStopPresent && candidate.orderedStops && candidate.withinTimeTolerance
+      ).length,
+      closestBoardingStopCandidates: boardingStopCandidates.slice(0, 6),
+    };
+  });
+
   const routeLevelSourceEvidence = {
     checkedRouteIds: openovRouteIds,
     feeds: Object.fromEntries(routeLevelFeedResults.map(({ kind, result }) => {
@@ -212,6 +317,7 @@ async function main() {
         feedMatches,
       };
     }),
+    routeTripTimeStopCrossCheck,
   };
 
   const exactOpenovSourceEvidence = {
