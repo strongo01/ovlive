@@ -596,6 +596,7 @@ async function main() {
     kv6IdentityDiagnostics: ndovMeta.kv6IdentityDiagnostics ?? null,
     kv78FeedState: ndovMeta.kv78FeedState ?? null,
     kv78FeedAgeSeconds: ndovMeta.kv78FeedAgeSeconds ?? null,
+    kv78Error: ndovMeta.kv78Error ?? null,
     kv78CollectorDiagnostics: ndovMeta.kv78CollectorDiagnostics ?? null,
     kv78IdentityDiagnostics: ndovMeta.kv78IdentityDiagnostics ?? null,
     legs: openovNdovIdentityBridge,
@@ -809,7 +810,6 @@ async function main() {
     endpoint,
     rawStopId: stop?.stopId ?? stop?.id ?? null,
     key: openovStopPlaceKey(stop?.stopId ?? stop?.id),
-    onPlanCrosswalk: stop?.ndovOpenovStopCrosswalk ?? null,
     existingStopPlace: stop?.stopPlaceCode ?? stop?.stopPlaceRef ?? stop?.parentId ?? stop?.parentStation ?? null,
   })).filter((item) => item.key);
 
@@ -825,9 +825,6 @@ async function main() {
     const shardNumber = fnv1aShardNumber(target.key, Number(openovStopPlaceManifest?.shardCount));
     const shardResult = shardNumber === null ? null : openovStopPlaceShardResults.get(shardNumber);
     const mapping = shardResult?.json?.stopPlaces?.[target.key] ?? null;
-    const plannedMapping = target.onPlanCrosswalk && typeof target.onPlanCrosswalk === "object"
-      ? target.onPlanCrosswalk
-      : null;
     const existingPlace = String(target.existingStopPlace ?? "").trim();
     const mappedPlace = String(mapping?.stopPlaceCode ?? "").trim();
     return {
@@ -843,8 +840,6 @@ async function main() {
       mappedStopPlaceCode: mapping?.stopPlaceCode ?? null,
       mappedQuayCode: mapping?.quayCode ?? null,
       mappedDistanceMeters: mapping?.distanceMeters ?? null,
-      mappingAppliedToPlan: Boolean(plannedMapping),
-      planMappingStopPlaceCode: plannedMapping?.stopPlaceCode ?? null,
       preExistingStopPlaceIdentity: target.existingStopPlace,
       possibleConflictingPlanIdentity: Boolean(mapping && existingPlace && mappedPlace && existingPlace !== mappedPlace),
     };
@@ -947,6 +942,7 @@ async function main() {
       };
     }),
     targets: openovStopPlaceTargetChecks,
+    limitation: "The public plan response does not expose which shards the runtime selected for a request. A mapping in a published shard therefore does not prove that the specific shard was loaded for that request; absence of a crosswalk annotation on a stop object is not, by itself, evidence of a bug.",
   }, null, 2));
   console.log("=== OBSERVED KV78 PSA/CHB ASSIGNMENT SHARD DIAGNOSTIC ===");
   console.log(JSON.stringify({
