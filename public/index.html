@@ -66,41 +66,123 @@
   margin-top: 0.5rem;
 }
 
+
+    /* Compacte reisresultaten: belangrijke tijden eerst, details op tik. */
+    .page-intro{max-width:720px;margin:0 0 20px}
+    #journeys{scroll-margin-top:14px}
+    .planner-help{margin:0 0 16px}
+    .location-grid{margin-bottom:10px}
+    .place-input{min-width:0}
+    .place-choice{margin-top:4px}
+    .search-options{border:1px solid var(--line);border-radius:12px;margin:10px 0 14px;overflow:hidden;background:rgba(255,255,255,.02)}
+    .search-options>summary{cursor:pointer;list-style:none;padding:11px 13px;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:10px}
+    .search-options>summary::-webkit-details-marker{display:none}
+    .search-options>summary:after{content:"＋";color:var(--accent);font-size:20px;line-height:1}
+    .search-options[open]>summary:after{content:"−"}
+    .search-options>summary span{font-weight:500;font-size:12px;color:var(--muted);text-align:right}
+    .search-options-grid{padding:12px;border-top:1px solid var(--line)}
+    .results-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:18px 0 8px}
+    .results-heading h3{margin:0;font-size:20px}
+    .results-heading span{font-size:12px;color:var(--muted)}
+    .journey-card{border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(255,255,255,.035),rgba(255,255,255,.012));margin:10px 0;overflow:hidden;transition:border-color .15s,background .15s}
+    .journey-card:hover{border-color:#596575}
+    .journey-card[open]{border-color:#7c5a3c;background:#191e24}
+    .journey-card-summary{display:block;cursor:pointer;list-style:none;padding:15px;outline-offset:-4px}
+    .journey-card-summary::-webkit-details-marker{display:none}
+    .journey-card-summary:focus-visible,.search-options>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px;border-radius:12px}
+    .journey-card-top{display:flex;align-items:center;gap:8px;min-width:0;margin-bottom:11px}
+    .journey-number{background:rgba(251,146,60,.14);border:1px solid rgba(251,146,60,.35);color:#fdba74;border-radius:7px;padding:3px 7px;font-size:11px;font-weight:800;white-space:nowrap}
+    .journey-scan-info{font-size:12px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .journey-toggle{margin-left:auto;color:var(--accent);font-size:12px;font-weight:750;white-space:nowrap}
+    .journey-toggle-open{display:none}
+    .journey-card[open] .journey-toggle-closed{display:none}
+    .journey-card[open] .journey-toggle-open{display:inline}
+    .journey-time-grid{display:grid;grid-template-columns:minmax(0,1fr) 22px minmax(0,1fr);align-items:center;gap:9px}
+    .journey-time-block{min-width:0}
+    .journey-time-label{display:block;color:var(--muted);font-size:10px;letter-spacing:.09em;font-weight:800;margin-bottom:2px}
+    .journey-big-time{display:block;font-size:clamp(22px,4vw,28px);font-variant-numeric:tabular-nums;line-height:1.15;font-weight:800;letter-spacing:-.03em}
+    .journey-endpoint{display:block;color:var(--muted);font-size:12px;line-height:1.35;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .journey-middle-arrow{text-align:center;color:var(--muted);font-size:20px}
+    .journey-card-bottom{display:flex;flex-wrap:wrap;align-items:center;gap:7px 12px;margin-top:13px}
+    .journey-meta{font-size:12px;color:var(--muted)}
+    .journey-route-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+    .journey-line-tag{display:inline-block;max-width:100%;padding:3px 8px;border-radius:7px;background:#252c34;border:1px solid #39414b;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .journey-live-tag,.journey-alert-tag{display:inline-block;border-radius:7px;padding:3px 8px;font-size:11px;font-weight:750}
+    .journey-live-tag{color:#86efac;background:rgba(34,197,94,.1);border:1px solid rgba(134,239,172,.25)}
+    .journey-alert-tag{color:#fca5a5;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3)}
+    .journey-detail-body{border-top:1px solid var(--line);padding:5px 14px 14px}
+    .journey-detail-heading{display:flex;flex-wrap:wrap;gap:5px 10px;justify-content:space-between;align-items:baseline;margin:9px 0;color:var(--muted);font-size:12px}
+    .journey-detail-heading strong{color:var(--text);font-size:14px}
+    .journey-detail-body .leg{padding:12px 0}
+    .journey-detail-body .leg:last-child{border-bottom:0}
+    .result-diagnostics{margin:18px 0 8px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+    .result-diagnostics>summary{cursor:pointer;list-style:none;padding:12px 14px;color:var(--muted);font-size:13px;font-weight:700}
+    .result-diagnostics>summary::-webkit-details-marker{display:none}
+    .result-diagnostics>summary:after{content:"＋";float:right;color:var(--accent);font-size:18px;line-height:1}
+    .result-diagnostics[open]>summary:after{content:"−"}
+    .result-diagnostics-body{padding:0 12px 12px}
+    .result-diagnostics-body .rt-legend{margin:10px 0 0}
+    @media(max-width:600px){
+      main{padding:18px 12px 40px}
+      .brand{margin-bottom:14px}
+      .page-intro{font-size:14px;margin-bottom:14px}
+      .panel{padding:13px;margin:12px 0}
+      .journey-card-summary{padding:13px}
+      .journey-big-time{font-size:25px}
+      .journey-endpoint{font-size:11px}
+      .journey-card-top{gap:6px}
+      .journey-scan-info{font-size:11px}
+      .search-options>summary{align-items:flex-start}
+    }
+
 </style>
 </head>
 <body>
 <main>
   <div class="brand"><div class="logo">OV</div><div><h1>OVLive</h1><div class="muted">Open data · reisadvies · realtime diagnose</div></div></div>
-  <p>Een testbare Cloudflare-versie van een Nederlandse OV-reisplanner. De planner gebruikt Transitous; realtimefeeds worden apart gecontroleerd. Een ontbrekende update wordt nooit als “op tijd” gepresenteerd.</p>
+  <p class="page-intro">Plan je reis in een paar stappen. Bekijk vertrek, aankomst en overstappen in één oogopslag; tik op een reis voor alle haltes en realtime-informatie.</p>
 
   <section class="panel">
     <h2>Reis plannen</h2>
-    <p class="muted">Zoek vertrek- en aankomstplek en kies het juiste resultaat. Je kunt ook latitude,longitude of een Transitous-stop-ID invoeren. Geocodering probeert eerst Nominatim (OpenStreetMap); bij een technische storing gebruikt OVLive Geoapify als reserve. De reisroute wordt berekend door Transitous. Bronnen: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a> · <a href="https://www.geoapify.com/" target="_blank" rel="noopener noreferrer">Powered by Geoapify</a>.</p>
-    <div class="grid">
-      <div><label for="from">Van (plaats, adres of halte)</label><input id="from" value="Den Haag Centraal" autocomplete="off"><button type="button" id="fromFind" class="secondary">Zoek vertrekplek</button><select id="fromChoice" aria-label="Kies vertrekplek"><option value="">Kies een gevonden plek…</option></select></div>
-      <div><label for="to">Naar (plaats, adres of halte)</label><input id="to" value="Utrecht Centraal" autocomplete="off"><button type="button" id="toFind" class="secondary">Zoek bestemming</button><select id="toChoice" aria-label="Kies bestemming"><option value="">Kies een gevonden plek…</option></select></div>
-      <div><label for="when">Vertrektijd (optioneel)</label><input id="when" type="datetime-local"></div>
-      <div class="mode-field">
-        <label>Vervoersmiddelen</label>
-        <div class="mode-picker" role="group" aria-label="Kies vervoersmiddelen">
-          <label class="mode-chip"><input type="checkbox" name="transitMode" value="train" checked><span>🚆 Trein</span></label>
-          <label class="mode-chip"><input type="checkbox" name="transitMode" value="bus" checked><span>🚌 Bus</span></label>
-          <label class="mode-chip"><input type="checkbox" name="transitMode" value="metro" checked><span>🚇 Metro</span></label>
-          <label class="mode-chip"><input type="checkbox" name="transitMode" value="tram" checked><span>🚊 Tram</span></label>
-          <label class="mode-chip"><input type="checkbox" name="transitMode" value="ferry" checked><span>⛴️ Veerpont</span></label>
+    <p class="muted planner-help">Vul vertrek en bestemming in. Zoek en selecteer een plek als er meerdere resultaten zijn. Routegegevens komen van Transitous; locatiezoeking gebruikt <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> en zo nodig <a href="https://www.geoapify.com/" target="_blank" rel="noopener noreferrer">Geoapify</a>.</p>
+    <div class="grid location-grid">
+      <div class="place-input">
+        <label for="from">Van</label>
+        <input id="from" value="Den Haag Centraal" autocomplete="off" placeholder="Vertrekplek of halte">
+        <button type="button" id="fromFind" class="secondary">Zoek vertrekplek</button>
+        <select class="place-choice" id="fromChoice" aria-label="Kies vertrekplek" hidden><option value="">Kies een gevonden plek…</option></select>
+      </div>
+      <div class="place-input">
+        <label for="to">Naar</label>
+        <input id="to" value="Utrecht Centraal" autocomplete="off" placeholder="Bestemming of halte">
+        <button type="button" id="toFind" class="secondary">Zoek bestemming</button>
+        <select class="place-choice" id="toChoice" aria-label="Kies bestemming" hidden><option value="">Kies een gevonden plek…</option></select>
+      </div>
+    </div>
+    <details class="search-options">
+      <summary>Meer reisopties <span>Vertrektijd · vervoer · lopen</span></summary>
+      <div class="grid search-options-grid">
+        <div><label for="when">Vertrektijd (optioneel)</label><input id="when" type="datetime-local"></div>
+        <div class="mode-field">
+          <label>Vervoersmiddelen</label>
+          <div class="mode-picker" role="group" aria-label="Kies vervoersmiddelen">
+            <label class="mode-chip"><input type="checkbox" name="transitMode" value="train" checked><span>🚆 Trein</span></label>
+            <label class="mode-chip"><input type="checkbox" name="transitMode" value="bus" checked><span>🚌 Bus</span></label>
+            <label class="mode-chip"><input type="checkbox" name="transitMode" value="metro" checked><span>🚇 Metro</span></label>
+            <label class="mode-chip"><input type="checkbox" name="transitMode" value="tram" checked><span>🚊 Tram</span></label>
+            <label class="mode-chip"><input type="checkbox" name="transitMode" value="ferry" checked><span>⛴️ Veerpont</span></label>
+          </div>
+          <p class="muted mode-help">Vink één of meer vervoersmiddelen aan.</p>
         </div>
-        <p class="muted mode-help">Vink één of meer vervoersmiddelen aan.</p>
-      </div>
-      <div>
-        <label for="walkingLimit">Maximaal lopen naar en vanaf OV</label>
-        <select id="walkingLimit">
-          <option value="900">15 minuten</option>
-          <option value="1800" selected>30 minuten</option>
-          <option value="2700">45 minuten</option>
-        </select>
-        <p class="muted mode-help">Geldt voor het lopen vóór de eerste rit en ná de laatste rit. Transitous kan zelf een lagere limiet afdwingen.</p>
-      </div>
-
+        <div>
+          <label for="walkingLimit">Maximaal lopen naar en vanaf OV</label>
+          <select id="walkingLimit">
+            <option value="900">15 minuten</option>
+            <option value="1800" selected>30 minuten</option>
+            <option value="2700">45 minuten</option>
+          </select>
+          <p class="muted mode-help">Geldt voor het lopen vóór de eerste rit en ná de laatste rit. Transitous kan zelf een lagere limiet afdwingen.</p>
+        </div>
         <div>
           <label for="initialWaitLimit">Maximale wachttijd vóór de eerste OV-rit</label>
           <select id="initialWaitLimit">
@@ -112,8 +194,8 @@
           </select>
           <p class="muted mode-help">Geldt alleen voor de eerste halte. OVLive kan je geplande vertrektijd vanaf het beginpunt later zetten.</p>
         </div>
-
-    </div>
+      </div>
+    </details>
     <button id="planBtn">Zoek reizen</button>
     <div id="planStatus" class="muted" aria-live="polite"></div>
     <div id="journeys"></div>
@@ -192,6 +274,7 @@ async function api(path){const r=await fetch(path);const data=await r.json().cat
 async function findPlaces(inputId, selectId, statusId) {
   const query = $(inputId).value.trim();
   const select = $(selectId);
+  select.hidden = false;
   select.innerHTML = '<option value="">Zoekresultaten laden…</option>';
   try {
     const data = await api('/api/geocode?q=' + encodeURIComponent(query));
@@ -202,9 +285,11 @@ async function findPlaces(inputId, selectId, statusId) {
       const label = [p.name, p.street, p.housenumber, p.postcode, p.city || p.locality, p.state].filter(Boolean).join(', ');
       return `<option value="${esc(coords[1] + ',' + coords[0])}" data-label="${esc(label)}">${esc(label || query)} (${esc(p.osm_value || p.type || 'plek')})</option>`;
     }).join('');
+    select.hidden = features.length === 0;
     if (features.length === 1) select.selectedIndex = 1;
     $(statusId).textContent = features.length ? `${features.length} resultaten gevonden. Kies de juiste plek.` : 'Geen plek gevonden; probeer een specifiekere naam.';
   } catch(e) {
+    select.hidden = true;
     select.innerHTML = '<option value="">Geen resultaten</option>';
     $(statusId).textContent = e.message;
   }
@@ -1720,6 +1805,11 @@ q.set('pedestrianSpeed', '1.5');
         ' Treinalternatieven apart opgehaald en vooraan getoond, omdat de eerste gemengde resultaten geen trein bevatten.';
     }
 
+    const diagnosticPlanStatus = $('planStatus').textContent;
+    $('planStatus').textContent = meta?.status === 'enrichment_failed'
+      ? 'Reisopties gevonden, maar de realtimecontrole kon niet volledig worden afgerond. Onbevestigde tijden worden niet als realtime getoond.'
+      : `${journeys.length} reisopties ontvangen. Tik op een reis voor alle haltes en realtime-informatie.`;
+
     const feedInfo = meta?.feeds
       ? `<div class="muted">Realtimefeeds: ${
           Object.entries(meta.feeds).map(([name, feed]) =>
@@ -1857,19 +1947,100 @@ q.set('pedestrianSpeed', '1.5');
 
       const transfers = Math.max(0, transitLegs.length - 1);
 
-      return `<article class="journey">
-        <strong>Reis ${index + 1}</strong>
-        <div class="journey-summary">
-          <span>Volgens routeplanning: ${esc(clock(departure))} → ${esc(clock(arrival))}</span>
-          <span>${transitLegs.length} OV-ritten · ${transfers} overstappen</span>
+      const durationMs = Date.parse(arrival || '') - Date.parse(departure || '');
+      const durationMinutes = Number.isFinite(durationMs) && durationMs >= 0
+        ? Math.round(durationMs / 60000)
+        : null;
+      const durationText = durationMinutes === null
+        ? 'Reisduur onbekend'
+        : durationMinutes >= 60
+          ? `${Math.floor(durationMinutes / 60)} u ${durationMinutes % 60} min`
+          : `${durationMinutes} min`;
+      const firstLeg = legs[0];
+      const lastLeg = legs[legs.length - 1];
+      const originName = firstLeg?.from?.name || firstLeg?.origin?.name || 'Vertrekpunt';
+      const destinationName = lastLeg?.to?.name || lastLeg?.destination?.name || 'Bestemming';
+      const routeLabels = transitLegs.map(leg => lineTitle(leg)).filter(Boolean);
+      const routeTags = routeLabels.slice(0, 3)
+        .map(label => `<span class="journey-line-tag">${esc(label)}</span>`)
+        .join('');
+      const extraRouteCount = Math.max(0, routeLabels.length - 3);
+      const hasCancelledLeg = transitLegs.some(leg =>
+        leg.cancelled === true ||
+        leg.ndovRealtime?.status === 'cancelled' ||
+        leg.openovRealtime?.status === 'cancelled' ||
+        leg.nsRealtime?.status === 'cancelled'
+      );
+      const firstTransitLeg = transitLegs[0];
+      const firstScheduledDeparture = firstTransitLeg
+        ? plannedEndpointTime(firstTransitLeg, 'departure')
+        : departure;
+      const firstDeparturePrediction = firstTransitLeg
+        ? timelineRealtimePrediction(firstTransitLeg, 'departure', firstScheduledDeparture)
+        : null;
+      let realtimeBadge = '';
+      if (hasCancelledLeg) {
+        realtimeBadge = '<span class="journey-alert-tag">⚠ Uitval gemeld — controleer details</span>';
+      } else if (firstDeparturePrediction) {
+        const scheduledMs = Date.parse(firstScheduledDeparture || '');
+        const predictedMs = Date.parse(firstDeparturePrediction.time || '');
+        const diffMinutes = Number.isFinite(scheduledMs) && Number.isFinite(predictedMs)
+          ? Math.round((predictedMs - scheduledMs) / 60000)
+          : null;
+        if (diffMinutes !== null && diffMinutes >= 1) {
+          realtimeBadge = `<span class="journey-live-tag">Vertrek +${diffMinutes} min</span>`;
+        } else if (diffMinutes !== null && diffMinutes <= -1) {
+          realtimeBadge = `<span class="journey-live-tag">Vertrek ${diffMinutes} min</span>`;
+        } else {
+          realtimeBadge = '<span class="journey-live-tag">Realtimevertrek beschikbaar</span>';
+        }
+      }
+
+      return `<details class="journey-card">
+        <summary class="journey-card-summary" aria-label="Bekijk details van reis ${index + 1}">
+          <div class="journey-card-top">
+            <span class="journey-number">REIS ${index + 1}</span>
+            <span class="journey-scan-info">${transitLegs.length} OV-rit${transitLegs.length === 1 ? '' : 'ten'}</span>
+            <span class="journey-toggle"><span class="journey-toggle-closed">Bekijk details ↓</span><span class="journey-toggle-open">Verberg details ↑</span></span>
+          </div>
+          <div class="journey-time-grid">
+            <div class="journey-time-block">
+              <span class="journey-time-label">VERTREK</span>
+              <span class="journey-big-time">${esc(clock(departure))}</span>
+              <span class="journey-endpoint" title="${esc(originName)}">${esc(originName)}</span>
+            </div>
+            <span class="journey-middle-arrow" aria-hidden="true">→</span>
+            <div class="journey-time-block">
+              <span class="journey-time-label">AANKOMST</span>
+              <span class="journey-big-time">${esc(clock(arrival))}</span>
+              <span class="journey-endpoint" title="${esc(destinationName)}">${esc(destinationName)}</span>
+            </div>
+          </div>
+          <div class="journey-card-bottom">
+            <span class="journey-meta">${esc(durationText)}</span>
+            <span class="journey-meta">·</span>
+            <span class="journey-meta">${transfers === 0 ? 'Rechtstreeks' : `${transfers} overstap${transfers === 1 ? '' : 'pen'}`}</span>
+            ${realtimeBadge ? `<span>${realtimeBadge}</span>` : ''}
+          </div>
+          <div class="journey-route-tags">
+            ${routeTags || '<span class="journey-line-tag">OV-route</span>'}
+            ${extraRouteCount ? `<span class="journey-line-tag">+${extraRouteCount} extra reisdelen</span>` : ''}
+          </div>
+        </summary>
+        <div class="journey-detail-body">
+          <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Realtime alleen waar bevestigd</span></div>
+          ${legs.map(renderLeg).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}
         </div>
-        ${legs.map(renderLeg).join('') ||
-          '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}
-      </article>`;
+      </details>`;
     }).join('');
 
     $('journeys').innerHTML =
-      feedInfo + renderRealtimeLegend() + chronologyWarningHtml + cards + renderAlerts(data.openovAlerts || []);
+      chronologyWarningHtml +
+      `<div class="results-heading"><h3>Reisopties</h3><span>Tik op een reis voor details</span></div>` +
+      cards +
+      renderAlerts(data.openovAlerts || []) +
+      `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted">${esc(diagnosticPlanStatus)}</p>${feedInfo}${renderRealtimeLegend()}</div></details>`;
+    $('journeys').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   } catch (error) {
     $('planStatus').innerHTML =
