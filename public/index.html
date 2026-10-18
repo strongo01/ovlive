@@ -238,7 +238,9 @@ function modeName(mode) {
   const names = {
     WALK: 'Lopen',
     BUS: 'Bus',
+    COACH: 'Bus',
     TRAM: 'Tram',
+    METRO: 'Metro',
     SUBWAY: 'Metro',
     RAIL: 'Trein',
     REGIONAL_RAIL: 'Trein',
@@ -361,7 +363,8 @@ function stopEventHtml(label, event, scheduledValue, options = {}) {
 
   const requiresStopConfirmation = options.requireConfirmedStopAssignment === true;
   const stopAssignmentConfirmed = !requiresStopConfirmation ||
-    String(event.stopAssignmentStatus ?? '').startsWith('confirmed_');
+    (event.stopAssignmentStatus === 'confirmed_quay_platform' &&
+      Boolean(event.stopSideCode));
   const openovTimestampMissing =
     options.sourceLabel === 'OpenOV' && options.unconfirmed === true;
   const confidenceUnconfirmed = openovTimestampMissing ||
@@ -697,6 +700,7 @@ function realtimeHtml(leg) {
   const rt = leg.ndovRealtime?.status === 'cancelled'
     ? { status: 'cancelled', freshnessNote: leg.ndovRealtime.note }
     : leg.openovRealtime;
+  const vehicleTypeLabel = String(modeName(leg.mode) || 'OV').toLocaleLowerCase('nl-NL');
   const vehiclePositionHtml = openovVehiclePositionHtml(rt);
 
   if (leg.cancelled === true || rt?.status === 'cancelled') {
@@ -731,9 +735,10 @@ function realtimeHtml(leg) {
       if (delaySeconds !== 0 || !Number.isFinite(delaySeconds)) return html;
 
       const stopAssignmentConfirmed =
-        String(event?.stopAssignmentStatus ?? '').startsWith('confirmed_');
+        event?.stopAssignmentStatus === 'confirmed_quay_platform' &&
+        Boolean(event?.stopSideCode);
       if (!stopAssignmentConfirmed) {
-        return `${html}<div class="rt-details rt-unknown">De nulafwijking hoort bij een tijdmatch zonder bevestigde PSA/CHB-halte; dit bevestigt niet dat deze halte op tijd wordt bediend.</div>`;
+        return `${html}<div class="rt-details rt-unknown">De haltezijde is niet bevestigd; deze nulafwijking bewijst daarom niet dat deze halte precies op tijd wordt bediend.</div>`;
       }
 
       // Normalize common zero-delay labels if the underlying helper emits one.
@@ -873,7 +878,7 @@ function realtimeHtml(leg) {
     const sourceConfidenceNotes = [];
     if (openovTripTimestampMissing && hasOpenovReportedZero) {
       sourceConfidenceNotes.push(
-        "OpenOV meldt 0 sec zonder timestamp per rit; dat bevestigt niet dat de bus op tijd rijdt."
+        `OpenOV meldt 0 sec zonder timestamp per rit; dat bevestigt niet dat de ${vehicleTypeLabel} op tijd rijdt.`
       );
     } else if (openovTripTimestampMissing) {
       sourceConfidenceNotes.push(
@@ -1021,7 +1026,7 @@ function realtimeHtml(leg) {
 
     return `<div class="rt-status rt-unknown">
       <strong>OpenOV · rit gekoppeld, voorspelling ontbreekt</strong>
-      <div class="rt-details">De rit is gevonden, maar er is geen bruikbare vertrek- of aankomstvoorspelling voor dit traject. De geplande tijden zijn hiermee niet realtime bevestigd. Dit betekent niet dat de bus op tijd rijdt.</div>
+      <div class="rt-details">De rit is gevonden, maar er is geen bruikbare vertrek- of aankomstvoorspelling voor dit traject. De geplande tijden zijn hiermee niet realtime bevestigd. Dit betekent niet dat de ${esc(vehicleTypeLabel)} op tijd rijdt.</div>
       ${ndovMatchNoticeHtml}
       ${rt.matchMethod ? `<div class="rt-details">Matchmethode: ${esc(rt.matchMethod)}.</div>` : ''}
       ${rt.freshnessNote ? `<div class="rt-details">${esc(rt.freshnessNote)}</div>` : ''}
@@ -1202,12 +1207,22 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
   // zonder NS-voorrang of annuleringen hierboven te omzeilen.
   const unifiedPrediction = leg.realtimePrediction;
   const unifiedEvent = unifiedPrediction?.[kind];
+  const kv78ForKind = leg.ndovRealtime?.kv78 ?? leg.ndovRealtime;
+  const kv78EventForKind = kv78ForKind?.[kind];
+  const unifiedIsKv78 = /NDOV KV78Turbo/i.test(
+    String(unifiedEvent?.source ?? unifiedPrediction?.source ?? '')
+  );
+  const unifiedKv78StopConfirmed = !unifiedIsKv78 || (
+    kv78EventForKind?.stopAssignmentStatus === 'confirmed_quay_platform' &&
+    Boolean(kv78EventForKind?.stopSideCode)
+  );
   const unifiedTimestampMissing =
     unifiedEvent?.hasPerTripTimestamp === false ||
     /rit-timestamp ontbreekt/i.test(String(unifiedEvent?.source ?? ""));
   if (
     ['available', 'partial'].includes(unifiedPrediction?.status) &&
     !unifiedTimestampMissing &&
+    unifiedKv78StopConfirmed &&
     unifiedEvent?.confidence !== 'low' &&
     unifiedEvent?.time &&
     Number.isFinite(Date.parse(unifiedEvent.time))
@@ -1228,7 +1243,8 @@ function timelineRealtimePrediction(leg, kind, scheduledTime) {
     const event = kv78[kind];
 
     const hasConfirmedKv78Stop =
-      String(event?.stopAssignmentStatus ?? '').startsWith('confirmed_');
+      event?.stopAssignmentStatus === 'confirmed_quay_platform' &&
+      Boolean(event?.stopSideCode);
     if (
       hasConfirmedKv78Stop &&
       event?.time &&
