@@ -1258,22 +1258,34 @@ async function main() {
     Number(routeLevelFeedResults.find((item) => item.kind === "tripUpdates").result.json.matchingCount ??
       routeLevelFeedResults.find((item) => item.kind === "tripUpdates").result.json.entities?.length ?? 0);
   if (cancelledTripFeedFresh && cancelledTripFeedComplete && cancelledFeedCandidates.length > 0) {
+    // Static route shards store the GTFS-NL realtimeTripId, not the OpenOV numeric
+    // trip_id. Select only a unique active pattern by route/date/start-time/direction.
     let selected = null;
+    const staticPatternChecks = [];
     for (const record of cancelledFeedCandidates.slice(0, 5)) {
       const routeKey = normalizeOpenovId(record?.routeId);
       const date = String(record?.startDate ?? "");
       const clock = String(record?.startTime ?? "");
+      const sourceStartSeconds = gtfsClockSeconds(clock);
       const clockMatch = clock.match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
       const hour = clockMatch ? Number(clockMatch[1]) : NaN;
       const bucket = Number.isFinite(hour) ? (hour >= 24 ? "24" : hour >= 12 ? "12" : "00") : null;
       const filenames = (bucket
         ? routeManifest?.routesByStartBucket?.[routeKey]?.[bucket]
         : null) ?? routeManifest?.routes?.[routeKey] ?? [];
-      if (!routeKey || !/^\d{8}$/.test(date) || !clockMatch || !Array.isArray(filenames) || !filenames.length) continue;
+      if (!routeKey || !/^\d{8}$/.test(date) || sourceStartSeconds == null ||
+          !Array.isArray(filenames) || !filenames.length) {
+        staticPatternChecks.push({ source: summarizeSourceRecord(record), candidateCount: 0, reason: "missing_route_date_start_time_or_shard" });
+        continue;
+      }
       const activeServiceIds = Array.isArray(serviceCalendar?.[date])
         ? new Set(serviceCalendar[date].map(String))
         : null;
-      if (!activeServiceIds) continue;
+      if (!activeServiceIds) {
+        staticPatternChecks.push({ source: summarizeSourceRecord(record), candidateCount: 0, reason: "service_calendar_unavailable_for_date" });
+        continue;
+      }
+      const matches = [];
       for (const filenameValue of filenames) {
         const filename = String(filenameValue ?? "");
         if (!filename || filename.includes("..") || filename.includes("/")) continue;
@@ -1286,70 +1298,86 @@ async function main() {
             shardResult.json.length !== sidecarResult.json.length) continue;
         for (let index = 0; index < shardResult.json.length; index++) {
           const pattern = shardResult.json[index];
-          const openovTripIdValue = String(pattern?.openovTripId ?? "").trim();
-          if (openovTripIdValue !== String(record?.tripId ?? "").trim()) continue;
-          const serviceIds = Array.isArray(sidecarResult.json[index])
-            ? sidecarResult.json[index].map(String)
-            : [];
-          if (!serviceIds.some((serviceId) => activeServiceIds.has(serviceId))) continue;
+          if (normalizeOpenovId(pattern?.routeId) !== routeKey) continue;
+          if (record?.directionId != null && pattern?.directionId != null &&
+              String(record.directionId) !== String(pattern.directionId)) continue;
           const stops = Array.isArray(pattern?.stops) ? pattern.stops : [];
           if (stops.length < 2) continue;
-          const parseClock = clockMatch;
-          const localWallClockMs = Date.UTC(
-            Number(date.slice(0, 4)),
-            Number(date.slice(4, 6)) - 1,
-            Number(date.slice(6, 8)),
-            Number(parseClock[1]),
-            Number(parseClock[2]),
-            Number(parseClock[3] ?? "0"),
-          );
-          let utcGuessMs = localWallClockMs;
-          for (let attempt = 0; attempt < 4; attempt++) {
-            const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
-              timeZone: "Europe/Amsterdam",
-              year: "numeric", month: "2-digit", day: "2-digit",
-              hour: "2-digit", minute: "2-digit", second: "2-digit",
-              hourCycle: "h23",
-            }).formatToParts(new Date(utcGuessMs)).map((part) => [part.type, part.value]));
-            const representedLocalMs = Date.UTC(
-              Number(parts.year), Number(parts.month) - 1, Number(parts.day),
-              Number(parts.hour), Number(parts.minute), Number(parts.second),
-            );
-            const nextGuessMs = localWallClockMs - (representedLocalMs - utcGuessMs);
-            if (nextGuessMs === utcGuessMs) break;
-            utcGuessMs = nextGuessMs;
-          }
-          selected = {
-            record,
-            routeKey,
-            date,
-            bucket,
-            filename,
-            pattern,
+          const firstTime = stops[0]?.departureTime || stops[0]?.arrivalTime || null;
+          const firstSeconds = gtfsClockSeconds(firstTime);
+          if (firstSeconds == null || Math.abs(firstSeconds - sourceStartSeconds) > 90) continue;
+          const serviceIds = Array.isArray(sidecarResult.json[index]) ? sidecarResult.json[index].map(String) : [];
+          const activeServiceMatches = serviceIds.filter((serviceId) => activeServiceIds.has(serviceId));
+          if (!activeServiceMatches.length) continue;
+          matches.push({
+            routeKey, date, bucket, filename, pattern, serviceIds, activeServiceMatches,
+            startTimeDifferenceSeconds: firstSeconds - sourceStartSeconds,
             stopIds: [
               normalizeOpenovId(stops[0]?.stopId ?? stops[0]?.id),
               normalizeOpenovId(stops[stops.length - 1]?.stopId ?? stops[stops.length - 1]?.id),
             ],
-            plannedTripStart: new Date(utcGuessMs).toISOString(),
-            activeServiceMatched: true,
-          };
-          break;
+          });
         }
-        if (selected) break;
       }
-      if (selected) break;
+      staticPatternChecks.push({
+        source: summarizeSourceRecord(record),
+        candidateCount: matches.length,
+        candidates: matches.slice(0, 5).map((match) => ({
+          realtimeTripId: match.pattern?.realtimeTripId ?? null,
+          headsign: match.pattern?.headsign ?? null,
+          directionId: match.pattern?.directionId ?? null,
+          firstStopId: match.stopIds[0],
+          lastStopId: match.stopIds[1],
+          startTimeDifferenceSeconds: match.startTimeDifferenceSeconds,
+          activeServiceMatches: match.activeServiceMatches,
+          shard: match.filename,
+        })),
+      });
+      if (matches.length === 1) {
+        selected = { record, ...matches[0] };
+        break;
+      }
     }
 
     if (!selected) {
+      const ambiguous = staticPatternChecks.some((item) => Number(item.candidateCount) > 1);
       cancelledTripProbe = {
-        status: "no_exact_active_static_pattern_for_cancelled_feed_record",
+        status: ambiguous ? "ambiguous_active_static_pattern_for_cancelled_feed_record" : "no_unique_active_static_pattern_for_cancelled_feed_record",
         feedFresh: cancelledTripFeedFresh,
         feedComplete: cancelledTripFeedComplete,
         currentOperatingDate,
         cancelledCandidateCount: cancelledFeedCandidates.length,
         candidateSamples: cancelledFeedCandidates.slice(0, 5).map(summarizeSourceRecord),
+        staticPatternChecks,
+        limitation: "A cancellation probe requires one unique active static pattern by route, operating date, start time, and compatible direction because the route crosswalk does not store OpenOV numeric trip_id.",
       };
     } else {
+      const clockMatch = String(selected.record?.startTime ?? "").match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+      const localWallClockMs = Date.UTC(
+        Number(selected.date.slice(0, 4)),
+        Number(selected.date.slice(4, 6)) - 1,
+        Number(selected.date.slice(6, 8)),
+        Number(clockMatch[1]),
+        Number(clockMatch[2]),
+        Number(clockMatch[3] ?? "0"),
+      );
+      let utcGuessMs = localWallClockMs;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+          timeZone: "Europe/Amsterdam",
+          year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", second: "2-digit",
+          hourCycle: "h23",
+        }).formatToParts(new Date(utcGuessMs)).map((part) => [part.type, part.value]));
+        const representedLocalMs = Date.UTC(
+          Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+          Number(parts.hour), Number(parts.minute), Number(parts.second),
+        );
+        const nextGuessMs = localWallClockMs - (representedLocalMs - utcGuessMs);
+        if (nextGuessMs === utcGuessMs) break;
+        utcGuessMs = nextGuessMs;
+      }
+      selected.plannedTripStart = new Date(utcGuessMs).toISOString();
       const [fromStopId, toStopId] = selected.stopIds;
       const planProbeUrl = new URL("/api/plan", baseUrl);
       planProbeUrl.searchParams.set("fromPlace", "nl-OpenOV_" + fromStopId);
@@ -1359,9 +1387,7 @@ async function main() {
       planProbeUrl.searchParams.set("maxItineraries", "5");
       planProbeUrl.searchParams.set("ndovIdentityDiagnostics", "1");
       const planProbeResult = await get(planProbeUrl.pathname + planProbeUrl.search, 65000);
-      const cancellationProbeLegs = planProbeResult.ok && planProbeResult.json
-        ? collectLegs(planProbeResult.json)
-        : [];
+      const cancellationProbeLegs = planProbeResult.ok && planProbeResult.json ? collectLegs(planProbeResult.json) : [];
       const exactCancelledLeg = cancellationProbeLegs.find((leg) =>
         normalizeOpenovId(leg.routeId ?? leg.route?.id) === selected.routeKey &&
         openovTripId(leg.tripId ?? leg.trip?.id) === String(selected.record?.tripId ?? "").trim()
@@ -1384,15 +1410,16 @@ async function main() {
         },
         activeStaticPattern: {
           routeId: selected.routeKey,
-          openovTripId: selected.record?.tripId ?? null,
           realtimeTripId: selected.pattern?.realtimeTripId ?? null,
-          patternStart: selected.pattern?.stops?.[0] ?? null,
-          patternEnd: selected.pattern?.stops?.[selected.pattern.stops.length - 1] ?? null,
+          directionId: selected.pattern?.directionId ?? null,
           serviceDate: selected.date,
           bucket: selected.bucket,
           shard: selected.filename,
           plannedTripStart: selected.plannedTripStart,
-          activeServiceMatched: selected.activeServiceMatched,
+          startTimeDifferenceSeconds: selected.startTimeDifferenceSeconds,
+          activeServiceMatches: selected.activeServiceMatches,
+          patternStart: selected.pattern?.stops?.[0] ?? null,
+          patternEnd: selected.pattern?.stops?.[selected.pattern.stops.length - 1] ?? null,
         },
         planQuery: {
           httpStatus: planProbeResult.status,
@@ -1423,7 +1450,7 @@ async function main() {
             identity: exactCancelledLeg.ndovRealtime.identity ?? null,
           } : null,
         } : null,
-        interpretationLimit: "A source cancellation is only counted as propagated if the same exact trip is returned with a canceled status. If the planner does not return the trip, this probe is inconclusive because the trip may already have been filtered.",
+        interpretationLimit: "The probe only calls cancellation propagation proven when the exact plan trip has canceled status. If the planner filtered the trip out, the result is inconclusive.",
       };
     }
   } else if (!cancelledTripFeedFresh || !cancelledTripFeedComplete) {
