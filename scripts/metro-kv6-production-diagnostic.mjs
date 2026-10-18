@@ -100,7 +100,7 @@ function compactTripDescriptor(trip) {
   return {
     tripId: trip?.tripId == null ? null : String(trip.tripId),
     routeId: trip?.routeId == null ? null : String(trip.routeId).replace(/^nl-OpenOV_/i, ""),
-    startDate: trip?.startDate ? String(trip.startDate).replace(/\\D/g, "").slice(0, 8) : null,
+    startDate: trip?.startDate ? String(trip.startDate).replace(/\D/g, "").slice(0, 8) : null,
     startTime: trip?.startTime ?? null,
     scheduleRelationship: trip?.scheduleRelationship ?? null,
   };
@@ -110,7 +110,7 @@ function compactOpenovTripKeys(legs) {
   const byTrip = new Map();
   for (const leg of legs) {
     const match = String(leg?.tripId ?? "").match(
-      /^(\\d{8})_(\\d{2}:\\d{2}(?::\\d{2})?)_nl-OpenOV_(.+)$/i
+      /^(\d{8})_(\d{2}:\d{2}(?::\d{2})?)_nl-OpenOV_(.+)$/i
     );
     if (!match) continue;
     const tripId = match[3].replace(/^nl-OpenOV_/i, "");
