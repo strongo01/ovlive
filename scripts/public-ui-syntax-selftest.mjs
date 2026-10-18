@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+const workerSource = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const blocks = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)]
   .map((match, index) => ({ index: index + 1, source: match[1].trim() }))
   .filter((block) => block.source.length > 0);
@@ -19,21 +20,43 @@ for (const block of blocks) {
   }
 }
 
-// Realtime timings must refresh separately from the map's live vehicle-position poll.
-assert.ok(html.includes("const LIVE_PLAN_REALTIME_POLL_MS = 30000;"),
-  "itinerary realtime polling must use a 30-second interval");
+// Realtime timings and vehicle positions must both use a ten-second poll.
+assert.ok(html.includes("const LIVE_PLAN_REALTIME_POLL_MS = 10000;"),
+  "itinerary realtime polling must use a 10-second interval");
+assert.ok(html.includes("const LIVE_VEHICLE_POLL_MS = 10000;"),
+  "vehicle positions must use a 10-second interval");
 assert.ok(html.includes("fetch('/api/realtime-refresh'"),
   "the UI must request fresh timetable realtime enrichments");
 assert.ok(html.includes("cache: 'no-store'"),
   "realtime refresh requests must bypass browser HTTP cache");
 assert.ok(html.includes("}, LIVE_PLAN_REALTIME_POLL_MS);"),
-  "the 30-second realtime poll must be scheduled");
+  "the 10-second realtime poll must be scheduled");
 assert.ok(html.includes('<div class="journey-leg-details">') &&
   html.includes('data-leg-index="${index}"'),
   "realtime refresh must target the journey-leg details without rebuilding the map");
 assert.ok(html.includes("startLivePlanRealtimeRefresh(data);"),
   "automatic realtime refresh must start after a successful plan search");
-console.log("PASS: itinerary times and realtime badges are refreshed automatically every 30 seconds");
+const refreshStart = html.indexOf("async function refreshLivePlanRealtime(");
+const refreshEnd = html.indexOf("function startLivePlanRealtimeRefresh(", refreshStart);
+assert.ok(refreshStart >= 0 && refreshEnd > refreshStart,
+  "the realtime refresh loop must exist");
+const refreshFunction = html.slice(refreshStart, refreshEnd);
+assert.ok(refreshFunction.includes("!baseline || livePlanRealtimeInFlight"),
+  "a refresh must be skipped while another refresh is already running");
+const stopStart = html.indexOf("function stopLivePlanRealtimeRefresh() {");
+const stopEnd = html.indexOf("async function refreshLivePlanRealtime(", stopStart);
+assert.ok(stopStart >= 0 && stopEnd > stopStart,
+  "the refresh timer stop helper must exist");
+const stopFunction = html.slice(stopStart, stopEnd);
+assert.equal(stopFunction.includes("livePlanRealtimeInFlight = false;"), false,
+  "stopping/restarting the timer must not release the lock for an unfinished request");
+console.log("PASS: timetable and vehicle updates poll every 10 seconds with an in-flight overlap guard");
+
+assert.ok(workerSource.includes("const OPENOV_FEED_CACHE_TTL_MS = 8_000;"),
+  "the Worker feed memory cache must expire in under 10 seconds");
+assert.ok(workerSource.includes("cf: { cacheTtl: 5, cacheEverything: true }"),
+  "the upstream OpenOV feed cache must be shorter than the ten-second poll");
+console.log("PASS: OpenOV feed caches are shorter than the 10-second polling interval");
 
 // Regression guard: the itinerary summary must not read block-scoped values
 // before their declarations, which would abort the planner at runtime.
