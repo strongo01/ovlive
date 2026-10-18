@@ -9,6 +9,7 @@ on:
       - assistant/metro-exact-trip-id-fallback-20261018
       - assistant/metro-ui-confidence-20261018
       - assistant/kv78-stop-crosswalk-priority-20261018
+      - assistant/metro-kv6-production-diagnostic-20261018
       - assistant/kv6-live-ui-diagnostics-20261018
   workflow_dispatch:
 
@@ -140,3 +141,9 @@ jobs:
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/ns-current-bus-filter-live-validation.mjs
+
+      - name: Read-only production metro KV6 identity diagnostic
+        if: github.ref == 'refs/heads/assistant/metro-kv6-production-diagnostic-20261018'
+        env:
+          OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
+        run: node scripts/metro-kv6-production-diagnostic.mjs
