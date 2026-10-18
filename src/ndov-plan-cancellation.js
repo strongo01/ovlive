@@ -1215,6 +1215,9 @@ async function getStopAssignmentIndex(env, keys = []) {
   if (!validKeys.length) {
     return {
       assignments: Object.create(null),
+      shardCount: 0,
+      requestedShardNumbers: [],
+      loadedShardNumbers: [],
       requestedShardCount: 0,
       loadedShardCount: 0,
       partial: false,
@@ -1260,6 +1263,8 @@ async function getStopAssignmentIndex(env, keys = []) {
   return {
     ...manifest,
     assignments,
+    requestedShardNumbers: shardNumbers,
+    loadedShardNumbers: selectedShardNumbers,
     requestedShardCount: shardNumbers.length,
     loadedShardCount: selectedShardNumbers.length,
     partial: selectedShardNumbers.length < shardNumbers.length,
@@ -1432,6 +1437,22 @@ function resolveKv78StopAssignment(row, context) {
   const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
   const code = String(row?.userStopCode ?? "").trim();
   const key = `${owner}|${code}`;
+  const shardCount = Number(index?.shardCount);
+  const requestedShardNumbers = index?.requestedShardNumbers;
+  const loadedShardNumbers = index?.loadedShardNumbers;
+  if (
+    Number.isInteger(shardCount) && shardCount > 0 &&
+    Array.isArray(requestedShardNumbers) &&
+    Array.isArray(loadedShardNumbers)
+  ) {
+    const neededShard = stopAssignmentShardNumber(key, shardCount);
+    if (
+      requestedShardNumbers.includes(neededShard) &&
+      !loadedShardNumbers.includes(neededShard)
+    ) {
+      return { matched: false, reason: "psa_assignment_shard_not_loaded" };
+    }
+  }
   const records = index?.assignments?.[key];
   if (!Array.isArray(records) || !records.length) {
     return { matched: true, assignment: null, status: "time_only_unverified", matchMethod: "unique-scheduled-time-only (no PSA mapping)" };
@@ -1528,6 +1549,65 @@ function getKv78RowsNearScheduledTime(rows, scheduledInstant, targetField, maxDi
   }
   candidates.sort((a, b) => a.distanceSeconds - b.distanceSeconds);
   return candidates;
+}
+
+export function prioritizeKv78AssignmentCandidateRows(rowResults) {
+  const primaryKeys = [];
+  const primaryKeySet = new Set();
+  const secondaryKeys = [];
+  const secondaryKeySet = new Set();
+  const rowByKey = new Map();
+
+  const add = (key, row, primary) => {
+    if (!rowByKey.has(key)) rowByKey.set(key, row);
+    if (primary) {
+      if (!primaryKeySet.has(key)) {
+        primaryKeySet.add(key);
+        primaryKeys.push(key);
+      }
+    } else if (!secondaryKeySet.has(key)) {
+      secondaryKeySet.add(key);
+      secondaryKeys.push(key);
+    }
+  };
+
+  for (const result of Array.isArray(rowResults) ? rowResults : []) {
+    const leg = result?.item?.leg;
+    const endpoints = [
+      {
+        instant: valueOf(leg?.from, "departure") ?? valueOf(leg, "startTime", "departureTime"),
+        targetField: "targetDepartureTime",
+      },
+      {
+        instant: valueOf(leg?.to, "arrival") ?? valueOf(leg, "endTime", "arrivalTime"),
+        targetField: "targetArrivalTime",
+      },
+    ];
+
+    for (const endpoint of endpoints) {
+      const candidates = getKv78RowsNearScheduledTime(
+        result?.rows, endpoint.instant, endpoint.targetField, 180,
+      );
+      if (!candidates.length) continue;
+      const bestDistance = candidates[0].distanceSeconds;
+
+      for (const candidate of candidates) {
+        const owner = String(valueOf(candidate.row, "dataOwnerCode", "DataOwnerCode") ?? "")
+          .trim().toUpperCase();
+        const stopCode = String(valueOf(candidate.row, "userStopCode", "UserStopCode") ?? "").trim();
+        if (!owner || !stopCode) continue;
+        const key = `${owner}|${stopCode}`;
+        // Keep every candidate close enough to create the matcher’s <30-second
+        // ambiguity, but push weaker nearby candidates behind the best rows for
+        // departure and arrival. This is ordering only; it does not relax matching.
+        add(key, candidate.row, candidate.distanceSeconds - bestDistance < 30);
+      }
+    }
+  }
+
+  return [...primaryKeys, ...secondaryKeys.filter((key) => !primaryKeySet.has(key))]
+    .map((key) => rowByKey.get(key))
+    .filter(Boolean);
 }
 
 export function matchKv78RowByScheduleTime(rows, scheduledInstant, targetField, maxDistanceSeconds = 180, stopContext = null) {
@@ -2270,16 +2350,9 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
       // planned departure/arrival window. Loading every stop along every trip
       // can fan out to all 16 assignment shards and exhaust the Worker subrequest
       // budget even though only the endpoint haltes are relevant to this plan.
-      const assignmentCandidateRows = rowResults.flatMap(({ item, rows }) => {
-        const scheduledDeparture = valueOf(item?.leg?.from, "departure") ??
-          valueOf(item?.leg, "startTime", "departureTime");
-        const scheduledArrival = valueOf(item?.leg?.to, "arrival") ??
-          valueOf(item?.leg, "endTime", "arrivalTime");
-        return [
-          ...getKv78RowsNearScheduledTime(rows, scheduledDeparture, "targetDepartureTime", 180),
-          ...getKv78RowsNearScheduledTime(rows, scheduledArrival, "targetArrivalTime", 180),
-        ].map((candidate) => candidate.row);
-      });
+      // Put the nearest departure and arrival stop candidates first. The two-new-shard
+      // budget must not be consumed by nearby stops before either leg endpoint is checked.
+      const assignmentCandidateRows = prioritizeKv78AssignmentCandidateRows(rowResults);
       const kv6AssignmentKeys = kv6PredictionItems.map((item) => {
         const event = item.kv6PredictionContext?.event;
         const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
