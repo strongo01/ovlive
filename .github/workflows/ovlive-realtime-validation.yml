@@ -12,6 +12,7 @@ on:
       - assistant/kv6-live-ui-diagnostics-20261018
       - assistant/metro-kv78-time-crossmatch-clean-20261018
       - assistant/metro-resource-cache-prune-20261018
+      - assistant/ovlive-stability-live-audit-20261018
   workflow_dispatch:
 
 permissions:
@@ -121,6 +122,12 @@ jobs:
           fi
 
           OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/openov-live-plan-validation.mjs
+
+      - name: Read-only production stability and realtime coverage audit
+        if: github.ref == 'refs/heads/assistant/ovlive-stability-live-audit-20261018'
+        env:
+          OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
+        run: node scripts/ovlive-production-endpoint-diagnostics.mjs
 
       - name: Actual deployed OVLive production endpoint diagnostic
         if: github.ref == 'refs/heads/assistant/realtime-propagation-validation-20261015'
