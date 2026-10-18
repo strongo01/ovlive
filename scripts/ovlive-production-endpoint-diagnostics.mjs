@@ -142,7 +142,7 @@ function fnv1aShardNumber(value, shardCount) {
 }
 
 function openovStopPlaceKey(value) {
-  const match = String(value ?? "").trim().match(/^(?:nl-openov_)?(\\d+)$/i);
+  const match = String(value ?? "").trim().match(/^(?:nl-openov_)?(\d+)$/i);
   return match ? match[1] : null;
 }
 
@@ -893,7 +893,7 @@ async function main() {
     const activeRecords = records.filter((record) => {
       const day = String(target.operationDate ?? "").replace(/-/g, "");
       const dateKey = (value) => {
-        const match = String(value ?? "").match(/(\\d{4})-?(\\d{2})-?(\\d{2})/);
+        const match = String(value ?? "").match(/(\d{4})-?(\d{2})-?(\d{2})/);
         return match ? match[1] + match[2] + match[3] : null;
       };
       const from = dateKey(record?.validFrom);
