@@ -19,6 +19,17 @@ for (const block of blocks) {
   }
 }
 
+// Regression guard: the itinerary summary must not read block-scoped values
+// before their declarations, which would abort the planner at runtime.
+const invalidChronologyDeclaration = html.indexOf("const invalidChronologyCount = itineraryCandidates");
+const validItineraryDeclaration = html.indexOf("const validItineraryCandidates = itineraryCandidates");
+const itinerarySummaryReference = html.indexOf("`${validItineraryCandidates.length} bruikbare reisopties gevonden`");
+assert.ok(invalidChronologyDeclaration >= 0 && validItineraryDeclaration > invalidChronologyDeclaration,
+  "itinerary candidate counts must be initialized before rendering the summary");
+assert.ok(itinerarySummaryReference > invalidChronologyDeclaration &&
+  itinerarySummaryReference > validItineraryDeclaration,
+  "the itinerary summary must only access candidate counts after they are initialized");
+
 // Regression guard: OpenOV status formatting must only use its own
 // parameter, never a free-standing "leg" from another renderer's scope.
 const summaryStart = html.indexOf("function openovStatusSummary(rt) {");
