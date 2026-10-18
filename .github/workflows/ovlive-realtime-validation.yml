@@ -10,6 +10,7 @@ on:
       - assistant/metro-ui-confidence-20261018
       - assistant/kv78-stop-crosswalk-priority-20261018
       - assistant/metro-kv6-production-diagnostic-20261018
+      - assistant/metro-kv78-time-crossmatch-20261018
       - assistant/kv6-live-ui-diagnostics-20261018
   workflow_dispatch:
 
@@ -57,6 +58,9 @@ jobs:
 
       - name: NDOV KV6 live regression tests
         run: npm run ndov:kv6-live-selftest
+
+      - name: Metro KV78 identity fallback regression tests
+        run: npm run ndov:metro-kv78-fallback-selftest
 
       - name: NDOV prediction regression tests
         run: npm run ndov:prediction-selftest
@@ -143,7 +147,7 @@ jobs:
         run: node scripts/ns-current-bus-filter-live-validation.mjs
 
       - name: Read-only production metro KV6 identity diagnostic
-        if: github.ref == 'refs/heads/assistant/metro-kv6-production-diagnostic-20261018'
+        if: github.ref == 'refs/heads/assistant/metro-kv6-production-diagnostic-20261018' || github.ref == 'refs/heads/assistant/metro-kv78-time-crossmatch-20261018'
         env:
           OVLIVE_BASE_URL: https://ovlive-realtime.maxveldhuis.workers.dev
         run: node scripts/metro-kv6-production-diagnostic.mjs
