@@ -47,11 +47,54 @@ function routeId(leg) {
   return raw.match(/(\d+)$/)?.[1] ?? null;
 }
 
+function normalizeOpenovId(value) {
+  return String(value ?? "").replace(/^nl-OpenOV_/i, "").replace(/^OpenOV_/i, "").trim();
+}
+
+function openovTripId(value) {
+  const raw = String(value ?? "");
+  return raw.match(/_nl-OpenOV_(.+)$/i)?.[1] ?? normalizeOpenovId(raw);
+}
+
+function plannedEndpoint(leg, kind) {
+  return kind === "departure"
+    ? leg?.from?.scheduledDeparture ?? leg?.scheduledStartTime ?? leg?.startTime ?? leg?.from?.departure ?? null
+    : leg?.to?.scheduledArrival ?? leg?.scheduledEndTime ?? leg?.endTime ?? leg?.to?.arrival ?? null;
+}
+
+function epochSeconds(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value > 1e12) return value / 1000;
+    if (value > 1e9) return value;
+  }
+  if (typeof value === "string") {
+    const ms = Date.parse(value);
+    if (Number.isFinite(ms)) return ms / 1000;
+  }
+  return null;
+}
+
+function summarizeSourceRecord(record) {
+  return {
+    routeId: record?.routeId ?? null,
+    tripId: record?.tripId ?? null,
+    startDate: record?.startDate ?? null,
+    startTime: record?.startTime ?? null,
+    timestamp: record?.timestamp ?? null,
+    delaySeconds: record?.delaySeconds ?? null,
+    scheduleRelationship: record?.scheduleRelationship ?? null,
+    stopUpdateCount: Array.isArray(record?.stopUpdates) ? record.stopUpdates.length : null,
+    endpointStopUpdates: record?.endpointStopUpdates ?? null,
+  };
+}
+
 async function main() {
+  const auditStartedMs = Date.now();
+  const requestedPlanTime = new Date(auditStartedMs + 120_000).toISOString();
   const planUrl = new URL("/api/plan", baseUrl);
   planUrl.searchParams.set("fromPlace", process.env.OVLIVE_FROM_PLACE ?? "nl-OpenOV_3924329");
   planUrl.searchParams.set("toPlace", process.env.OVLIVE_TO_PLACE ?? "nl-OpenOV_3924355");
-  planUrl.searchParams.set("time", new Date(Date.now() + 120_000).toISOString());
+  planUrl.searchParams.set("time", requestedPlanTime);
   const parsedItineraryCount = Number.parseInt(process.env.OVLIVE_NUM_ITINERARIES ?? "3", 10);
   const itineraryCount = Number.isFinite(parsedItineraryCount)
     ? Math.min(5, Math.max(1, parsedItineraryCount))
@@ -68,6 +111,88 @@ async function main() {
 
   const legs = collectLegs(planResult.json);
   const openovLegs = legs.filter((leg) => /^nl-OpenOV_/i.test(String(leg.routeId ?? leg.route?.id ?? "")));
+
+  // Inspect raw OpenOV feed records for the exact trips selected by production
+  // /api/plan. This separates a missing source record from a failure to enrich
+  // a record that actually exists. Only two bounded, read-only API requests.
+  const openovTripIds = [...new Set(openovLegs
+    .map((leg) => openovTripId(leg.tripId ?? leg.trip?.id))
+    .filter(Boolean))];
+  const sourceFeedResults = await Promise.all(["tripUpdates", "vehiclePositions"].map(async (kind) => {
+    if (!openovTripIds.length) return { kind, result: null };
+    const query = new URLSearchParams({
+      kind,
+      tripId: openovTripIds.join(","),
+      limit: "2000",
+    });
+    const result = await get("/api/realtime?" + query.toString(), 45000);
+    return { kind, result };
+  }));
+  const sourceFeeds = Object.fromEntries(sourceFeedResults.map(({ kind, result }) => {
+    const data = result?.json;
+    return [kind, {
+      httpStatus: result?.status ?? null,
+      ok: data?.ok === true,
+      freshness: data?.freshness ?? null,
+      ageSeconds: data?.ageSeconds ?? null,
+      feedTimestamp: data?.feedTimestamp ?? null,
+      matchingCount: data?.matchingCount ?? null,
+      returnedCount: data?.returnedCount ?? null,
+      error: data?.error ?? result?.error ?? null,
+    }];
+  }));
+  const exactOpenovSourceEvidence = {
+    requestedPlanTime,
+    auditStartedAt: new Date(auditStartedMs).toISOString(),
+    feedChecks: sourceFeeds,
+    trips: openovLegs.map((leg) => {
+      const expectedRouteId = normalizeOpenovId(leg.routeId ?? leg.route?.id);
+      const expectedTripId = openovTripId(leg.tripId ?? leg.trip?.id);
+      const departure = plannedEndpoint(leg, "departure");
+      const arrival = plannedEndpoint(leg, "arrival");
+      const departureSeconds = epochSeconds(departure);
+      const tripEvidence = Object.fromEntries(sourceFeedResults.map(({ kind, result }) => {
+        const records = Array.isArray(result?.json?.entities) ? result.json.entities : [];
+        const sameTrip = records.filter((record) =>
+          normalizeOpenovId(record?.tripId) === expectedTripId
+        );
+        const exactRouteAndTrip = sameTrip.filter((record) =>
+          normalizeOpenovId(record?.routeId) === expectedRouteId
+        );
+        return [kind, {
+          sameTripIdCount: sameTrip.length,
+          exactRouteAndTripCount: exactRouteAndTrip.length,
+          sameTripIdRecords: sameTrip.slice(0, 3).map(summarizeSourceRecord),
+          exactRecords: exactRouteAndTrip.slice(0, 3).map(summarizeSourceRecord),
+        }];
+      }));
+      const hasExactSourceRecord = Object.values(tripEvidence)
+        .some((evidence) => evidence.exactRouteAndTripCount > 0);
+      const secondsUntilDeparture = departureSeconds == null
+        ? null
+        : Math.round(departureSeconds - auditStartedMs / 1000);
+      const sourceStatus = hasExactSourceRecord
+        ? "exact_openov_source_record_found"
+        : secondsUntilDeparture != null && secondsUntilDeparture > 300
+          ? "trip_may_not_be_published_to_realtime_yet"
+          : "no_exact_openov_source_record_for_near_departure";
+      return {
+        mode: leg.mode ?? leg.transitMode ?? null,
+        routeId: leg.routeId ?? leg.route?.id ?? null,
+        openovRouteId: expectedRouteId || null,
+        transitousTripId: leg.tripId ?? leg.trip?.id ?? null,
+        openovFeedTripId: expectedTripId || null,
+        scheduledDeparture: departure,
+        scheduledArrival: arrival,
+        secondsUntilDeparture,
+        openovStatusFromPlan: leg.openovRealtime?.status ?? null,
+        openovReasonFromPlan: leg.openovRealtime?.reason ?? null,
+        sourceStatus,
+        feeds: tripEvidence,
+      };
+    }),
+  };
+
   const transitLegs = legs.filter((leg) => {
     const mode = String(leg?.mode ?? leg?.transitMode ?? "").trim().toUpperCase();
     const tripId = String(leg?.tripId ?? leg?.trip?.id ?? "").trim();
@@ -104,6 +229,7 @@ async function main() {
     openovStatusCounts,
     openovReasonCounts,
     ndovRealtimeMeta: planResult.json.ndovRealtimeMeta ?? null,
+    exactOpenovSourceEvidence,
     legs: legs.map((leg) => ({
       routeId: leg.routeId ?? leg.route?.id ?? null,
       tripId: leg.tripId ?? leg.trip?.id ?? null,
