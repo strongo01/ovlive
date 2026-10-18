@@ -1,8 +1,33 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from '../src/ndov-feed-parser.mjs';
+import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, parseKv17Payload, parseKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
 import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
+
+
+const positionAt = '2026-10-18T20:00:10.000Z';
+const positionReceivedAt = '2026-10-18T20:00:11.000Z';
+const freshPositionMetadata = mergeKv6PositionMetadata({}, {
+  rdX: '136000.0', rdY: '455000.0', timestamp: positionAt,
+}, positionReceivedAt);
+assert.equal(freshPositionMetadata.rdX, '136000.0');
+assert.equal(freshPositionMetadata.positionTimestamp, positionAt);
+assert.equal(freshPositionMetadata.positionReceivedAt, positionReceivedAt);
+const laterNonPositionUpdate = mergeKv6PositionMetadata(freshPositionMetadata, {
+  rdX: null, rdY: null, timestamp: '2026-10-18T20:00:20.000Z',
+}, '2026-10-18T20:00:21.000Z');
+assert.equal(laterNonPositionUpdate.rdX, '136000.0');
+assert.equal(laterNonPositionUpdate.rdY, '455000.0');
+assert.equal(laterNonPositionUpdate.positionTimestamp, positionAt,
+  'activity-only messages must not refresh the timestamp of retained coordinates');
+assert.equal(laterNonPositionUpdate.positionReceivedAt, positionReceivedAt,
+  'activity-only messages must not make an old coordinate pair appear newly received');
+const invalidRdUpdate = mergeKv6PositionMetadata(freshPositionMetadata, {
+  rdX: '0', rdY: '0', timestamp: '2026-10-18T20:00:30.000Z',
+}, '2026-10-18T20:00:31.000Z');
+assert.equal(invalidRdUpdate.positionTimestamp, positionAt,
+  'invalid RD coordinates must not replace the last valid coordinate timestamp');
+console.log('PASS: KV6 coordinate timestamps only advance when a valid new RD coordinate pair arrives');
 
 const header = String.raw`\GKV8turbo_passtimes|KV8turbo_passtimes|OpenOV|||UTF-8|0.1|2026-10-11T09:53:01+02:00|
 \TDATEDPASSTIME|DATEDPASSTIME|start object
