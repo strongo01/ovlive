@@ -6,6 +6,7 @@ on:
       - assistant/realtime-propagation-validation-20261015
       - assistant/ns-priority-subrequest-budget-20261017
       - assistant/tram-metro-realtime-coverage-20261017
+      - assistant/bus-train-tram-regression-20261018
       - assistant/metro-exact-trip-id-fallback-20261018
       - assistant/metro-ui-confidence-20261018
       - assistant/kv78-stop-crosswalk-priority-20261018
@@ -121,6 +122,7 @@ jobs:
           fi
 
           OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/openov-live-plan-validation.mjs
+          OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/bus-train-tram-route-regression.mjs
 
       - name: Actual deployed OVLive production endpoint diagnostic
         if: github.ref == 'refs/heads/assistant/realtime-propagation-validation-20261015'
