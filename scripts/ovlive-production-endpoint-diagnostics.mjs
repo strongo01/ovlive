@@ -1263,13 +1263,13 @@ async function main() {
       const routeKey = normalizeOpenovId(record?.routeId);
       const date = String(record?.startDate ?? "");
       const clock = String(record?.startTime ?? "");
-      const clockMatch = clock.match(/^(\\d{1,3}):(\\d{2})(?::(\\d{2}))?$/);
+      const clockMatch = clock.match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
       const hour = clockMatch ? Number(clockMatch[1]) : NaN;
       const bucket = Number.isFinite(hour) ? (hour >= 24 ? "24" : hour >= 12 ? "12" : "00") : null;
       const filenames = (bucket
         ? routeManifest?.routesByStartBucket?.[routeKey]?.[bucket]
         : null) ?? routeManifest?.routes?.[routeKey] ?? [];
-      if (!routeKey || !/^\\d{8}$/.test(date) || !clockMatch || !Array.isArray(filenames) || !filenames.length) continue;
+      if (!routeKey || !/^\d{8}$/.test(date) || !clockMatch || !Array.isArray(filenames) || !filenames.length) continue;
       const activeServiceIds = Array.isArray(serviceCalendar?.[date])
         ? new Set(serviceCalendar[date].map(String))
         : null;
@@ -1280,7 +1280,7 @@ async function main() {
         const shardPath = "/ndov-openov-route-crosswalk/routes/" + filename;
         const [shardResult, sidecarResult] = await Promise.all([
           get(shardPath),
-          get(shardPath.replace(/\\.json$/i, "-services.json")),
+          get(shardPath.replace(/\.json$/i, "-services.json")),
         ]);
         if (!Array.isArray(shardResult.json) || !Array.isArray(sidecarResult.json) ||
             shardResult.json.length !== sidecarResult.json.length) continue;
