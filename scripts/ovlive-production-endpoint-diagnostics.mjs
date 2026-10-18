@@ -269,6 +269,10 @@ async function main() {
     })),
   }, null, 2));
 
+  // Print this section separately so it is easy to find in long Actions logs.
+  console.log("=== EXACT OPENOV SOURCE EVIDENCE (SEARCH THIS HEADING) ===");
+  console.log(JSON.stringify(exactOpenovSourceEvidence, null, 2));
+
   const manifests = [
     "/ndov-openov-route-crosswalk/manifest.json",
     "/ndov-trip-crosswalk/manifest.json",
