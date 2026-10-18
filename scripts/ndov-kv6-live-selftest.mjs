@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { applyNdovCancellationsToPlan } from '../src/ndov-plan-cancellation.js';
 
 const now = new Date().toISOString();
+let suppressKv6Events = false;
 const stale = new Date(Date.now() - 240_000).toISOString();
 const row = (extra = {}) => ({
   receivedAt: now,
@@ -46,7 +47,39 @@ const kv6Observed = {
   blockCode: '80660',
 };
 const bisonSnapshot = { state: 'complete', latestMessageAt: now };
-const kv78Snapshot = { state: 'complete', latestMessageAt: now };
+const bisonIdentityDiagnostics = {
+  currentDate: '20261012',
+  storedTripCount: 3,
+  matchingTripCount: 3,
+  byLine: { U073: 2, U73: 1 },
+  byOwnerLine: [
+    { owner: 'CXX', line: 'U073', tripCount: 2, punctualityCount: 1 },
+    { owner: 'CXX', line: 'U73', tripCount: 1, punctualityCount: 0 },
+  ],
+  trips: [
+    { identity: 'CXX|20261012|U073|7042|1', eventType: 'ONROUTE', receivedAt: now, punctualityPresent: true, punctualityReceivedAt: now, punctualityAgeSeconds: 0 },
+    { identity: 'CXX|20261012|U73|7042|0', eventType: 'ONSTOP', receivedAt: now, punctualityPresent: false, punctualityReceivedAt: null, punctualityAgeSeconds: null },
+    { identity: 'CXX|20261012|U073|7044|0', eventType: 'ARRIVAL', receivedAt: now, punctualityPresent: true, punctualityReceivedAt: now, punctualityAgeSeconds: 0 },
+  ],
+};
+const kv78Snapshot = {
+  state: 'complete',
+  latestMessageAt: now,
+  kv78IdentityDiagnostics: {
+    currentDate: '20261012',
+    cacheSize: 4,
+    matchingRowCount: 3,
+    identityCount: 2,
+    byOwnerLine: [
+      { owner: 'CXX', line: 'U073', tripCount: 1, rowCount: 2 },
+      { owner: 'CXX', line: 'U73', tripCount: 1, rowCount: 1 },
+    ],
+    trips: [
+      { identity: 'CXX|20261012|U073|7042|1', rowCount: 2, uniqueStopCount: 2, sampleStopCodes: ['STOP-A', 'STOP-B'] },
+      { identity: 'CXX|20261012|U73|7042|0', rowCount: 1, uniqueStopCount: 1, sampleStopCodes: ['STOP-C'] },
+    ],
+  },
+};
 const manifest = { generatedAt: now, shards: ['382'] };
 const shard = {
   '382969674': 'EBS:1314:1037',
@@ -73,6 +106,9 @@ const env = {
         async fetch(input) {
           const url = new URL(input);
           const stream = url.searchParams.get('stream');
+          if (url.pathname === '/status' && stream === 'bison' && url.searchParams.get('identityDiagnostics') === '1') {
+            return Response.json({ ...bisonSnapshot, bisonIdentityDiagnostics });
+          }
           if (url.pathname === '/status' && stream === 'bison') return Response.json(bisonSnapshot);
           if (url.pathname === '/status' && stream === 'kv78') return Response.json(kv78Snapshot);
           if (url.pathname === '/mutations' && stream === 'bison') {
@@ -80,10 +116,10 @@ const env = {
           }
           if (url.pathname === '/events' && stream === 'bison') {
             const ids = url.searchParams.getAll('identity');
-            return Response.json({ events: [kv6Good, kv6Stale, kv6Observed].filter((event) => ids.includes(event.identity)) });
+            return Response.json({ events: suppressKv6Events ? [] : [kv6Good, kv6Stale, kv6Observed].filter((event) => ids.includes(event.identity)) });
           }
           if (url.pathname === '/rows' && stream === 'kv78') {
-            return Response.json({ rows: url.searchParams.get('identity') === 'EBS|20261012|1314|1039|0' ? tripRows : [] });
+            return Response.json({ rows: url.searchParams.getAll('identity').includes('EBS|20261012|1314|1039|0') ? tripRows : [] });
           }
           return new Response('unexpected mock request', { status: 404 });
         },
@@ -130,4 +166,75 @@ console.log('PASS: KV78 stop-specific delays remain separate from KV6 trip punct
 console.log('PASS: fresh exact KV6 punctuality displays delay in seconds with vehicle/block data');
 console.log('PASS: stale KV6 observations are rejected');
 console.log('PASS: fresh exact ONROUTE activity is shown even when punctuality is absent, without implying on-time running');
+
+const partialMatchPlan = {
+  itineraries: [{
+    legs: [
+      { mode: 'BUS', tripId: '20261012_09:03_nl-OpenOV_382969676', from: { departure: plannedDeparture }, to: { arrival: '2026-10-12T07:29:00Z' } },
+      { mode: 'BUS', tripId: '20261012_09:40_nl-OpenOV_382969680', from: { departure: '2026-10-12T07:40:00Z' }, to: { arrival: '2026-10-12T08:10:00Z' } },
+      { mode: 'BUS', tripId: '20261012_10:00_nl-OpenOV_382969682', from: { departure: '2026-10-12T08:00:00Z' }, to: { arrival: '2026-10-12T08:30:00Z' } },
+    ],
+  }],
+};
+await applyNdovCancellationsToPlan(partialMatchPlan, env, { includeIdentityDiagnostics: true });
+assert.equal(partialMatchPlan.ndovRealtimeMeta.kv6MatchedLegCount, 1, 'partial exact KV6 successes must not hide the unmatched trip');
+assert.equal(partialMatchPlan.ndovRealtimeMeta.kv78DataLegCount, 1, 'the partial test should retain its exact KV78 match');
+const partialKv6Audit = partialMatchPlan.ndovRealtimeMeta.kv6IdentityDiagnostics;
+assert.ok(partialKv6Audit, 'partial KV6 matches must expose diagnostics for unmatched identities');
+assert.deepEqual(partialKv6Audit.requestedIdentities, ['EBS|20261012|1314|1039|0', 'CXX|20261012|U073|7043|0']);
+assert.ok(partialKv6Audit.comparisons.find((item) => item.requestedIdentity === 'CXX|20261012|U073|7043|0')?.sameOwnerDateLineSamples.some((sample) => sample.identity === 'CXX|20261012|U073|7044|0'));
+const partialKv78Audit = partialMatchPlan.ndovRealtimeMeta.kv78IdentityDiagnostics;
+assert.ok(partialKv78Audit, 'partial KV78 matches must expose diagnostics for trips without usable stop rows');
+assert.deepEqual(partialKv78Audit.requestedIdentities, ['CXX|20261012|U073|7042|0', 'CXX|20261012|U073|7043|0']);
+assert.ok(partialKv78Audit.comparisons.find((item) => item.requestedIdentity === 'CXX|20261012|U073|7042|0')?.sameOwnerDateLineSamples.some((sample) => sample.identity === 'CXX|20261012|U073|7042|1'));
+console.log('PASS: partial KV6/KV78 matches keep identity diagnostics for unmatched planned trips');
+
+suppressKv6Events = true;
+const noMatchPlan = {
+  itineraries: [{
+    legs: [{
+      mode: 'SUBWAY',
+      tripId: '20261012_09:40_nl-OpenOV_382969680',
+      from: { departure: '2026-10-12T07:40:00Z' },
+      to: { arrival: '2026-10-12T08:10:00Z' },
+    }],
+  }],
+};
+await applyNdovCancellationsToPlan(noMatchPlan, env, { includeIdentityDiagnostics: true });
+assert.equal(noMatchPlan.ndovRealtimeMeta.kv6MatchedLegCount, 0);
+assert.equal(noMatchPlan.ndovRealtimeMeta.kv78MatchedLegCount, 0);
+const kv6LookupDiagnostics = noMatchPlan.ndovRealtimeMeta.kv6LookupDiagnostics;
+assert.equal(kv6LookupDiagnostics.lookupCompleted, true,
+  "KV6 exact lookup should distinguish a completed zero-result query from an unavailable lookup");
+assert.equal(kv6LookupDiagnostics.requestedIdentityCount, 1);
+assert.equal(kv6LookupDiagnostics.returnedExactEventCount, 0,
+  "the diagnostics should expose that no exact event was returned for this identity");
+assert.equal(kv6LookupDiagnostics.freshExactMatchCount, 0);
+assert.deepEqual(kv6LookupDiagnostics.unmatchedIdentitySamples, ["CXX|20261012|U073|7042|0"]);
+const kv6IdentityAudit = noMatchPlan.ndovRealtimeMeta.kv6IdentityDiagnostics;
+assert.ok(kv6IdentityAudit, 'zero exact KV6 matches must expose bounded identity diagnostics');
+assert.equal(kv6IdentityAudit.available, true);
+assert.equal(kv6IdentityAudit.comparisons[0].requestedIdentity, 'CXX|20261012|U073|7042|0');
+assert.ok(
+  kv6IdentityAudit.comparisons[0].sameOwnerDateLineSamples.some((sample) =>
+    sample.identity === 'CXX|20261012|U073|7042|1'
+  ),
+  'the diagnostics should reveal a same-owner/line trip with a different reinforcement number'
+);
+assert.ok(
+  kv6IdentityAudit.comparisons[0].sameOwnerDateJourneySamples.some((sample) =>
+    sample.identity === 'CXX|20261012|U73|7042|0'
+  ),
+  'the diagnostics should reveal a same-owner/journey trip under a different line identity'
+);
+const kv78IdentityAudit = noMatchPlan.ndovRealtimeMeta.kv78IdentityDiagnostics;
+assert.ok(kv78IdentityAudit, 'zero exact KV78 matches must expose bounded identity diagnostics');
+assert.equal(kv78IdentityAudit.storedRecordCount, 4);
+assert.ok(
+  kv78IdentityAudit.comparisons[0].sameOwnerDateLineSamples.some((sample) =>
+    sample.identity === 'CXX|20261012|U073|7042|1'
+  ),
+  'KV78 diagnostics should show near-identity samples without treating them as exact matches'
+);
+console.log('PASS: zero-match KV6/KV78 diagnostics expose bounded near-identities without relaxing exact matching');
 console.log('All OVLive KV6 live selftests passed.');

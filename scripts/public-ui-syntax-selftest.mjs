@@ -108,12 +108,24 @@ assert.equal(unconfirmedKv78Html.includes('class="rt-delay"'), false,
 const confirmedKv78Html = stopEventHtml("Vertrek (KV78-halte 51112304)", {
   targetTime: "21:54:00",
   delaySeconds: 31,
-  stopAssignmentStatus: "confirmed_quay_platform"
+  stopAssignmentStatus: "confirmed_quay_platform",
+  stopSideCode: "C9"
 }, "2026-10-16T19:54:00Z", { requireConfirmedStopAssignment: true });
 assert.ok(confirmedKv78Html.includes("verwacht, berekend uit KV78-doeltijd + halteafwijking"),
   "a confirmed KV78 stop assignment may retain its expected-time wording");
 assert.ok(confirmedKv78Html.includes('class="rt-delay"'),
   "a confirmed KV78 stop assignment may retain its delay styling");
+const stopPlaceOnlyKv78Html = stopEventHtml("Vertrek (KV78-halte 09575)", {
+  targetTime: "12:28:00",
+  delaySeconds: 0,
+  stopAssignmentStatus: "confirmed_stopplace"
+}, "2026-10-18T10:28:00Z", { requireConfirmedStopAssignment: true });
+assert.ok(stopPlaceOnlyKv78Html.includes('class="rt-unknown"'),
+  "a StopPlace-only zero deviation must use neutral styling");
+assert.equal(stopPlaceOnlyKv78Html.includes('class="rt-ok"'), false,
+  "a StopPlace-only zero deviation must not be shown as confirmed on time");
+assert.ok(stopPlaceOnlyKv78Html.includes("gemeld: 0 sec afwijking; op tijd niet bevestigd"),
+  "a StopPlace-only zero deviation must explicitly remain unconfirmed");
 
 const unconfirmedOpenovHtml = stopEventHtml("Vertrek", {
   time: "2026-10-16T19:54:00Z",
@@ -209,11 +221,46 @@ assert.ok(predictionFunction.includes("String(rt.timestampBasis ?? '').toLowerCa
   "raw OpenOV predictions must have an explicit per-trip timestamp");
 assert.ok(predictionFunction.includes("if (!hasPerTripTimestamp) {\n    return null;"),
   "raw OpenOV fallback must fail closed when the per-trip timestamp is missing");
-assert.ok(predictionFunction.includes("String(event?.stopAssignmentStatus ?? '').startsWith('confirmed_')"),
-  "KV78 times must not replace planned timeline times without a confirmed stop assignment");
+const timelineRealtimePrediction = new vm.Script("(" + predictionFunction + ")").runInNewContext();
+const reproducedStopPlaceOnlyLeg = {
+  mode: "SUBWAY",
+  scheduledStartTime: "2026-10-18T10:28:00.000Z",
+  ndovRealtime: { status: "kv78_delay", kv78: { departure: {
+    time: "2026-10-18T10:28:00.000Z", delaySeconds: 0,
+    targetTime: "12:28:00", stopAssignmentStatus: "confirmed_stopplace"
+  } } },
+  realtimePrediction: { status: "available", departure: {
+    time: "2026-10-18T10:28:00.000Z", source: "NDOV KV78Turbo", confidence: "medium"
+  } }
+};
+assert.equal(timelineRealtimePrediction(reproducedStopPlaceOnlyLeg, "departure", reproducedStopPlaceOnlyLeg.scheduledStartTime), null,
+  "a StopPlace-only KV78 event must not replace the timetable in the main timeline");
+const confirmedPlatformLeg = {
+  ...reproducedStopPlaceOnlyLeg,
+  ndovRealtime: { status: "kv78_delay", kv78: { departure: {
+    time: "2026-10-18T10:28:00.000Z", delaySeconds: 0, targetTime: "12:28:00",
+    stopAssignmentStatus: "confirmed_quay_platform", stopSideCode: "C9"
+  } } },
+  realtimePrediction: { status: "available", departure: {
+    time: "2026-10-18T10:28:00.000Z", source: "NDOV KV78Turbo", confidence: "medium"
+  } }
+};
+assert.equal(timelineRealtimePrediction(confirmedPlatformLeg, "departure", confirmedPlatformLeg.scheduledStartTime)?.source, "NDOV KV78Turbo",
+  "a fully confirmed KV78 platform/side prediction may replace the timetable");
+assert.ok(predictionFunction.includes("event?.stopAssignmentStatus === 'confirmed_quay_platform'") &&
+  predictionFunction.includes("Boolean(event?.stopSideCode)"),
+  "KV78 times must not replace planned timeline times without a confirmed platform and side");
 
-assert.ok(realtimeRenderer.includes("nulafwijking hoort bij een tijdmatch zonder bevestigde PSA/CHB-halte"),
-  "unconfirmed KV78 zero-deviation must not be labelled as on-time at that stop");
+assert.ok(realtimeRenderer.includes("De haltezijde is niet bevestigd; deze nulafwijking bewijst daarom niet"),
+  "StopPlace-only KV78 zero-deviation must explain that the exact stop side remains unconfirmed");
+assert.ok(realtimeRenderer.includes("const vehicleTypeLabel = String(modeName(leg.mode) || 'OV').toLocaleLowerCase('nl-NL');"),
+  "realtime UI must derive transport wording from the actual leg mode");
+assert.ok(realtimeRenderer.includes("de ${vehicleTypeLabel} op tijd rijdt"),
+  "OpenOV's zero-deviation warning must name the actual transport mode");
+assert.ok(realtimeRenderer.includes("Dit betekent niet dat de ${esc(vehicleTypeLabel)} op tijd rijdt"),
+  "missing prediction warning must name the actual transport mode");
+assert.equal(realtimeRenderer.includes("de bus op tijd rijdt"), false,
+  "metro realtime notices must not incorrectly mention a bus");
 assert.ok(html.includes("invalidChronologyCount") &&
   html.includes("Deze opties worden niet getoond"),
   "time-inconsistent itineraries must be excluded and explained to the user");
@@ -226,4 +273,31 @@ assert.ok(summaryFunction.includes("niet gebruikt als verwachte tijd in de tijdl
 console.log("PASS: OpenOV status helper has no out-of-scope leg reference");
 console.log("PASS: KV6 observed-only status is rendered in the leg UI");
 console.log("PASS: unconfirmed OpenOV times cannot replace planned timeline times");
+
+const ovapiPanelStart = html.indexOf("$('ovapiTransitousMatchButton').onclick = async () => {");
+const ovapiPanelEnd = html.indexOf("function normalizeTransitousStopId", ovapiPanelStart);
+assert.ok(ovapiPanelStart >= 0 && ovapiPanelEnd > ovapiPanelStart, "OVAPI comparison panel must exist");
+const ovapiPanelSource = html.slice(ovapiPanelStart, ovapiPanelEnd);
+assert.ok(ovapiPanelSource.includes("['BUS', 'TRAM', 'METRO', 'SUBWAY'].includes(mode)"),
+  "OVAPI panel must accept bus, tram, metro and subway legs");
+assert.ok(ovapiPanelSource.includes("normalizeComparableLine"),
+  "OVAPI panel must normalize T/M-prefixed route labels before comparison");
+assert.ok(ovapiPanelSource.includes("TRAM: 'tram'") && ovapiPanelSource.includes("METRO: 'metro'"),
+  "OVAPI comparison results must display the correct transport mode");
+assert.equal(ovapiPanelSource.includes("!== 'BUS'"), false,
+  "OVAPI comparison panel must not retain the old bus-only filter");
+console.log("PASS: OVAPI comparison panel accepts tram/metro and labels them correctly");
+
+assert.ok(html.includes("kv6LookupDiagnostics") &&
+  html.includes("returnedExactEventCount") &&
+  html.includes("unmatchedIdentitySamples") &&
+  html.includes("KV6-lookup") &&
+  html.includes("verse exacte matches"),
+  "planner summary must expose bounded KV6 lookup diagnostics needed to investigate zero exact metro matches");
+assert.ok(html.includes("met bevestigde PSA/CHB-station (StopPlace)") &&
+  html.includes("zonder bevestigde PSA/CHB-stationmatch"),
+  "planner summary must distinguish station-level StopPlace confirmation from an exact quay/platform match");
+
+console.log("PASS: planner summary exposes bounded KV6 lookup diagnostics");
+console.log("PASS: KV78 summary labels StopPlace confirmation accurately");
 console.log("All public UI JavaScript checks passed.");

@@ -12,7 +12,7 @@ import {
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
-import { eventsForIdentities, flattenCurrentMutations, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, upsertCurrentMutationState } from './ndov-live-state.mjs';
+import { amsterdamClockSeconds, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
 const OWNER_PREFIXES = ['/ARR/', '/RIG/', '/GVB/', '/CXX/', '/EBS/', '/QBUZZ/', '/KEOLIS/', '/IVU/', '/OPENOV/'];
@@ -27,8 +27,17 @@ const KV6_ACTIVE_EVENT_TYPES = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIV
 const KV78_ROW_LIMIT = 30000; // rolling, durable row cache; still bounded by design
 const KV78_STATUS_SAMPLE_LIMIT = 5000;
 const KV17_STATE_LIMIT = 5000;
-const ROW_RETENTION_MS = 10 * 60 * 1000;
+// KV78 rows older than this are rejected by /rows and cannot enrich a live plan.
 const FRESH_ROW_MS = 180 * 1000;
+const ROW_RETENTION_MS = FRESH_ROW_MS;
+// Periodically prune stale rows before the 30k cap forces eviction of potentially fresh rows.
+const KV78_ROW_PRUNE_INTERVAL_MS = 30 * 1000;
+// Match logic compares target stop times within +/- 180 seconds; older stop rows
+// cannot match any current/future itinerary and should not consume cache capacity.
+const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180;
+// Keep upcoming stop predictions up to four hours ahead; farther future rows
+// cannot serve immediate plans and otherwise crowd out trips starting sooner.
+const KV78_STOP_TIME_FUTURE_RETENTION_SECONDS = 4 * 60 * 60;
 // Near-continuous streaming; reconnect before the long-lived TCP/request ceiling.
 const AUTO_SESSION_SECONDS = 600;
 const AUTO_REST_MS = 5 * 1000;
@@ -43,6 +52,51 @@ const CONTINUOUS_PERSIST_INTERVAL_MS = 60 * 1000;
 const ROW_CHUNK_SIZE = 1000;
 const MUTATION_CHUNK_SIZE = 1000;
 const NDOV_SHARED_OBJECT_NAME = 'ndov-shared-collector-v1';
+
+
+const KV78_LINE_LOOKUP_MAX_ROWS = 250;
+const KV78_LINE_LOOKUP_MAX_TIMES = 20;
+const KV78_LINE_LOOKUP_TOLERANCE_SECONDS = 180;
+
+function kv78QueryClockSeconds(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const clock = text.match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  if (clock) {
+    const hour = Number(clock[1]);
+    const minute = Number(clock[2]);
+    const second = Number(clock[3] ?? 0);
+    if (minute > 59 || second > 59) return null;
+    return ((hour * 3600 + minute * 60 + second) % 86400 + 86400) % 86400;
+  }
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed)) return null;
+  const seconds = amsterdamClockSeconds(parsed);
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+function kv78QueryClockDistance(left, right) {
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return null;
+  let distance = Math.abs(left - right);
+  if (distance > 43200) distance = 86400 - distance;
+  return distance;
+}
+
+function kv78LineLookupDistance(row, scheduledTimes) {
+  const rowTimes = [
+    row?.targetDepartureTime ?? row?.TargetDepartureTime,
+    row?.targetArrivalTime ?? row?.TargetArrivalTime,
+  ].map(kv78QueryClockSeconds).filter(Number.isFinite);
+  if (!rowTimes.length) return null;
+  let best = Number.POSITIVE_INFINITY;
+  for (const rowTime of rowTimes) {
+    for (const scheduledTime of scheduledTimes) {
+      const distance = kv78QueryClockDistance(rowTime, scheduledTime);
+      if (distance !== null && distance < best) best = distance;
+    }
+  }
+  return Number.isFinite(best) ? best : null;
+}
 
 function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -78,6 +132,57 @@ function currentOperatingDateAmsterdam() {
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
+}
+
+function normalizedIdentityDiagnosticParts(value) {
+  const lookup = normalizeTripLookupIdentity(value);
+  if (!lookup) return null;
+  const owner = String(lookup.owner ?? "").trim().toUpperCase();
+  const date = normalizeOperatingDate(lookup.date);
+  const line = String(lookup.line ?? "").trim().toUpperCase();
+  const journey = String(lookup.journey ?? "").trim();
+  const reinforcement = String(lookup.reinforcement ?? "0").trim() || "0";
+  if (!owner || !/^\d{8}$/.test(date) || !line || !journey) return null;
+  return { owner, date, line, journey, reinforcement, identity: [owner, date, line, journey, reinforcement].join("|") };
+}
+
+function compactIdentityDiagnosticRecord(trip) {
+  return {
+    identity: String(trip?.identity ?? ""),
+    eventType: trip?.eventType ?? null,
+    receivedAt: trip?.receivedAt ?? null,
+    punctualityPresent: typeof trip?.punctualityPresent === "boolean" ? trip.punctualityPresent : undefined,
+    punctualityAgeSeconds: Number.isFinite(trip?.punctualityAgeSeconds) ? trip.punctualityAgeSeconds : undefined,
+    rowCount: Number.isFinite(trip?.rowCount) ? trip.rowCount : undefined,
+    uniqueStopCount: Number.isFinite(trip?.uniqueStopCount) ? trip.uniqueStopCount : undefined,
+    sampleStopCodes: Array.isArray(trip?.sampleStopCodes) ? trip.sampleStopCodes.slice(0, 6) : undefined,
+  };
+}
+
+function buildRequestedIdentityComparisons(url, trips) {
+  const requested = [...new Map(
+    url.searchParams.getAll("identity").map(normalizedIdentityDiagnosticParts).filter(Boolean)
+      .map((identity) => [identity.identity, identity])
+  ).values()].slice(0, 8);
+  if (!requested.length) return [];
+  const records = (Array.isArray(trips) ? trips : [])
+    .map((trip) => ({ trip, parts: normalizedIdentityDiagnosticParts(trip?.identity) }))
+    .filter((item) => item.parts);
+  return requested.map((target) => {
+    const sameOwnerDate = records.filter(({ parts }) => parts.owner === target.owner && parts.date === target.date);
+    const sameOwnerDateLine = sameOwnerDate.filter(({ parts }) => parts.line === target.line);
+    const sameOwnerDateJourney = sameOwnerDate.filter(({ parts }) => parts.journey === target.journey);
+    return {
+      requestedIdentity: target.identity,
+      exactIdentityFound: sameOwnerDate.some(({ parts }) => parts.identity === target.identity),
+      sameOwnerDateSampleCount: sameOwnerDate.length,
+      sameOwnerDateLineSamples: sameOwnerDateLine.slice(0, 5).map(({ trip }) => compactIdentityDiagnosticRecord(trip)),
+      sameOwnerDateJourneySamples: sameOwnerDateJourney.slice(0, 5).map(({ trip }) => compactIdentityDiagnosticRecord(trip)),
+      sameOwnerDateOtherSamples: sameOwnerDate
+        .filter(({ parts }) => parts.line !== target.line && parts.journey !== target.journey)
+        .slice(0, 3).map(({ trip }) => compactIdentityDiagnosticRecord(trip)),
+    };
+  });
 }
 function b64(bytes) {
   let out = '';
@@ -193,6 +298,13 @@ function initialSnapshot(stream) {
     startedAt: null, finishedAt: null, sessionSeconds: null, messageCount: 0, rawBytes: 0,
     envelopeCounts: {}, latestMessageAt: null, latestRows: [], latestEvents: [], latestMutations: [],
     error: null, warnings: [],
+    // Session-level diagnostics distinguish fresh transport messages from usable KV78 stop-time rows.
+    kv78PasstimeMessageCount: 0,
+    kv78ParsedRowCount: 0,
+    kv78LastPasstimeMessageAt: null,
+    kv78LastNonemptyPasstimeAt: null,
+    kv78LastPasstimeBatchSize: 0,
+    kv78LastPasstimePayloadBytes: 0,
   };
 }
 
@@ -205,7 +317,8 @@ export class NdovFeedHub extends DurableObject {
     this.streamStates = new Map(Object.keys(CONFIG).map((stream) => [stream, {
       snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
       running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
-      socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0,
+      socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
+      rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
     }]));
     this.ready = ctx.blockConcurrencyWhile(async () => {
       // Eerst de oude opslag veiligstellen, pas daarna state laden.
@@ -244,6 +357,20 @@ export class NdovFeedHub extends DurableObject {
       const chunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(key('rows:' + i))));
       state.rows = new Map(chunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
     } else state.rows = new Map(savedRows ?? []);
+
+    // Re-key legacy snapshots by canonical trip + stop identity. This collapses
+    // duplicate rows that differed only by LocalServiceLevelCode without losing
+    // any fields needed for exact trip/stop/time matching.
+    if (stream === 'kv78') {
+      const canonicalRows = new Map();
+      for (const [savedKey, row] of state.rows.entries()) {
+        const cacheKey = kv78RowCacheKey(row) ?? String(savedKey);
+        if (canonicalRows.has(cacheKey)) state.rowCacheStats.duplicateRowsCollapsed += 1;
+        canonicalRows.delete(cacheKey);
+        canonicalRows.set(cacheKey, row);
+      }
+      state.rows = canonicalRows;
+    }
 
     state.events = new Map();
     if (compressedEventCount > 0) {
@@ -714,11 +841,7 @@ export class NdovFeedHub extends DurableObject {
                 const date = normalizeOperatingDate(row?.operationDate);
                 const line = String(row?.linePlanningNumber ?? "").trim().toUpperCase();
 
-                if (
-                  owner !== "CXX" ||
-                  date !== currentDate ||
-                  !["U005", "U011", "U073"].includes(line)
-                ) continue;
+                if (!owner || date !== currentDate || !line) continue;
 
                 const journey = String(row?.journeyNumber ?? "").trim();
                 const reinforcement = String(row?.fortifyOrderNumber ?? "0").trim() || "0";
@@ -768,13 +891,29 @@ export class NdovFeedHub extends DurableObject {
                   )
                 );
 
+              const byOwnerLineMap = new Map();
+              for (const trip of trips) {
+                const parts = trip.identity.split("|");
+                const owner = parts[0] ?? "?";
+                const line = parts[2] ?? "?";
+                const key = owner + "|" + line;
+                const summary = byOwnerLineMap.get(key) ?? { owner, line, tripCount: 0, rowCount: 0 };
+                summary.tripCount += 1;
+                summary.rowCount += trip.rowCount;
+                byOwnerLineMap.set(key, summary);
+              }
               return {
                 currentDate,
                 cacheSize: state.rows.size,
                 cacheLimit: KV78_ROW_LIMIT,
+                rowCacheStats: { ...state.rowCacheStats },
+                stopTimePastRetentionSeconds: KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+                stopTimeFutureRetentionSeconds: KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
                 matchingRowCount,
                 identityCount: trips.length,
+                byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.rowCount - a.rowCount).slice(0, 80),
                 trips: trips.slice(0, 80),
+                requestedIdentityComparisons: buildRequestedIdentityComparisons(url, trips),
               };
             })()
           : null;
@@ -788,7 +927,7 @@ export class NdovFeedHub extends DurableObject {
                 const owner = String(event?.dataOwnerCode ?? "").trim().toUpperCase();
                 const date = normalizeOperatingDate(event?.operationDate);
                 const line = String(event?.linePlanningNumber ?? "").trim().toUpperCase();
-                if (owner !== "CXX" || date !== currentDate || !["U005", "U011", "U073"].includes(line)) continue;
+                if (!owner || date !== currentDate || !line) continue;
 
                 const journey = String(event?.journeyNumber ?? "").trim();
                 const reinforcement = String(event?.reinforcementNumber ?? "0").trim() || "0";
@@ -809,29 +948,53 @@ export class NdovFeedHub extends DurableObject {
               }
 
               trips.sort((a, b) => String(b.receivedAt ?? "").localeCompare(String(a.receivedAt ?? "")));
+              const byLineMap = new Map();
+              const byOwnerLineMap = new Map();
+              for (const trip of trips) {
+                const parts = trip.identity.split("|");
+                const owner = parts[0] ?? "?";
+                const line = parts[2] ?? "?";
+                byLineMap.set(line, (byLineMap.get(line) ?? 0) + 1);
+                const key = owner + "|" + line;
+                const summary = byOwnerLineMap.get(key) ?? { owner, line, tripCount: 0, punctualityCount: 0 };
+                summary.tripCount += 1;
+                if (trip.punctualityPresent) summary.punctualityCount += 1;
+                byOwnerLineMap.set(key, summary);
+              }
               return {
                 currentDate,
                 storedTripCount: state.events.size,
                 matchingTripCount: trips.length,
-                byLine: Object.fromEntries(["U005", "U011", "U073"].map((line) => [
-                  line,
-                  trips.filter((item) => item.identity.split("|")[2] === line).length,
-                ])),
+                byLine: Object.fromEntries([...byLineMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 80)),
+                byOwnerLine: [...byOwnerLineMap.values()].sort((a, b) => b.tripCount - a.tripCount).slice(0, 80),
                 trips: trips.slice(0, 80),
+                requestedIdentityComparisons: buildRequestedIdentityComparisons(url, trips),
               };
             })()
           : null;
       const currentMutations = flattenCurrentMutations(state.mutations, 300);
+      // Persisted snapshots retain a small lastRows preview for local diagnostics.
+      // Strip it here so includeRows=0 truly omits every cached-row array.
+      const statusBase = { ...base };
+      delete statusBase.latestRows;
       return Response.json({
-        ...base,
-        latestRows: url.searchParams.get('includeAllRows') === '1'
-          ? [...state.rows.values()]
-          : [...state.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
+        ...statusBase,
+        // The planner asks for a lightweight status snapshot. It retrieves
+        // exact KV78 rows separately by trip identity, so serializing 5,000
+        // unrelated cached rows into every plan request is needless memory/CPU.
+        ...(url.searchParams.get('includeRows') === '0' ? {} : {
+          latestRows: url.searchParams.get('includeAllRows') === '1'
+            ? [...state.rows.values()]
+            : [...state.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
+        }),
         latestEvents: [...state.events.values()].slice(-100),
         bisonIdentityDiagnostics,
         storedKv6TripCount: state.events.size,
         latestMutations: currentMutations,
         storedKv78RowCount: state.rows.size,
+        ...(stream === 'kv78' ? {
+          kv78StatusSampleCount: Math.min(state.rows.size, KV78_STATUS_SAMPLE_LIMIT),
+        } : {}),
         kv78IdentityDiagnostics,
         storedMutationIdentityCount: state.mutations.size,
         continuousEnabled: state.continuousEnabled,
@@ -1024,7 +1187,20 @@ export class NdovFeedHub extends DurableObject {
     }
     if (url.pathname === '/rows') {
       if (stream !== 'kv78') return Response.json({ ok: false, error: 'KV78-halterijen zijn alleen beschikbaar op de KV78-stream.' }, { status: 400 });
-      const identity = normalizeTripLookupIdentity(url.searchParams.get('identity'));
+      const rawIdentities = url.searchParams.getAll('identity').map(value => String(value ?? '').trim()).filter(Boolean);
+      if (rawIdentities.length > 50) {
+        return Response.json({ ok: false, error: 'Vraag maximaal 50 KV78-ritidentiteiten tegelijk op.' }, { status: 400 });
+      }
+      const parsedIdentities = rawIdentities.map(normalizeTripLookupIdentity);
+      if (parsedIdentities.some(identity => !identity)) {
+        return Response.json({ ok: false, error: 'Een of meer KV78-ritidentiteiten zijn ongeldig.' }, { status: 400 });
+      }
+      const identityKey = identity => [
+        identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement
+      ].join('|');
+      const identitiesByKey = new Map(parsedIdentities.map(identity => [identityKey(identity), identity]));
+      const identities = [...identitiesByKey.values()];
+      const identity = identities.length === 1 ? identities[0] : null;
       const vehicleNumber = String(url.searchParams.get('vehicleNumber') ?? '').trim().split(':').pop();
       const vehicleOwner = String(url.searchParams.get('owner') ?? '').trim().toUpperCase();
       const vehicleDate = normalizeOperatingDate(url.searchParams.get('date'));
@@ -1032,26 +1208,94 @@ export class NdovFeedHub extends DurableObject {
       const vehicleLookupValid = Boolean(
         vehicleNumber && vehicleOwner && /^\d{8}$/.test(vehicleDate)
       );
-      if (!identity && !vehicleLookupValid) {
-        return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement of vehicleNumber=...&owner=...&date=YYYYMMDD op.' }, { status: 400 });
+      const lineLookupRequested = url.searchParams.get('lineLookup') === '1';
+      const scheduledTimeValues = url.searchParams.getAll('scheduledTime');
+      const scheduledTimes = scheduledTimeValues.map(kv78QueryClockSeconds);
+      const lineLookupValid = Boolean(
+        lineLookupRequested &&
+        !identities.length &&
+        !vehicleNumber &&
+        vehicleOwner &&
+        /^\d{8}$/.test(vehicleDate) &&
+        vehicleLine &&
+        scheduledTimeValues.length > 0 &&
+        scheduledTimeValues.length <= KV78_LINE_LOOKUP_MAX_TIMES &&
+        scheduledTimes.every(Number.isFinite)
+      );
+      if (lineLookupRequested && !lineLookupValid) {
+        return Response.json({
+          ok: false,
+          error: `Voor lijn-/tijdmatching zijn owner, date=YYYYMMDD, line en 1–${KV78_LINE_LOOKUP_MAX_TIMES} geldige scheduledTime-waarden vereist; combineer dit niet met identity of vehicleNumber.`,
+        }, { status: 400 });
+      }
+      if (!identities.length && !vehicleLookupValid && !lineLookupValid) {
+        return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement-parameters, vehicleNumber=...&owner=...&date=YYYYMMDD, of lineLookup=1&owner=...&date=YYYYMMDD&line=...&scheduledTime=...' }, { status: 400 });
       }
       const now = Date.now();
-      const rows = [...state.rows.values()].filter((row) => identity
-        ? rowMatchesIdentity(row, identity)
-        : String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
+      const rows = [...state.rows.values()].filter((row) => {
+        if (identities.length) return identities.some(identity => rowMatchesIdentity(row, identity));
+        if (lineLookupValid) {
+          if (
+            String(row?.dataOwnerCode ?? '').trim().toUpperCase() !== vehicleOwner ||
+            normalizeOperatingDate(row?.operationDate) !== vehicleDate ||
+            String(row?.linePlanningNumber ?? '').trim().toUpperCase() !== vehicleLine
+          ) return false;
+          const distance = kv78LineLookupDistance(row, scheduledTimes);
+          return distance !== null && distance <= KV78_LINE_LOOKUP_TOLERANCE_SECONDS;
+        }
+        return String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
           String(row?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
           normalizeOperatingDate(row?.operationDate) === vehicleDate &&
-          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
-      );
+          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine);
+      });
       const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
       fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
+
+      // Exact identities retain their historical per-trip cap. The metro fallback
+      // first filters by owner/date/line and tight scheduled-time windows, then
+      // returns only the nearest bounded candidates to avoid serializing a whole line.
+      let returnedRows;
+      let truncated = false;
+      if (identities.length) {
+        const rowsByIdentity = new Map([...identitiesByKey.keys()].map(key => [key, []]));
+        for (const row of fresh) {
+          const rowIdentity = normalizeTripLookupIdentity([
+            row?.dataOwnerCode,
+            row?.operationDate,
+            row?.linePlanningNumber,
+            row?.journeyNumber,
+            row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? '0'
+          ].join('|'));
+          if (!rowIdentity) continue;
+          const bucket = rowsByIdentity.get(identityKey(rowIdentity));
+          if (bucket) bucket.push(row);
+        }
+        returnedRows = [...rowsByIdentity.values()].flatMap(items => items.slice(-200));
+      } else if (lineLookupValid) {
+        const ranked = fresh.map((row) => ({
+          row,
+          distance: kv78LineLookupDistance(row, scheduledTimes),
+          receivedAt: Date.parse(row?.receivedAt ?? '') || 0,
+        })).filter((item) => item.distance !== null);
+        ranked.sort((a, b) => a.distance - b.distance || b.receivedAt - a.receivedAt);
+        truncated = ranked.length > KV78_LINE_LOOKUP_MAX_ROWS;
+        returnedRows = ranked.slice(0, KV78_LINE_LOOKUP_MAX_ROWS).map((item) => item.row);
+      } else {
+        returnedRows = fresh.slice(-200);
+      }
+
+      const normalizedIdentityKeys = [...identitiesByKey.keys()];
       return Response.json({
         ok: true,
-        identity: identity ? [identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement].join('|') : null,
-        lookup: identity ? null : { vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
-        returnedCount: Math.min(fresh.length, 200),
+        identity: identity ? identityKey(identity) : null,
+        identities: identities.length > 1 ? normalizedIdentityKeys : undefined,
+        lookup: identities.length ? null : lineLookupValid
+          ? { mode: 'line_schedule_times', owner: vehicleOwner, date: vehicleDate, line: vehicleLine, scheduledTimeCount: scheduledTimes.length, toleranceSeconds: KV78_LINE_LOOKUP_TOLERANCE_SECONDS }
+          : { mode: 'vehicle', vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
+        returnedCount: returnedRows.length,
+        truncated,
         staleCount: rows.length - fresh.length,
-        rows: fresh.slice(-200),
+        rows: returnedRows,
       }, { headers: { 'cache-control': 'no-store' } });
     }
     if (url.pathname !== '/start') return new Response('not found', { status: 404 });
@@ -1198,12 +1442,44 @@ export class NdovFeedHub extends DurableObject {
 
   pruneRows(stream) {
     const state = this.stateFor(stream);
-    const cutoff = Date.now() - ROW_RETENTION_MS;
+    const now = Date.now();
+    const nowSeconds = amsterdamClockSeconds(now);
+    const cutoff = now - ROW_RETENTION_MS;
     for (const [key, row] of state.rows.entries()) {
       const captured = Date.parse(row?.receivedAt ?? '');
-      if (!Number.isFinite(captured) || captured < cutoff) state.rows.delete(key);
+      if (!Number.isFinite(captured) || captured < cutoff) {
+        state.rows.delete(key);
+        if (stream === 'kv78') state.rowCacheStats.stalePrunedRows += 1;
+        continue;
+      }
+      if (stream === 'kv78') {
+        const scheduleInfo = kv78RowScheduleInfo(
+          row, nowSeconds,
+          KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+          KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
+        );
+        if (!scheduleInfo.relevant) {
+          state.rows.delete(key);
+          state.rowCacheStats.schedulePrunedRows += 1;
+        }
+      }
     }
-    while (state.rows.size > KV78_ROW_LIMIT) state.rows.delete(state.rows.keys().next().value);
+    if (state.rows.size > KV78_ROW_LIMIT && stream === 'kv78') {
+      // Drop farthest/untimed stops first so recent and soon-departing journeys
+      // survive cache pressure, rather than relying on stream-message order.
+      const evictions = selectKv78RowEvictionKeys(
+        state.rows, KV78_ROW_LIMIT, nowSeconds,
+        KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+        KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
+      );
+      for (const key of evictions) {
+        if (state.rows.delete(key)) state.rowCacheStats.limitEvictedRows += 1;
+      }
+    }
+    while (state.rows.size > KV78_ROW_LIMIT) {
+      state.rows.delete(state.rows.keys().next().value);
+      if (stream === 'kv78') state.rowCacheStats.limitEvictedRows += 1;
+    }
   }
 
   async persist(stream, force = false, bulk = false) {
@@ -1501,15 +1777,40 @@ export class NdovFeedHub extends DurableObject {
           state.snapshot.rawBytes += payload.length;
           state.snapshot.latestMessageAt = new Date().toISOString();
           state.snapshot.envelopeCounts[envelope] = (state.snapshot.envelopeCounts[envelope] || 0) + 1;
+          if (
+            stream === 'kv78' &&
+            Date.now() - state.lastRowPruneAt >= KV78_ROW_PRUNE_INTERVAL_MS
+          ) {
+            this.pruneRows(stream);
+            state.lastRowPruneAt = Date.now();
+          }
           if (stream === 'kv78' && /\/KV8passtimes\//.test(envelope)) {
-            for (const row of parseKv78Payload(text, envelope)) {
+            const passtimeReceivedAt = new Date().toISOString();
+            const parsedRows = parseKv78Payload(text, envelope);
+            state.snapshot = {
+              ...state.snapshot,
+              kv78PasstimeMessageCount: (Number(state.snapshot.kv78PasstimeMessageCount) || 0) + 1,
+              kv78ParsedRowCount: (Number(state.snapshot.kv78ParsedRowCount) || 0) + parsedRows.length,
+              kv78LastPasstimeMessageAt: passtimeReceivedAt,
+              kv78LastNonemptyPasstimeAt: parsedRows.length
+                ? passtimeReceivedAt
+                : (state.snapshot.kv78LastNonemptyPasstimeAt ?? null),
+              kv78LastPasstimeBatchSize: parsedRows.length,
+              kv78LastPasstimePayloadBytes: payload.length,
+            };
+            for (const row of parsedRows) {
               // Keep every line during this bounded diagnostic run. Filtering to
               // U005/U011/U073/24 hid mutations such as CXX L014 and ARR 26010.
-              row.receivedAt = new Date().toISOString();
-              const key = `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+              row.receivedAt = passtimeReceivedAt;
+              const key = kv78RowCacheKey(row) ?? `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
               state.rows.delete(key);
               state.rows.set(key, row);
-              if (state.rows.size > KV78_ROW_LIMIT) state.rows.delete(state.rows.keys().next().value);
+            }
+            // Prune after processing a complete feed message so expired/past
+            // stop rows are removed before capacity eviction can discard fresh rows.
+            if (state.rows.size > KV78_ROW_LIMIT) {
+              this.pruneRows(stream);
+              state.lastRowPruneAt = Date.now();
             }
           } else if (stream === 'bison' && /KV6posinfo/.test(envelope)) {
             const receivedAt = new Date().toISOString();

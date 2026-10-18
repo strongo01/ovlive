@@ -5,6 +5,14 @@ on:
     branches:
       - assistant/realtime-propagation-validation-20261015
       - assistant/ns-priority-subrequest-budget-20261017
+      - assistant/tram-metro-realtime-coverage-20261017
+      - assistant/bus-train-tram-regression-20261018
+      - assistant/metro-exact-trip-id-fallback-20261018
+      - assistant/metro-ui-confidence-20261018
+      - assistant/kv78-stop-crosswalk-priority-20261018
+      - assistant/kv6-live-ui-diagnostics-20261018
+      - assistant/metro-kv78-time-crossmatch-clean-20261018
+      - assistant/metro-resource-cache-prune-20261018
   workflow_dispatch:
 
 permissions:
@@ -46,17 +54,17 @@ jobs:
       - name: NDOV continuous collector regression tests
         run: npm run ndov:continuous-selftest
 
-      - name: NDOV KV78 delay regression tests
-        run: npm run ndov:kv78-delay-selftest
+      - name: NDOV bus/tram/metro realtime integration regression tests
+        run: npm run ndov:tram-metro-selftest
 
       - name: NDOV KV6 live regression tests
         run: npm run ndov:kv6-live-selftest
 
+      - name: Metro KV78 identity fallback regression tests
+        run: npm run ndov:metro-kv78-fallback-selftest
+
       - name: NDOV prediction regression tests
         run: npm run ndov:prediction-selftest
-
-      - name: NDOV OpenOV route cross-match regression tests
-        run: npm run ndov:openov-route-crossmatch-selftest
 
       - name: NDOV auto-collector safety regression tests
         run: npm run ndov:autocollect-safety-selftest
@@ -69,6 +77,9 @@ jobs:
 
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
+
+      - name: OVAPI comparison tests for tram and metro
+        run: npm run ovapi:match-selftest
 
       - name: Deployment asset preflight syntax
         run: node --check scripts/validate-realtime-assets.mjs
@@ -111,6 +122,7 @@ jobs:
           fi
 
           OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/openov-live-plan-validation.mjs
+          OVLIVE_BASE_URL="http://127.0.0.1:8787" node scripts/bus-train-tram-route-regression.mjs
 
       - name: Actual deployed OVLive production endpoint diagnostic
         if: github.ref == 'refs/heads/assistant/realtime-propagation-validation-20261015'

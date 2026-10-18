@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
+import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
 
 const header = String.raw`\GKV8turbo_passtimes|KV8turbo_passtimes|OpenOV|||UTF-8|0.1|2026-10-11T09:53:01+02:00|
 \TDATEDPASSTIME|DATEDPASSTIME|start object
@@ -14,6 +15,43 @@ assert.equal(kv[0].linePlanningNumber, 'U011');
 assert.equal(kv[0].departureDelaySeconds, -8);
 assert.equal(kv[0].identity, 'CXX|2026-10-11|2947354|U011|7004|0');
 
+// Canonical cache keys must collapse LocalServiceLevelCode-only duplicates.
+const sameStopOtherServiceLevel = { ...kv[0], localServiceLevelCode: 'another-service-level' };
+assert.equal(kv78RowCacheKey(kv[0]), kv78RowCacheKey(sameStopOtherServiceLevel));
+assert.notEqual(
+  kv78RowCacheKey(kv[0]),
+  kv78RowCacheKey({ ...kv[0], userStopCode: 'DIFFERENT_STOP' }),
+);
+
+// Current time 14:00 Amsterdam on the fixed test date.
+const cacheNow = Date.parse('2026-10-17T12:00:00.000Z');
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '13:59:00' }, cacheNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetArrivalTime: '13:56:59' }, cacheNow), false);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '14:05:00' }, cacheNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '18:01:00' }, cacheNow), false);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: null, targetArrivalTime: null }, cacheNow), true);
+assert.equal(kv78RowScheduleInfo({ targetDepartureTime: '15:00:00' }, 14 * 3600).distanceSeconds, 3600);
+assert.deepEqual(
+  selectKv78RowEvictionKeys(new Map([
+    ['near', { targetDepartureTime: '14:01:00' }],
+    ['far', { targetDepartureTime: '17:30:00' }],
+  ]), 1, 14 * 3600),
+  ['far'],
+);
+assert.deepEqual(
+  selectKv78RowEvictionKeys(new Map([
+    ['untimed', {}],
+    ['near', { targetDepartureTime: '14:01:00' }],
+  ]), 1, 14 * 3600),
+  ['untimed'],
+);
+
+// Midnight must be interpreted conservatively as wall-clock schedule time.
+const midnightNow = Date.parse('2026-10-17T21:55:00.000Z'); // 23:55 Amsterdam
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '00:05:00' }, midnightNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '24:05:00' }, midnightNow), true);
+assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '23:51:00' }, midnightNow), false);
+
 // Ensure non-sample planning lines can be represented and correlated.
 const l014Payload = header.replace('|U011|7004|', '|L014|7006|');
 const l014Rows = parseKv78Payload(l014Payload, '/GOVI/KV8passtimes/CXX');
@@ -25,7 +63,31 @@ const l014Correlation = correlateKv17MutationsToKv78Rows(l014Rows, [{
 }]);
 assert.equal(l014Correlation[0].matchedKv78StopCount, 1);
 
+// A GVB tram uses the exact same neutral KV78 parser and exact trip-cancellation path.
+const gvbTramPayload = header.replace(
+  "CXX|2026-10-11|U011|7004|0|14|51111531|2947354|",
+  "GVB|2026-10-11|24|56057|0|14|08001|3107751|"
+);
+const gvbTramRows = parseKv78Payload(gvbTramPayload, "/GOVI/KV8passtimes/GVB");
+assert.equal(gvbTramRows.length, 1);
+assert.equal(gvbTramRows[0].dataOwnerCode, "GVB");
+assert.equal(gvbTramRows[0].linePlanningNumber, "24");
+assert.equal(gvbTramRows[0].journeyNumber, "56057");
+assert.equal(gvbTramRows[0].identity, "GVB|2026-10-11|3107751|24|56057|0");
+const gvbTramCorrelation = correlateKv17MutationsToKv78Rows(gvbTramRows, [{
+  dataOwnerCode: "GVB", operationDate: "2026-10-11", linePlanningNumber: "24",
+  journeyNumber: "56057", reinforcementNumber: "0", eventType: "CANCEL",
+  timestamp: "2026-10-11T11:05:13+02:00", allJourneysOfLine: false, allLines: false,
+}]);
+assert.equal(gvbTramCorrelation.length, 1);
+assert.equal(gvbTramCorrelation[0].matchedKv78StopCount, 1);
+
 const hubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
+const planSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
+assert.ok(
+  hubSource.includes('!/^\\d{8}$/.test(date)'),
+  'targeted realtime identity diagnostics must normalize YYYYMMDD dates correctly',
+);
 assert.match(hubSource, /function ndovCollectionWindow/);
 assert.match(hubSource, /AUTO_ACTIVE_START_UTC_HOUR = 4/);
 assert.match(hubSource, /setAlarm\(window\.nextAlarmAt\)/);
@@ -33,6 +95,25 @@ assert.match(hubSource, /CONTINUOUS_FULL_CHECKPOINT_MS = 5 \* 60 \* 1000/);
 assert.doesNotMatch(hubSource, /storage\.put\(durableChanges\)/);
 console.log('PASS: dagelijkse UTC-planning en gebundelde opslagwrites');
 assert.match(hubSource, /const KV78_ROW_LIMIT = 30000/);
+assert.match(hubSource, /const FRESH_ROW_MS = 180 \* 1000/);
+assert.match(hubSource, /const ROW_RETENTION_MS = FRESH_ROW_MS/);
+assert.match(hubSource, /const KV78_ROW_PRUNE_INTERVAL_MS = 30 \* 1000/);
+assert.match(hubSource, /const KV78_STOP_TIME_PAST_RETENTION_SECONDS = 180/);
+assert.ok(hubSource.includes('const KV78_STOP_TIME_FUTURE_RETENTION_SECONDS = 4 * 60 * 60;'));
+assert.match(hubSource, /kv78RowScheduleInfo\(/);
+assert.match(hubSource, /selectKv78RowEvictionKeys\(/);
+assert.match(hubSource, /kv78RowCacheKey\(row\)/);
+assert.match(hubSource, /KV78_LINE_LOOKUP_MAX_ROWS = 250/);
+assert.match(hubSource, /KV78_LINE_LOOKUP_MAX_TIMES = 20/);
+assert.match(hubSource, /lineLookupRequested = url\.searchParams\.get\('lineLookup'\) === '1'/);
+assert.match(hubSource, /kv78LineLookupDistance\(row, scheduledTimes\)/);
+assert.match(hubSource, /KV78_LINE_LOOKUP_TOLERANCE_SECONDS = 180/);
+
+assert.match(hubSource, /rowCacheStats: \{ stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 \}/);
+assert.ok(planSource.includes('rowCacheStats: stream === "kv78" ? diagnostics?.rowCacheStats ?? null : undefined'));
+assert.match(planSource, /stopTimeFutureRetentionSeconds/);
+assert.match(hubSource, /lastRowPruneAt: 0/);
+assert.match(hubSource, /Date\.now\(\) - state\.lastRowPruneAt >= KV78_ROW_PRUNE_INTERVAL_MS/);
 assert.match(hubSource, /const AUTO_SESSION_SECONDS = 600/);
 assert.match(hubSource, /const AUTO_REST_MS = 5 \* 1000/);
 assert.match(hubSource, /async alarm\(\)/);
@@ -43,18 +124,26 @@ assert.match(hubSource, /new CompressionStream\('gzip'\)/);
 assert.match(hubSource, /new DecompressionStream\('gzip'\)/);
 assert.match(hubSource, /state\.rows\.size > KV78_ROW_LIMIT/);
 assert.match(hubSource, /ROW_RETENTION_MS/);
-assert.match(hubSource, /row\.receivedAt = new Date\(\)\.toISOString\(\)/);
+assert.match(hubSource, /row\.receivedAt = passtimeReceivedAt/);
+assert.match(hubSource, /kv78PasstimeMessageCount/);
+assert.match(hubSource, /kv78ParsedRowCount/);
 assert.match(hubSource, /async pruneMutationDates\(stream\)/);
 assert.match(hubSource, /continuousEnabled: state\.continuousEnabled/);
 assert.match(hubSource, /url\.pathname === '\/continuous\/enable'/);
 assert.match(hubSource, /url\.pathname === '\/continuous\/disable'/);
 assert.match(hubSource, /url\.pathname === '\/mutations'/);
 assert.match(hubSource, /url\.pathname === '\/rows'/);
+assert.match(hubSource, /const rawIdentities = url\.searchParams\.getAll\('identity'\)/,
+  'KV78 row reads must support batching exact trip identities into one Durable Object call');
 assert.match(hubSource, /url\.pathname === '\/events'/);
 assert.match(hubSource, /bisonIdentityDiagnostics/);
 assert.match(hubSource, /identityDiagnostics.*=== "1"/);
 assert.match(hubSource, /matchingTripCount: trips\.length/);
-assert.match(hubSource, /"U005", "U011", "U073"/);
+assert.match(hubSource, /byOwnerLine/);
+assert.doesNotMatch(hubSource, /owner !== "CXX"/);
+assert.doesNotMatch(hubSource, /"U005", "U011", "U073"/);
+assert.match(hubSource, /const OWNER_PREFIXES = \[[\s\S]*?'\/RIG\/'[\s\S]*?'\/GVB\/'[\s\S]*?\];/);
+assert.match(hubSource, /kv78: \{ port: 7817, name: 'KV78Turbo', prefixes: \['\/GOVI\/KV8passtimes\/'\] \}/);
 assert.match(hubSource, /KV6_EVENT_LIMIT = 30000/);
 assert.match(hubSource, /persistFullBisonEvents/);
 assert.doesNotMatch(hubSource, /TARGET_LINES/);
@@ -131,11 +220,13 @@ assert.ok(makeReadyFrame(1).length > 0);
 assert.ok(makeSubscribeFrame('/GOVI/KV8passtimes/', 1).length > 0);
 
 console.log('PASS: KV78 table parser reads route/stop identity and delay');
-console.log('PASS: KV78 capture includes non-sample lines such as CXX L014 for exact KV17 correlation');
+console.log('PASS: KV78 capture includes non-sample bus lines for exact KV17 correlation');
+console.log('PASS: GVB tram KV78 parsing and exact cancellation correlation');
 console.log('PASS: namespaced BISON XML parser reads punctuality and coordinates');
 console.log('PASS: KV17 parser identifies cancellations, recoveries, and all-line-trip mutations');
 console.log('PASS: KV17 CANCEL matches KV78 only by exact owner/date/line/journey/reinforcement');
 console.log('PASS: newest RECOVER supersedes older CANCEL; broad mutations are not guessed onto individual trips');
+console.log('PASS: rolling KV78 cache prunes beyond the prediction freshness window before cap pressure');
 console.log('PASS: rolling KV78 cache is bounded, timestamped, and kept fresh');
 console.log('PASS: current KV17 state persists across sessions and older operating days are pruned');
 console.log('PASS: alarm-driven collection, compressed durable state, and exact read endpoints are configured');

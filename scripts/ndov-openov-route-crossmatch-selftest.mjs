@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue } from '../src/ndov-plan-cancellation.js';
+import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue, selectCachedCrosswalkShardNumbers, prioritizeKv78AssignmentCandidateRows, matchKv78RowByScheduleTime } from '../src/ndov-plan-cancellation.js';
 
 assert.equal(openovTripStartBucket('20261011_11:59_nl-OpenOV_390000001'), '00');
 assert.equal(openovTripStartBucket('20261011_12:00_nl-OpenOV_390000001'), '12');
@@ -21,6 +21,120 @@ console.log('PASS: service-day trip start selects the correct 00/12/24 route buc
   console.log("PASS: parsed crosswalk cache uses bounded least-recently-used eviction");
 }
 
+{
+  const loadedCache = new Map([
+    ["11", Promise.resolve({})],
+    ["13", Promise.resolve({})],
+  ]);
+  assert.deepEqual(
+    selectCachedCrosswalkShardNumbers([11, 12, 13, 14, 15], loadedCache, 2),
+    [11, 13, 12, 14],
+    "cached shards must be reused while at most two new shards are selected",
+  );
+
+  const fullCache = new Map([["11", 1], ["12", 2], ["13", 3], ["14", 4]]);
+  assert.deepEqual(
+    selectCachedCrosswalkShardNumbers([11, 12, 13, 14, 15], fullCache, 2),
+    [11, 12, 13, 14, 15],
+    "a cached four-shard set may include one newly requested shard without an extra read burst",
+  );
+  console.log("PASS: stop-crosswalk selection reuses cached shards and rotates to missing shards");
+}
+
+// Prioritize the best-matching rows for both endpoints before nearby stops.
+// With a two-new-shard budget, the origin and destination keys must not be
+// displaced by earlier-in-array candidates 70 seconds away.
+{
+  const receivedAt = new Date().toISOString();
+  const row = (stopCode, clock) => ({
+    dataOwnerCode: "GVB",
+    operationDate: "2026-10-18",
+    linePlanningNumber: "52",
+    journeyNumber: "88775",
+    userStopCode: stopCode,
+    targetDepartureTime: clock,
+    targetArrivalTime: clock,
+    receivedAt,
+  });
+  const result = prioritizeKv78AssignmentCandidateRows([{
+    item: { leg: {
+      from: { departure: "2026-10-18T10:28:00.000Z" },
+      to: { arrival: "2026-10-18T10:38:00.000Z" },
+    } },
+    rows: [
+      row("09599", "12:26:50"),
+      row("09575", "12:28:00"),
+      row("09586", "12:36:50"),
+      row("09585", "12:38:00"),
+    ],
+  }]);
+  assert.deepEqual(
+    result.map((candidate) => `${candidate.dataOwnerCode}|${candidate.userStopCode}`),
+    ["GVB|09575", "GVB|09585", "GVB|09599", "GVB|09586"],
+    "best departure and arrival stops must be loaded before less likely nearby stops",
+  );
+  console.log("PASS: KV78 crosswalk priority selects both endpoint stops before nearby candidates");
+}
+
+// A stop whose PSA/CHB shard was not loaded can only remain a time-based
+// diagnostic; a known conflicting StopPlace must still be rejected. This keeps
+// useful exact-trip/time data visible without ever claiming platform confirmation.
+{
+  const receivedAt = new Date().toISOString();
+  const row = (stopCode, targetTime) => ({
+    dataOwnerCode: "GVB",
+    operationDate: "2026-10-18",
+    linePlanningNumber: "52",
+    journeyNumber: "88775",
+    userStopCode: stopCode,
+    targetDepartureTime: targetTime,
+    receivedAt,
+  });
+  const expectedStop = { parentStation: "NL:S:30009585" };
+  const partialIndex = {
+    shardCount: 16,
+    requestedShardNumbers: [3, 4],
+    loadedShardNumbers: [4],
+    assignments: {
+      "GVB|09575": [{ stopPlaceCode: "NL:S:30009575", stopSideCode: "A" }],
+    },
+  };
+  const unverifiedUnloadedShard = matchKv78RowByScheduleTime(
+    [row("09585", "12:38:00")],
+    "2026-10-18T10:38:00.000Z",
+    "targetDepartureTime",
+    180,
+    { expectedStop, assignmentIndex: partialIndex, operationDate: "2026-10-18" },
+  );
+  assert.equal(unverifiedUnloadedShard?.stopAssignmentStatus, "time_only_unverified",
+    "an unselected shard can supply diagnostic exact-trip/time data, but cannot imply stop confirmation");
+
+  const knownWrongStop = matchKv78RowByScheduleTime(
+    [row("09575", "12:38:00")],
+    "2026-10-18T10:38:00.000Z",
+    "targetDepartureTime",
+    180,
+    { expectedStop, assignmentIndex: partialIndex, operationDate: "2026-10-18" },
+  );
+  assert.equal(knownWrongStop, null,
+    "a loaded PSA/CHB assignment to another StopPlace must still be rejected");
+
+  const loadedButUnmapped = matchKv78RowByScheduleTime(
+    [row("09585", "12:38:00")],
+    "2026-10-18T10:38:00.000Z",
+    "targetDepartureTime",
+    180,
+    { expectedStop, assignmentIndex: {
+      shardCount: 16,
+      requestedShardNumbers: [3],
+      loadedShardNumbers: [3],
+      assignments: {},
+    }, operationDate: "2026-10-18" },
+  );
+  assert.equal(loadedButUnmapped?.stopAssignmentStatus, "time_only_unverified",
+    "a genuinely unmapped stop in a loaded shard also remains low-confidence");
+  console.log("PASS: partial or missing PSA/CHB mappings remain low-confidence; known wrong-stop matches are rejected");
+}
 const patterns = [{
   routeId: '146903', realtimeTripId: 'CXX:U073:7054', headsign: 'Maarssenbroek', directionId: '1',
   stops: [
@@ -147,7 +261,7 @@ console.log('PASS: ambiguous candidate patterns expose route, trip endpoints and
 console.log('All OpenOV route crossmatch selftests passed.');
 
 
-// Full plan-enrichment test: route/time/stop fallback must flow through to the fresh exact KV6 event.
+// End-to-end enrichment tests for exact BUS, TRAM, SUBWAY and METRO identities.
 const now = new Date().toISOString();
 const identity = 'CXX|20261011|U073|7054|0';
 const event = {
@@ -156,26 +270,79 @@ const event = {
   identity, punctualitySeconds: 102, punctualityTimestamp: now, punctualityReceivedAt: now, receivedAt: now,
   vehicleNumber: '9633', blockCode: null, userStopCode: '50003360', passageSequenceNumber: '0',
 };
+const makeModeEvent = (owner, line, journey, punctualitySeconds, vehicleNumber) => ({
+  source: "BISON", envelope: "/" + owner + "/KV6posinfo", eventType: "ONROUTE",
+  dataOwnerCode: owner, operationDate: "2026-10-11", linePlanningNumber: line,
+  journeyNumber: journey, reinforcementNumber: "0",
+  identity: owner + "|20261011|" + line + "|" + journey + "|0",
+  punctualitySeconds, punctualityTimestamp: now, punctualityReceivedAt: now, receivedAt: now,
+  vehicleNumber, blockCode: null, userStopCode: owner + "-STOP", passageSequenceNumber: "1",
+});
+const tramIdentity = "RIG|20261011|3|56057|0";
+const subwayIdentity = "GVB|20261011|52|66051|0";
+const metroIdentity = "GVB|20261011|50|56059|0";
+const exactTripIdFallbackIdentity = "GVB|20261011|52|88641|0";
+const modeEvents = [
+  event,
+  makeModeEvent("RIG", "3", "56057", 180, "2201"),
+  makeModeEvent("GVB", "52", "66051", -15, "3001"),
+  makeModeEvent("GVB", "50", "56059", 45, "3002"),
+  makeModeEvent("GVB", "52", "88641", 75, "3003"),
+];
+const tramPattern = { ...patterns[0], routeId: "120024", realtimeTripId: "RIG:3:56057" };
+const subwayPattern = { ...patterns[0], routeId: "120052", realtimeTripId: "GVB:52:66051" };
+const metroPattern = { ...patterns[0], routeId: "120050", realtimeTripId: "GVB:50:56059" };
+const makeModeLeg = (mode, routeId, sourceTripId) => ({
+  ...leg, mode, routeId: "nl-OpenOV_" + routeId,
+  tripId: "20261011_15:21_nl-OpenOV_" + sourceTripId,
+});
+const assetFetchPaths = [];
 const planEnv = {
   ASSETS: {
     async fetch(request) {
       const url = new URL(request.url);
-      if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: [] });
+      assetFetchPaths.push(url.pathname);
+      if (url.pathname === '/ndov-trip-crosswalk/manifest.json') return Response.json({ generatedAt: now, shards: ['3905'] });
+      if (url.pathname === '/ndov-trip-crosswalk/trips-3905.json') return Response.json({
+        '390511123': 'GVB:52:88641',
+        '390511124': 'GVB:52:88642',
+      });
       if (url.pathname === '/ndov-openov-route-crosswalk/manifest.json') return Response.json({
-        generatedAt: now,
-        serviceCalendarDateCount: 0,
-        routes: { '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json'] },
+        generatedAt: now, serviceCalendarDateCount: 1, serviceIdsEmbedded: false,
+        routes: {
+          '146903': ['route-146903-t00-0.json', 'route-146903-t12-0.json', 'route-146903-t12-1.json'],
+          '120024': ['route-120024-t12-0.json'],
+          '120052': ['route-120052-t12-0.json'],
+          '120050': ['route-120050-t12-0.json'],
+        },
         routesByStartBucket: {
-          '146903': {
-            '00': ['route-146903-t00-0.json'],
-            '12': ['route-146903-t12-0.json'],
-          },
+          '146903': { '00': ['route-146903-t00-0.json'], '12': ['route-146903-t12-0.json', 'route-146903-t12-1.json'] },
+          '120024': { '12': ['route-120024-t12-0.json'] },
+          '120052': { '12': ['route-120052-t12-0.json'] },
+          '120050': { '12': ['route-120050-t12-0.json'] },
         },
       });
+      if (url.pathname === '/ndov-openov-route-crosswalk/service-calendar.json') {
+        return Response.json({ '20261011': ['TEST-SERVICE'] });
+      }
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t00-0.json') {
         return new Response('A different start-time bucket must not be loaded.', { status: 500 });
       }
       if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t12-0.json') return Response.json(patterns);
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-146903-t12-1.json') {
+        return Response.json([{ ...patterns[0], headsign: 'This shard must not match', realtimeTripId: 'CXX:U073:unmatched' }]);
+      }
+      if (url.pathname.endsWith('-services.json')) {
+        const routeShard = url.pathname.split('/').pop().replace(/-services\.json$/i, '.json');
+        if (routeShard === 'route-146903-t12-0.json') return Response.json([['TEST-SERVICE']]);
+        if (routeShard === 'route-146903-t12-1.json') return Response.json([['INACTIVE-SERVICE']]);
+        if (routeShard === 'route-120024-t12-0.json') return Response.json([['TEST-SERVICE']]);
+        if (routeShard === 'route-120052-t12-0.json') return Response.json([['TEST-SERVICE']]);
+        if (routeShard === 'route-120050-t12-0.json') return Response.json([['TEST-SERVICE']]);
+      }
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120024-t12-0.json') return Response.json([tramPattern]);
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120052-t12-0.json') return Response.json([subwayPattern]);
+      if (url.pathname === '/ndov-openov-route-crosswalk/routes/route-120050-t12-0.json') return Response.json([metroPattern]);
       return new Response('not found', { status: 404 });
     },
   },
@@ -189,20 +356,73 @@ const planEnv = {
         if (url.pathname === '/status' && stream === 'bison') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/status' && stream === 'kv78') return Response.json({ state: 'listening', latestMessageAt: now });
         if (url.pathname === '/mutations' && stream === 'bison') return Response.json({ mutations: [] });
-        if (url.pathname === '/events' && stream === 'bison') return Response.json({ events: url.searchParams.getAll('identity').includes(identity) ? [event] : [] });
+        if (url.pathname === '/events' && stream === 'bison') {
+          const requested = new Set(url.searchParams.getAll("identity"));
+          return Response.json({ events: modeEvents.filter((item) => requested.has(item.identity)) });
+        }
         if (url.pathname === '/rows' && stream === 'kv78') return Response.json({ rows: [] });
         return new Response('unexpected mock request', { status: 404 });
       } };
     },
   },
 };
-const endToEndPlan = { itineraries: [{ legs: [{ ...leg }] }] };
+const makeExactTripIdFallbackLeg = (sourceTripId) => ({
+  ...makeModeLeg("SUBWAY", "120052", sourceTripId),
+  // Deliberately make the static route-pattern anchors disagree. The numeric
+  // trip-ID crosswalk may still resolve identity, but it cannot itself create
+  // realtime data without the exact collector observation below.
+  tripTo: { ...leg.tripTo, scheduledArrival: "2026-10-11T14:44:00Z" },
+  to: { ...leg.to, scheduledArrival: "2026-10-11T14:44:00Z" },
+});
+const endToEndPlan = { itineraries: [{ legs: [
+  { ...leg },
+  makeModeLeg("TRAM", "120024", "391225407"),
+  makeModeLeg("SUBWAY", "120052", "391225408"),
+  makeModeLeg("METRO", "120050", "391225409"),
+  makeExactTripIdFallbackLeg("390511123"),
+  makeExactTripIdFallbackLeg("390511124"),
+] }] };
 await applyNdovCancellationsToPlan(endToEndPlan, planEnv);
-const enrichedLeg = endToEndPlan.itineraries[0].legs[0];
-assert.equal(enrichedLeg.ndovRealtime?.status, 'kv6_live');
-assert.equal(enrichedLeg.ndovRealtime?.identity, identity);
-assert.equal(enrichedLeg.ndovRealtime?.punctualitySeconds, 102);
-assert.equal(enrichedLeg.ndovRealtime?.vehicleNumber, '9633');
-assert.equal(endToEndPlan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 1);
-assert.equal(endToEndPlan.ndovRealtimeMeta.kv6MatchedLegCount, 1);
-console.log('PASS: route crossmatch flows into the plan as fresh exact KV6 delay (102 seconds, vehicle 9633)');
+const [
+  enrichedLeg, enrichedTramLeg, enrichedSubwayLeg, enrichedMetroLeg,
+  enrichedMetroFallbackLeg, enrichedMetroFallbackWithoutEventLeg,
+] = endToEndPlan.itineraries[0].legs;
+for (const [modeName, actualLeg, expectedIdentity, expectedDelay, expectedVehicle] of [
+  ["BUS", enrichedLeg, identity, 102, "9633"],
+  ["TRAM", enrichedTramLeg, tramIdentity, 180, "2201"],
+  ["SUBWAY", enrichedSubwayLeg, subwayIdentity, -15, "3001"],
+  ["METRO", enrichedMetroLeg, metroIdentity, 45, "3002"],
+]) {
+  assert.equal(actualLeg.ndovRealtime?.status, "kv6_live", modeName + " should receive a fresh exact KV6 match");
+  assert.equal(actualLeg.ndovRealtime?.identity, expectedIdentity);
+  assert.equal(actualLeg.ndovRealtime?.punctualitySeconds, expectedDelay);
+  assert.equal(actualLeg.ndovRealtime?.vehicleNumber, expectedVehicle);
+}
+assert.equal(endToEndPlan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 4);
+assert.equal(endToEndPlan.ndovRealtimeMeta.tripIdCrosswalkFallbackMatchedLegCount, 2);
+assert.equal(endToEndPlan.ndovRealtimeMeta.kv6MatchedLegCount, 5);
+assert.equal(enrichedMetroFallbackLeg.ndovRealtime?.status, "kv6_live",
+  "the exact GTFS-NL trip-ID mapping may resolve identity when the route-pattern index has no candidates");
+assert.equal(enrichedMetroFallbackLeg.ndovRealtime?.identity, exactTripIdFallbackIdentity);
+assert.equal(enrichedMetroFallbackLeg.ndovRealtime?.punctualitySeconds, 75,
+  "the delay must come from the fresh exact BISON event, never the static crosswalk");
+assert.equal(enrichedMetroFallbackWithoutEventLeg.ndovRealtime?.status, undefined,
+  "an exact trip-ID mapping alone must not attach a realtime status when no exact BISON event exists");
+assert.equal(enrichedMetroFallbackWithoutEventLeg.ndovRealtime?.punctualitySeconds, undefined);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.BUS.kv6MatchedLegCount, 1);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.TRAM.kv6MatchedLegCount, 1);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.SUBWAY.kv6MatchedLegCount, 2);
+assert.equal(endToEndPlan.ndovRealtimeMeta.coverageByMode.METRO.kv6MatchedLegCount, 1);
+assert.ok(endToEndPlan.ndovRealtimeMeta.routeCrosswalkOutcomes.some((item) =>
+  item.reason === "exact_numeric_trip_id_fallback" &&
+  item.realtimeTripId === "GVB:52:88641"
+), "the fallback must expose the exact resolved GVB identity in diagnostics");
+assert.ok(assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t12-0-services.json'),
+  'the exact matching route shard must have its service IDs checked');
+assert.ok(!assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t12-1-services.json'),
+  'a route shard with no exact route/time/stop candidate must not fetch its sidecar');
+assert.ok(!assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-146903-t00-0-services.json'),
+  'a different start-time bucket must not fetch its sidecar');
+console.log("PASS: route/time/stop matching fetches service sidecars only for exact candidate shards");
+console.log("PASS: exact route/time/stop crossmatch attaches fresh KV6 to BUS/TRAM/SUBWAY/METRO");
+console.log("PASS: per-mode coverage counters preserve each operator and exact trip identity");
