@@ -188,7 +188,6 @@ const tramIdentity = "RIG|20261011|3|56057|0";
 const subwayIdentity = "GVB|20261011|52|66051|0";
 const metroIdentity = "GVB|20261011|50|56059|0";
 const exactTripIdFallbackIdentity = "GVB|20261011|52|88641|0";
-const exactTripIdFallbackMissingObservationIdentity = "GVB|20261011|52|88642|0";
 const modeEvents = [
   event,
   makeModeEvent("RIG", "3", "56057", 180, "2201"),
