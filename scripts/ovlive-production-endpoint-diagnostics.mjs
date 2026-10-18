@@ -162,6 +162,8 @@ async function main() {
     feeds: Object.fromEntries(routeLevelFeedResults.map(({ kind, result }) => {
       const data = result?.json;
       const records = Array.isArray(data?.entities) ? data.entities : [];
+      const matchingCount = Number(data?.matchingCount ?? records.length);
+      const returnedCount = Number(data?.returnedCount ?? records.length);
       return [kind, {
         httpStatus: result?.status ?? null,
         ok: data?.ok === true,
@@ -169,11 +171,47 @@ async function main() {
         ageSeconds: data?.ageSeconds ?? null,
         feedTimestamp: data?.feedTimestamp ?? null,
         matchingCount: data?.matchingCount ?? null,
-        returnedCount: data?.returnedCount ?? records.length,
+        returnedCount,
+        completeRouteSample: Number.isFinite(matchingCount) && returnedCount >= matchingCount,
         sampleRecords: records.slice(0, 10).map(summarizeSourceRecord),
         error: data?.error ?? result?.error ?? null,
       }];
     })),
+    // Compare planned IDs against records returned by the route-filtered
+    // requests themselves. This rules out misleading conclusions from two
+    // separate feed requests whose contents may differ between fetches.
+    tripCrossCheck: openovLegs.map((leg) => {
+      const expectedRouteId = normalizeOpenovId(leg.routeId ?? leg.route?.id);
+      const expectedTripId = openovTripId(leg.tripId ?? leg.trip?.id);
+      const feedMatches = Object.fromEntries(routeLevelFeedResults.map(({ kind, result }) => {
+        const data = result?.json;
+        const records = Array.isArray(data?.entities) ? data.entities : [];
+        const sameTrip = records.filter((record) =>
+          normalizeOpenovId(record?.tripId) === expectedTripId
+        );
+        const exactRouteAndTrip = sameTrip.filter((record) =>
+          normalizeOpenovId(record?.routeId) === expectedRouteId
+        );
+        return [kind, {
+          httpStatus: result?.status ?? null,
+          freshness: data?.freshness ?? null,
+          matchingRouteRecords: data?.matchingCount ?? null,
+          returnedRouteRecords: data?.returnedCount ?? records.length,
+          completeRouteSample: Number(data?.returnedCount ?? records.length) >=
+            Number(data?.matchingCount ?? records.length),
+          sameTripIdCount: sameTrip.length,
+          exactRouteAndTripCount: exactRouteAndTrip.length,
+          exactRecords: exactRouteAndTrip.slice(0, 2).map(summarizeSourceRecord),
+        }];
+      }));
+      return {
+        routeId: leg.routeId ?? leg.route?.id ?? null,
+        openovRouteId: expectedRouteId || null,
+        transitousTripId: leg.tripId ?? leg.trip?.id ?? null,
+        openovFeedTripId: expectedTripId || null,
+        feedMatches,
+      };
+    }),
   };
 
   const exactOpenovSourceEvidence = {
