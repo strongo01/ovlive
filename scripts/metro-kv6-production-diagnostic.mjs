@@ -1,4 +1,5 @@
 import process from "node:process";
+import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 
 const baseUrl = (process.env.OVLIVE_BASE_URL ?? "").replace(/\/+$/, "");
 if (!baseUrl) throw new Error("OVLIVE_BASE_URL is required.");
@@ -88,6 +89,178 @@ function compactComparisons(diagnostics) {
   };
 }
 
+const OPENOV_TRIP_UPDATES_URL = "https://gtfs.openov.nl/gtfs-rt/tripUpdates.pb";
+const OPENOV_VEHICLE_POSITIONS_URL = "https://gtfs.openov.nl/gtfs-rt/vehiclePositions.pb";
+
+function compactTripDescriptor(trip) {
+  const numeric = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  return {
+    tripId: trip?.tripId == null ? null : String(trip.tripId),
+    routeId: trip?.routeId == null ? null : String(trip.routeId).replace(/^nl-OpenOV_/i, ""),
+    startDate: trip?.startDate ? String(trip.startDate).replace(/\\D/g, "").slice(0, 8) : null,
+    startTime: trip?.startTime ?? null,
+    scheduleRelationship: trip?.scheduleRelationship ?? null,
+  };
+}
+
+function compactOpenovTripKeys(legs) {
+  const byTrip = new Map();
+  for (const leg of legs) {
+    const match = String(leg?.tripId ?? "").match(
+      /^(\\d{8})_(\\d{2}:\\d{2}(?::\\d{2})?)_nl-OpenOV_(.+)$/i
+    );
+    if (!match) continue;
+    const tripId = match[3].replace(/^nl-OpenOV_/i, "");
+    const routeId = String(leg.routeId ?? "").replace(/^nl-OpenOV_/i, "");
+    const key = [tripId, routeId, match[1], match[2]].join("|");
+    if (!byTrip.has(key)) {
+      byTrip.set(key, {
+        key,
+        tripId,
+        routeId,
+        startDate: match[1],
+        startTime: match[2],
+        fromStopId: String(leg.from?.stopId ?? "").replace(/^nl-OpenOV_/i, ""),
+        toStopId: String(leg.to?.stopId ?? "").replace(/^nl-OpenOV_/i, ""),
+        itineraryIndexes: [leg.itineraryIndex],
+      });
+    } else {
+      const entry = byTrip.get(key);
+      if (!entry.itineraryIndexes.includes(leg.itineraryIndex)) entry.itineraryIndexes.push(leg.itineraryIndex);
+    }
+  }
+  return [...byTrip.values()];
+}
+
+async function inspectRawOpenovFeeds(legs) {
+  const rt = GtfsRealtimeBindings.transit_realtime;
+  const targets = compactOpenovTripKeys(legs);
+  const wantedTripIds = new Set(targets.map((item) => item.tripId));
+  const wantedRoutes = new Set(targets.map((item) => item.routeId));
+
+  async function readFeed(url, kind) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          accept: "application/x-protobuf",
+          "user-agent": "OVLive read-only metro realtime diagnostic",
+        },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!response.ok) {
+        return { ok: false, kind, httpStatus: response.status, error: `HTTP ${response.status}` };
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      // Guard the diagnostic worker from unexpectedly large feed responses.
+      if (bytes.byteLength > 30 * 1024 * 1024) {
+        return { ok: false, kind, httpStatus: response.status, byteLength: bytes.byteLength, error: "Feed exceeds 30 MiB diagnostic safety cap." };
+      }
+      const feed = rt.FeedMessage.decode(bytes);
+      const feedTimestampSeconds = Number(feed.header?.timestamp);
+      const feedTimestamp = Number.isFinite(feedTimestampSeconds) && feedTimestampSeconds > 0
+        ? new Date(feedTimestampSeconds * 1000).toISOString()
+        : null;
+      const feedAgeSeconds = feedTimestamp
+        ? Math.round((Date.now() - Date.parse(feedTimestamp)) / 1000)
+        : null;
+      const entities = feed.entity ?? [];
+      const matches = [];
+
+      for (const entity of entities) {
+        if (kind === "vehiclePositions" && entity.vehicle) {
+          const vehicle = entity.vehicle;
+          const trip = compactTripDescriptor(vehicle.trip);
+          const tripId = String(trip.tripId ?? "").replace(/^nl-OpenOV_/i, "");
+          const routeId = String(trip.routeId ?? "").replace(/^nl-OpenOV_/i, "");
+          if (!wantedTripIds.has(tripId)) continue;
+          const vehicleTimestampSeconds = Number(vehicle.timestamp);
+          const vehicleTimestamp = Number.isFinite(vehicleTimestampSeconds) && vehicleTimestampSeconds > 0
+            ? new Date(vehicleTimestampSeconds * 1000).toISOString()
+            : null;
+          matches.push({
+            entityId: entity.id ?? null,
+            trip,
+            vehicleId: vehicle.vehicle?.id ?? null,
+            vehicleTimestamp,
+            vehicleAgeSeconds: vehicleTimestamp ? Math.round((Date.now() - Date.parse(vehicleTimestamp)) / 1000) : null,
+            hasPosition: Number.isFinite(Number(vehicle.position?.latitude)) &&
+              Number.isFinite(Number(vehicle.position?.longitude)),
+            stopId: vehicle.stopId ?? null,
+            matchesExpectedRoute: wantedRoutes.has(routeId),
+          });
+        } else if (kind === "tripUpdates" && entity.tripUpdate) {
+          const update = entity.tripUpdate;
+          const trip = compactTripDescriptor(update.trip);
+          const tripId = String(trip.tripId ?? "").replace(/^nl-OpenOV_/i, "");
+          if (!wantedTripIds.has(tripId)) continue;
+          const updateTimestampSeconds = Number(update.timestamp);
+          const updateTimestamp = Number.isFinite(updateTimestampSeconds) && updateTimestampSeconds > 0
+            ? new Date(updateTimestampSeconds * 1000).toISOString()
+            : null;
+          const matchedTarget = targets.find((item) => item.tripId === tripId &&
+            item.startDate === (trip.startDate ?? item.startDate) &&
+            item.routeId === String(trip.routeId ?? "").replace(/^nl-OpenOV_/i, ""));
+          const stopUpdates = (update.stopTimeUpdate ?? []).filter((stop) => {
+            const stopId = String(stop.stopId ?? "").replace(/^nl-OpenOV_/i, "");
+            return stopId && (stopId === matchedTarget?.fromStopId || stopId === matchedTarget?.toStopId);
+          }).map((stop) => ({
+            stopId: String(stop.stopId ?? "").replace(/^nl-OpenOV_/i, "") || null,
+            stopSequence: stop.stopSequence ?? null,
+            arrivalTime: Number(stop.arrival?.time) > 0 ? new Date(Number(stop.arrival.time) * 1000).toISOString() : null,
+            arrivalDelaySeconds: stop.arrival?.delay ?? null,
+            departureTime: Number(stop.departure?.time) > 0 ? new Date(Number(stop.departure.time) * 1000).toISOString() : null,
+            departureDelaySeconds: stop.departure?.delay ?? null,
+            scheduleRelationship: stop.scheduleRelationship ?? null,
+          }));
+          matches.push({
+            entityId: entity.id ?? null,
+            trip,
+            tripUpdateTimestamp: updateTimestamp,
+            tripUpdateAgeSeconds: updateTimestamp ? Math.round((Date.now() - Date.parse(updateTimestamp)) / 1000) : null,
+            tripDelaySeconds: update.delay ?? null,
+            vehicleId: update.vehicle?.id ?? null,
+            stopUpdateCount: (update.stopTimeUpdate ?? []).length,
+            stopUpdatesAtPlannedEndpoints: stopUpdates,
+          });
+        }
+      }
+
+      return {
+        ok: true,
+        kind,
+        httpStatus: response.status,
+        byteLength: bytes.byteLength,
+        feedTimestamp,
+        feedAgeSeconds,
+        entityCount: entities.length,
+        targetTripIdEntityCount: matches.length,
+        targetMatches: matches,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        kind,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  const [tripUpdates, vehiclePositions] = await Promise.all([
+    readFeed(OPENOV_TRIP_UPDATES_URL, "tripUpdates"),
+    readFeed(OPENOV_VEHICLE_POSITIONS_URL, "vehiclePositions"),
+  ]);
+  return {
+    targetTripCount: targets.length,
+    targets,
+    tripUpdates,
+    vehiclePositions,
+    note: "Raw GTFS-Realtime feed cross-check only; no status or delay is inferred from feed-header timestamps.",
+  };
+}
+
 async function main() {
   const baseDiagnostics = {
     check: "production-metro-kv6-diagnostic",
@@ -129,6 +302,7 @@ async function main() {
   const kv6Lookup = meta.kv6LookupDiagnostics ?? null;
   const kv6IdentityDiagnostics = compactComparisons(meta.kv6IdentityDiagnostics);
   const kv78IdentityDiagnostics = compactComparisons(meta.kv78IdentityDiagnostics);
+  const rawOpenovFeedDiagnostic = await inspectRawOpenovFeeds(legs);
   const gvbLineTrips = (kv6IdentityDiagnostics?.byOwnerLine ?? [])
     .filter((item) => String(item.owner ?? "").toUpperCase() === "GVB" ||
       String(item.line ?? "").toUpperCase().includes("52"));
@@ -141,6 +315,7 @@ async function main() {
     itineraryCount: plan.itineraries.length,
     transitLegCount: legs.length,
     transitLegs: legs,
+    rawOpenovFeedDiagnostic,
     kv6Lookup: kv6Lookup ? {
       lookupCompleted: kv6Lookup.lookupCompleted ?? null,
       requestedIdentityCount: kv6Lookup.requestedIdentityCount ?? null,
