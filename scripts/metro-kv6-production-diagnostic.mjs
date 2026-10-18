@@ -98,7 +98,7 @@ function compactTripDescriptor(trip) {
     return Number.isFinite(n) && n > 0 ? n : null;
   };
   return {
-    tripId: trip?.tripId == null ? null : String(trip.tripId),
+    tripId: trip?.tripId == null ? null : String(trip.tripId).replace(/^nl-OpenOV_/i, ""),
     routeId: trip?.routeId == null ? null : String(trip.routeId).replace(/^nl-OpenOV_/i, ""),
     startDate: trip?.startDate ? String(trip.startDate).replace(/\D/g, "").slice(0, 8) : null,
     startTime: trip?.startTime ?? null,
@@ -201,8 +201,8 @@ async function inspectRawOpenovFeeds(legs) {
             ? new Date(updateTimestampSeconds * 1000).toISOString()
             : null;
           const matchedTarget = targets.find((item) => item.tripId === tripId &&
-            item.startDate === (trip.startDate ?? item.startDate) &&
-            item.routeId === String(trip.routeId ?? "").replace(/^nl-OpenOV_/i, ""));
+            (!trip.startDate || item.startDate === String(trip.startDate).replace(/\\D/g, "").slice(0, 8)) &&
+            (!trip.routeId || item.routeId === String(trip.routeId).replace(/^nl-OpenOV_/i, "")));
           const stopUpdates = (update.stopTimeUpdate ?? []).filter((stop) => {
             const stopId = String(stop.stopId ?? "").replace(/^nl-OpenOV_/i, "");
             return stopId && (stopId === matchedTarget?.fromStopId || stopId === matchedTarget?.toStopId);
