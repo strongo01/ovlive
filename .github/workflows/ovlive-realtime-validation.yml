@@ -16,6 +16,7 @@ on:
       - assistant/live-vehicle-map-20261018
       - assistant/transitous-stop-geocoding-20261018
       - assistant/fix-itinerary-status-tdz-20261018
+      - assistant/live-realtime-timetable-poll-20261018
   workflow_dispatch:
 
 permissions:
