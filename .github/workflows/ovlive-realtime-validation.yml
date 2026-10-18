@@ -79,6 +79,9 @@ jobs:
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
 
+      - name: Exact live vehicle map matching regression tests
+        run: node scripts/vehicle-map-selftest.mjs
+
       - name: OVAPI comparison tests for tram and metro
         run: npm run ovapi:match-selftest
 
