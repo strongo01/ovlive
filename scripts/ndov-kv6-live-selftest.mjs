@@ -203,6 +203,14 @@ const noMatchPlan = {
 await applyNdovCancellationsToPlan(noMatchPlan, env, { includeIdentityDiagnostics: true });
 assert.equal(noMatchPlan.ndovRealtimeMeta.kv6MatchedLegCount, 0);
 assert.equal(noMatchPlan.ndovRealtimeMeta.kv78MatchedLegCount, 0);
+const kv6LookupDiagnostics = noMatchPlan.ndovRealtimeMeta.kv6LookupDiagnostics;
+assert.equal(kv6LookupDiagnostics.lookupCompleted, true,
+  "KV6 exact lookup should distinguish a completed zero-result query from an unavailable lookup");
+assert.equal(kv6LookupDiagnostics.requestedIdentityCount, 1);
+assert.equal(kv6LookupDiagnostics.returnedExactEventCount, 0,
+  "the diagnostics should expose that no exact event was returned for this identity");
+assert.equal(kv6LookupDiagnostics.freshExactMatchCount, 0);
+assert.deepEqual(kv6LookupDiagnostics.unmatchedIdentitySamples, ["CXX|20261012|U073|7042|0"]);
 const kv6IdentityAudit = noMatchPlan.ndovRealtimeMeta.kv6IdentityDiagnostics;
 assert.ok(kv6IdentityAudit, 'zero exact KV6 matches must expose bounded identity diagnostics');
 assert.equal(kv6IdentityAudit.available, true);
