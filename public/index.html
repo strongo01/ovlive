@@ -680,9 +680,9 @@ function openovVehiclePositionHtml(rt) {
 
 let liveLeafletPromise = null;
 const liveJourneyMapStates = new Map();
-const LIVE_VEHICLE_POLL_MS = 30000;
+const LIVE_VEHICLE_POLL_MS = 10000;
 const LIVE_VEHICLE_MAX_AGE_SECONDS = 180;
-const LIVE_PLAN_REALTIME_POLL_MS = 30000;
+const LIVE_PLAN_REALTIME_POLL_MS = 10000;
 let livePlanRealtimeTimer = null;
 let livePlanRealtimeInFlight = false;
 let livePlanRealtimeGeneration = 0;
@@ -1149,7 +1149,7 @@ async function refreshLiveJourneyPositions(index) {
       setLiveJourneyStatus(index,
         found.length + " verse voertuigpositie(s) · laatste update " +
         new Date(newest.position.observedAt).toLocaleTimeString("nl-NL") +
-        ". De kaart controleert elke 30 seconden zolang deze reis openstaat.",
+        ". De kaart controleert elke 10 seconden zolang deze reis openstaat.",
         "live");
     } else {
       setLiveJourneyStatus(index,
@@ -2388,7 +2388,8 @@ function stopLivePlanRealtimeRefresh() {
     window.clearInterval(livePlanRealtimeTimer);
     livePlanRealtimeTimer = null;
   }
-  livePlanRealtimeInFlight = false;
+  // Laat het in-flight slot bezet totdat de lopende aanvraag echt klaar is.
+  // Zo kan een nieuw zoekresultaat nooit een tweede refresh naast de eerste starten.
   window.__ovliveRealtimeRefreshBaseline = null;
   window.__ovliveDisplayedItineraryKeys = [];
 }
@@ -2451,7 +2452,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
     if (statusElement) {
-      statusElement.textContent = `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 30 sec.`;
+      statusElement.textContent = `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 10 sec.`;
     }
     window.__ovliveLastRealtimeRefreshAt = new Date().toISOString();
     window.__ovliveLastRealtimeRefreshMeta = {
@@ -2461,7 +2462,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
     };
   } catch (error) {
     console.warn('[OVLIVE_REALTIME_REFRESH]', error instanceof Error ? error.message : String(error));
-    if (statusElement) {
+    if (generation === livePlanRealtimeGeneration && statusElement) {
       statusElement.textContent = 'Realtime-update mislukt; bestaande tijden blijven staan.';
     }
   } finally {
@@ -2793,7 +2794,7 @@ q.set('pedestrianSpeed', '1.5');
       window.__ovliveDisplayedItineraryKeys[index] = itineraryRealtimeKey(journey);
       window.__ovliveTrackingJourneys[index] = { legs: legs.map(trackingLegCopy) };
       const trackingPanel = `<section class="live-follow" aria-label="Live voertuigkaart en halteverwachtingen">
-        <div class="live-follow-heading"><h4>Live voertuig volgen</h4><span class="live-follow-caption">Echte voertuigposities · automatische controle elke 30 sec</span></div>
+        <div class="live-follow-heading"><h4>Live voertuig volgen</h4><span class="live-follow-caption">Echte voertuigposities · automatische controle elke 10 sec</span></div>
         <div id="journey-live-status-${index}" class="live-follow-status" role="status" aria-live="polite">Open deze reis om de livekaart te laden.</div>
         <div id="journey-live-map-${index}" class="live-map" aria-label="Kaart met route, haltes en laatst gemelde voertuigposities"></div>
         <div class="live-map-attribution">Kaartgegevens © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a> · kaartweergave door Leaflet</div>

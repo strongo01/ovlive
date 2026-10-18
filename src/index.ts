@@ -608,8 +608,9 @@ type OpenovFeedCacheEntry = {
   fetchedAtMs: number;
 };
 
-// Een korte cache voorkomt dat iedere klik de upstream opnieuw belast.
-const OPENOV_FEED_CACHE_TTL_MS = 20_000;
+// Korte, gedeelde cache afgestemd op de 10-sec frontendpoll; feed-coalescing
+// en de 30-sec cooldown bij upstream-429 blijven overbelasting begrenzen.
+const OPENOV_FEED_CACHE_TTL_MS = 8_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
 const openovFeedCache = new Map<string, OpenovFeedCacheEntry>();
@@ -823,7 +824,7 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
       "accept-encoding": "gzip"
     },
     signal: AbortSignal.timeout(15000),
-    cf: { cacheTtl: 15, cacheEverything: true }
+    cf: { cacheTtl: 5, cacheEverything: true }
   });
 
   if (!response.ok) {
