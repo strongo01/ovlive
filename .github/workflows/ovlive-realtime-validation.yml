@@ -11,6 +11,7 @@ on:
       - assistant/kv78-stop-crosswalk-priority-20261018
       - assistant/kv6-live-ui-diagnostics-20261018
       - assistant/metro-kv78-time-crossmatch-clean-20261018
+      - assistant/metro-resource-cache-prune-20261018
   workflow_dispatch:
 
 permissions:

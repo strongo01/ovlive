@@ -1319,7 +1319,15 @@ async function getStopAssignmentIndex(env, keys = []) {
       );
     }
     const shard = await shardPromise;
-    Object.assign(assignments, shard?.assignments ?? {});
+    // A shard contains thousands of stops. Copy only the specific requested
+    // assignment keys into this plan's result; copying the entire shard creates
+    // a second large object graph and can push a Worker isolate over its memory
+    // limit on metro-heavy or multimode plans.
+    for (const key of validKeys) {
+      if (stopAssignmentShardNumber(key, shardCount) !== shardNumber) continue;
+      const records = shard?.assignments?.[key];
+      if (Array.isArray(records) && records.length) assignments[key] = records;
+    }
   }));
   return {
     ...manifest,
@@ -1444,7 +1452,13 @@ async function getOpenovStopPlaceIndex(env, stopIds = []) {
     }
 
     const shard = await shardPromise;
-    Object.assign(stopPlaces, shard?.stopPlaces ?? {});
+    // Only keep mappings for stops needed by this request. The cached shard
+    // remains available to the isolate LRU for future requests.
+    for (const key of keys) {
+      if (openovStopPlaceShardNumber(key, shardCount) !== shardNumber) continue;
+      const mapping = shard?.stopPlaces?.[key];
+      if (mapping && typeof mapping === "object") stopPlaces[key] = mapping;
+    }
   }));
 
   return {
