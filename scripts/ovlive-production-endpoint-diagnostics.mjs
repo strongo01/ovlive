@@ -1163,9 +1163,9 @@ async function main() {
         const candidateRealtimeTripId = String(candidateCrosswalkOutcome?.realtimeTripId ?? "");
         const candidateIdentityParts = candidateRealtimeTripId.split(":").map((part) => part.trim());
         const candidateServiceDate = String(candidateCrosswalkOutcome?.serviceDate ??
-          candidateLegTripId.match(/^(\\d{8})_/)?.[1] ?? "");
+          candidateLegTripId.match(/^(\d{8})_/)?.[1] ?? "");
         const expectedCandidateBisonIdentity = candidateIdentityParts.length === 3 &&
-          candidateIdentityParts.every(Boolean) && /^\\d{8}$/.test(candidateServiceDate)
+          candidateIdentityParts.every(Boolean) && /^\d{8}$/.test(candidateServiceDate)
           ? candidateIdentityParts[0] + "|" + candidateServiceDate + "|" +
             candidateIdentityParts[1] + "|" + candidateIdentityParts[2] + "|0"
           : null;
