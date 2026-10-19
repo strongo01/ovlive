@@ -719,8 +719,11 @@ async function getOpenovFeed(
     );
   }
 
-  // 2. Deel een download als meerdere aanvragen tegelijk dezelfde feed nodig hebben.
-  const inflight = openovFeedInflight.get(url);
+  // 2. Deel een download als meerdere aanvragen tegelijk dezelfde volledige
+  // feed óf exact dezelfde getargete route/ritset nodig hebben. Filters moeten
+  // onderdeel zijn van de key; een full-feed promise mag niet een gefilterde
+  // aanvraag overschrijven (of andersom).
+  const inflight = openovFeedInflight.get(cacheKey);
   if (inflight) {
     console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
       kind,
@@ -734,15 +737,17 @@ async function getOpenovFeed(
   if (rateLimitUntil > now) {
     const retryAfterSeconds = Math.ceil((rateLimitUntil - now) / 1000);
 
-    if (cached) {
+    const fallbackCache = cached ?? (cacheKey !== url ? openovFeedCache.get(url) : undefined);
+    if (fallbackCache) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
         kind,
         mode: "rate_limit_cached_fallback",
+        filteredCacheAvailable: Boolean(cached),
         retryAfterSeconds
       }));
 
       return cachedOpenovFeedView(
-        cached,
+        fallbackCache,
         true,
         "De bron beperkt verzoeken; de laatst opgehaalde feed wordt gecontroleerd op actualiteit."
       );
