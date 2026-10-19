@@ -72,7 +72,7 @@ assert.ok(workerSource.includes("function openovRealtimeLegFeedFamily(") &&
   "OpenOV realtime feed selection must distinguish rail from bus/tram modes");
 assert.ok(workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates")') &&
   workerSource.includes('needsTrainUpdates\n      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")') &&
-  workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")'),
+  workerSource.includes('needsTripUpdates && includeVehiclePositions\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")'),
   "refresh must skip large OpenOV feeds that are not relevant to the itinerary mode");
 assert.ok(workerSource.includes('status: "not_requested"') &&
   workerSource.includes('return "unknown"'),
