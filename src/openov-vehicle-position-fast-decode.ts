@@ -142,8 +142,9 @@ function decodeHeaderTimestamp(
   bytes: Uint8Array,
   start: number,
   end: number
-): number | undefined {
-  let timestamp: number | undefined;
+): number {
+  // protobufjs exposes proto3 scalar defaults when the submessage exists.
+  let timestamp = 0;
   let offset = start;
   while (offset < end) {
     const field = readField(bytes, offset, end);
@@ -159,7 +160,14 @@ function decodeTripDescriptor(
   start: number,
   end: number
 ): { tripId?: string; startTime?: string; startDate?: string; routeId?: string; directionId?: number } {
-  const trip: { tripId?: string; startTime?: string; startDate?: string; routeId?: string; directionId?: number } = {};
+  // Preserve protobufjs defaults for fields omitted from an existing TripDescriptor.
+  const trip: { tripId?: string; startTime?: string; startDate?: string; routeId?: string; directionId?: number } = {
+    tripId: "",
+    startTime: "",
+    startDate: "",
+    routeId: "",
+    directionId: 0
+  };
   let offset = start;
 
   while (offset < end) {
@@ -183,7 +191,8 @@ function decodePosition(
   start: number,
   end: number
 ): { latitude?: number; longitude?: number } {
-  const position: { latitude?: number; longitude?: number } = {};
+  // Position.latitude and Position.longitude default to 0 when omitted.
+  const position: { latitude?: number; longitude?: number } = { latitude: 0, longitude: 0 };
   let offset = start;
 
   while (offset < end) {
@@ -201,7 +210,8 @@ function decodeVehicleDescriptor(
   start: number,
   end: number
 ): { vehicleId?: string } {
-  let vehicleId: string | undefined;
+  // VehicleDescriptor.id defaults to the empty string when omitted.
+  let vehicleId = "";
   let offset = start;
 
   while (offset < end) {
@@ -222,8 +232,9 @@ function decodeVehiclePosition(
   let trip: ReturnType<typeof decodeTripDescriptor> | undefined;
   let vehicle: ReturnType<typeof decodeVehicleDescriptor> | undefined;
   let position: ReturnType<typeof decodePosition> | undefined;
-  let timestamp: number | undefined;
-  let stopId: string | undefined;
+  // VehiclePosition scalar/string defaults are 0 and "" in protobufjs.
+  let timestamp = 0;
+  let stopId = "";
   let offset = start;
 
   while (offset < end) {
