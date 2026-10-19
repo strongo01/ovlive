@@ -308,6 +308,47 @@ function decodeStopTimeUpdate(bytes: Uint8Array, field: Field): DecodedOpenovTri
   };
 }
 
+// Test only the fields that participate in matching before decoding the
+// full TripDescriptor. Most source records are unrelated to the current plan;
+// for those, avoid allocating start-time/direction/schedule strings and objects.
+function matchesTripDescriptorBytes(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  filters?: OpenovTripUpdateFilters
+): boolean {
+  const tripIds = filters?.tripIds;
+  const routeIds = filters?.routeIds;
+  const routeDateKeys = filters?.routeDateKeys;
+  const hasTripIds = Boolean(tripIds?.size);
+  const hasRouteIds = Boolean(routeIds?.size);
+  const hasRouteDateKeys = Boolean(routeDateKeys?.size);
+  if (!hasTripIds && !hasRouteIds && !hasRouteDateKeys) return true;
+
+  let routeId = "";
+  let date = "";
+  for (let offset = start; offset < end;) {
+    const field = readField(bytes, offset, end);
+    if (field.wireType === 2) {
+      if (field.number === 1 && hasTripIds) {
+        const tripId = normalizeId(readString(bytes, field));
+        if (tripIds!.has(tripId)) return true;
+        // With no route fallback, a nonmatching exact trip ID is definitive.
+        if (!hasRouteIds && !hasRouteDateKeys) return false;
+      } else if (field.number === 3 && hasRouteDateKeys) {
+        date = normalizeDate(readString(bytes, field));
+        if (routeId && date && routeDateKeys!.has(routeId + "|" + date)) return true;
+      } else if (field.number === 5 && (hasRouteIds || hasRouteDateKeys)) {
+        routeId = normalizeId(readString(bytes, field));
+        if (hasRouteIds && routeIds!.has(routeId)) return true;
+        if (date && routeDateKeys?.has(routeId + "|" + date)) return true;
+      }
+    }
+    offset = field.nextOffset;
+  }
+  return false;
+}
+
 function matchesFilters(trip: TripDescriptor, filters?: OpenovTripUpdateFilters): boolean {
   if (!filters || (
     !(filters.tripIds?.size) &&
@@ -349,10 +390,15 @@ function decodeTripUpdate(
   for (let offset = start; offset < end;) {
     const field = readField(bytes, offset, end);
     if (field.number === 1 && field.wireType === 2) {
+      // Reject the common nonmatching case using only tripId and, if a fallback
+      // is configured, route/date. Decode the complete descriptor only for hits.
+      if (!matchesTripDescriptorBytes(
+        bytes,
+        field.contentStart,
+        field.contentEnd,
+        filters
+      )) return null;
       trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
-      // TripDescriptor is normally first on the wire. When this route/date is
-      // irrelevant, skip all remaining stop-time messages without visiting them.
-      if (!matchesFilters(trip, filters)) return null;
     } else if (field.number === 2 && field.wireType === 2) {
       stopFields.push(field);
     } else if (field.number === 3 && field.wireType === 2) {
