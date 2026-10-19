@@ -42,7 +42,11 @@ function normalizeWithGeneratedDecoder(bytes) {
     timestamp: numeric(entity.vehicle?.timestamp)
   })).filter((entity) => entity.vehicleId || entity.tripId || entity.latitude != null);
 
-  return { feedTimestamp, entities };
+  return {
+    feedTimestamp,
+    sourceEntityCount: (feed.entity ?? []).filter((entity) => entity.vehicle != null).length,
+    entities
+  };
 }
 
 const feedTimestamp = 1_792_450_000;
@@ -119,6 +123,23 @@ assert.deepEqual(fast.entities[0], {
 console.log("PASS: selective decoder matches GTFS-Realtime decoder for exact vehicle identity and coordinates");
 console.log("PASS: non-vehicle entities and empty VehiclePosition messages are skipped");
 console.log("PASS: feed timestamp and per-vehicle timestamp are preserved independently");
+
+// Targeted map requests preserve source counts while only materializing requested
+// route/trip positions, which avoids allocating thousands of unrelated objects.
+const filtered = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
+  tripIds: new Set(["391215411"]),
+  routeIds: new Set(["nl-OpenOV_159450"])
+});
+assert.equal(filtered.sourceEntityCount, 4);
+assert.deepEqual(filtered.entities, [fast.entities[0]]);
+
+const wrongRoute = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
+  tripIds: new Set(["391215411"]),
+  routeIds: new Set(["different-route"])
+});
+assert.equal(wrongRoute.sourceEntityCount, 4);
+assert.deepEqual(wrongRoute.entities, []);
+console.log("PASS: targeted decoder skips unrelated vehicle objects and keeps exact route/trip matching");
 
 // Malformed/truncated protobuf input must fail explicitly; the Worker can then
 // invoke its logged compatibility fallback rather than silently returning bad data.
