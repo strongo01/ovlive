@@ -137,8 +137,16 @@ function readField(bytes: Uint8Array, offset: number, limit: number): Field {
       contentEnd = tagResult.nextOffset + 4;
       nextOffset = contentEnd;
       break;
-    default:
-      throw new Error("Niet-ondersteund protobuf wire-type " + wireType + ".");
+    default: {
+      const sample = Array.from(bytes.subarray(offset, Math.min(offset + 8, limit)))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join(" ");
+      throw new Error(
+        "Niet-ondersteund protobuf wire-type " + wireType +
+        " (tag " + tag + ", offset " + offset + ", limit " + limit +
+        ", bytes " + sample + ")."
+      );
+    }
   }
 
   if (contentEnd > limit || nextOffset > limit) {
