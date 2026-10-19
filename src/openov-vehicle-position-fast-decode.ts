@@ -148,8 +148,9 @@ function decodeHeaderTimestamp(
   let offset = start;
   while (offset < end) {
     const field = readField(bytes, offset, end);
-    // FeedHeader.timestamp = field 2, uint64 / wire type 0.
-    if (field.number === 2 && field.wireType === 0) timestamp = field.value ?? 0;
+    // FeedHeader.timestamp = field 3, uint64 / wire type 0.
+    // Field 2 is incrementality, not the feed timestamp.
+    if (field.number === 3 && field.wireType === 0) timestamp = field.value ?? 0;
     offset = field.nextOffset;
   }
   return timestamp;
