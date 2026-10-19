@@ -75,6 +75,29 @@ assert.match(
 );
 assert.match(
   worker,
+  /const OPENOV_FEED_CACHE_TTL_MS = 30_000;/,
+  "Grote trip- en treinfeeds mogen niet bij elke 10-secondenpoll opnieuw worden gedecodeerd"
+);
+assert.match(
+  worker,
+  /const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 8_000;/,
+  "De voertuigposities voor de live kaart moeten kort gecachet blijven"
+);
+assert.match(
+  worker,
+  /openovRealtimeFeedIndexCache\.tripEntities === tripEntities/
+);
+assert.match(
+  worker,
+  /openovRealtimeFeedIndexCache\.trainEntities === trainEntities/
+);
+assert.match(
+  refreshHandler,
+  /getOpenovRealtimeFeedIndexCache\(tripFeed, trainFeed\)/,
+  "De zware ritindex moet tussen realtimepolls worden hergebruikt"
+);
+assert.match(
+  worker,
   /const OPENOV_FEED_WAIT_TIMEOUT_MS = 10_000;/,
   "OpenOV-feeds moeten een begrensde wachttijd hebben"
 );
@@ -107,5 +130,6 @@ assert.match(
 console.log("PASS: achtergrondpolling gebruikt geen strenge reisplanlimiet");
 console.log("PASS: tijdelijke realtimefouten krijgen back-off en een rustige herstelmelding");
 console.log("PASS: live kaart behoudt de eigen exacte voertuigpositie-update");
+console.log("PASS: grote OpenOV-feeds en matcherindex worden hergebruikt om CPU-limiet te ontzien");
 console.log("PASS: storingsfeeds zijn minder frequent en per bron wordt timing gelogd");
 console.log("Alle realtime-refresh-resilience-selftests geslaagd.");
