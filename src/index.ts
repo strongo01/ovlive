@@ -507,7 +507,7 @@ function normalizeTripUpdates(feed: any) {
     arrivalDelaySeconds: s.arrival?.delay,
     departureTime: toNumber(s.departure?.time),
     departureDelaySeconds: s.departure?.delay,
-    scheduleRelationship: enumName(rt.StopTimeUpdate?.ScheduleRelationship, s.scheduleRelationship)
+    scheduleRelationship: enumName(rt.TripUpdate?.StopTimeUpdate?.ScheduleRelationship, s.scheduleRelationship)
   }));
 
   // GTFS-RT: een trip-level delay geldt ook voor volgende stops,
