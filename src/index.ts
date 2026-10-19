@@ -651,6 +651,9 @@ const OPENOV_FEED_CACHE_TTL_MS = 8_000;
 // Disruption alerts change less frequently than live trip updates. Cache them
 // for 30 seconds so 10-second timetable polling does not refetch the same feed.
 const OPENOV_ALERTS_CACHE_TTL_MS = 30_000;
+// Een lopende bron mag niet de hele 10-seconden-plannerpoll ophouden.
+// De daadwerkelijke fetch heeft daarnaast zijn eigen 15-seconden abort-timeout.
+const OPENOV_FEED_WAIT_TIMEOUT_MS = 10_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
 const openovFeedCache = new Map<string, OpenovFeedCacheEntry>();
@@ -1059,8 +1062,45 @@ async function safeOpenovFeed(
   url: string,
   kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions"
 ): Promise<any> {
+  const startedAt = Date.now();
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const feedPromise = getOpenovFeed(url, kind);
+  const timeoutPromise = new Promise<any>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      const cacheKey = openovFeedCacheKey(url, kind);
+      const cached = openovFeedCache.get(cacheKey) ??
+        (cacheKey !== url ? openovFeedCache.get(url) : undefined);
+      console.warn("[OVLIVE_OPENOV_FEED_WAIT_TIMEOUT]", JSON.stringify({
+        kind,
+        timeoutMs: OPENOV_FEED_WAIT_TIMEOUT_MS,
+        waitedMs: Date.now() - startedAt,
+        cachedFallback: Boolean(cached)
+      }));
+
+      if (cached) {
+        resolve(cachedOpenovFeedView(
+          cached,
+          true,
+          "OpenOV reageerde niet op tijd; eerder opgehaalde gegevens worden opnieuw gecontroleerd op actualiteit."
+        ));
+        return;
+      }
+
+      resolve({
+        ok: false,
+        status: 504,
+        sourceUrl: url,
+        checkedAt: new Date().toISOString(),
+        freshness: "unavailable",
+        ageSeconds: null,
+        entities: [],
+        error: "OpenOV-feed reageerde niet binnen de ingestelde wachttijd."
+      });
+    }, OPENOV_FEED_WAIT_TIMEOUT_MS);
+  });
+
   try {
-    return await getOpenovFeed(url, kind);
+    return await Promise.race([feedPromise, timeoutPromise]);
   } catch (error) {
     return {
       ok: false,
@@ -1071,6 +1111,8 @@ async function safeOpenovFeed(
         ? error.message
         : "OpenOV-feed tijdelijk niet bereikbaar."
     };
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
 }
 
@@ -2565,6 +2607,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
 
     const openovStartedAt = Date.now();
+    console.log("[OVLIVE_REALTIME_REFRESH_OPENOV_START]", JSON.stringify({
+      startedAt: new Date(openovStartedAt).toISOString()
+    }));
     try {
       // The map has its own 10-second, exact-trip vehicle-position endpoint.
       // Do not download/decode the entire vehiclePositions feed again during
