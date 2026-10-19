@@ -562,7 +562,10 @@ assert.ok(html.includes('id="firstVehicleBuffer"') &&
   html.includes('value="5" selected>Normaal · 5 km/u') &&
   !html.includes('id="initialWaitLimit"'),
   "the planner must expose a five-minute first-vehicle arrival buffer and selectable walking speeds");
-assert.ok((html.match(/selectedFirstVehicleBufferSeconds\(\), Number\(\$\('walkingSpeed'\)\.value\)/g) || []).length === 2 &&
+assert.ok(html.includes("firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds()") &&
+  html.includes("walkingSpeedKmh: selectedWalkingSpeedKmh()") &&
+  html.includes("activeWalkSettings.firstArrivalBufferSeconds") &&
+  html.includes("activeWalkSettings.walkingSpeedKmh") &&
   html.includes("const minutes = Number.isFinite(parsed) ? Math.min(30, Math.max(0, parsed)) : 5;"),
   "initial planning and realtime refresh must both apply the current buffer and walking speed");
 assert.ok(html.includes("distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6)") &&
