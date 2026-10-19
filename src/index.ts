@@ -854,7 +854,7 @@ async function getOpenovFeed(
     return await task;
   } finally {
     if (openovFeedInflight.get(cacheKey) === task) {
-      openovFeedInflight.delete(url);
+      openovFeedInflight.delete(cacheKey);
     }
   }
 }
