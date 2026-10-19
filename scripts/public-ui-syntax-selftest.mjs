@@ -70,10 +70,10 @@ assert.ok(workerSource.includes("function openovRealtimeLegFeedFamily(") &&
   workerSource.includes('OPENOV_TRAIN_LEG_MODES.has(mode)') &&
   workerSource.includes('OPENOV_TRIP_LEG_MODES.has(mode)'),
   "OpenOV realtime feed selection must distinguish rail from bus/tram modes");
-assert.ok(workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates")') &&
-  workerSource.includes('needsTrainUpdates\n      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")') &&
+assert.ok(workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates", tripUpdateFilters)') &&
+  workerSource.includes('needsTrainUpdates\n      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates", trainUpdateFilters)') &&
   workerSource.includes('needsTripUpdates && includeVehiclePositions\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")'),
-  "refresh must skip large OpenOV feeds that are not relevant to the itinerary mode");
+  "refresh must skip irrelevant feeds and target trip updates to itinerary route/service-date identities");
 assert.ok(workerSource.includes('status: "not_requested"') &&
   workerSource.includes('return "unknown"'),
   "unknown route modes must preserve the safe fallback and skipped feeds must be explicit");
