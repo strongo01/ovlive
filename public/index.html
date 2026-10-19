@@ -687,6 +687,10 @@ const LIVE_PLAN_REALTIME_POLL_MS = 10000;
 let livePlanRealtimeTimer = null;
 let livePlanRealtimeInFlight = false;
 let livePlanRealtimeGeneration = 0;
+// Avoid showing a noisy hard error for a transient Cloudflare/upstream 5xx.
+// Back off progressively if consecutive refreshes fail, then recover automatically.
+let livePlanRealtimeFailureStreak = 0;
+let livePlanRealtimeRetryAfterMs = 0;
 
 function normalizeLiveVehicleId(value) {
   return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
@@ -2538,7 +2542,8 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
   const statusElement = document.getElementById('live-refresh-status');
   if (!baseline || livePlanRealtimeInFlight ||
       document.visibilityState !== 'visible' ||
-      generation !== livePlanRealtimeGeneration) return;
+      generation !== livePlanRealtimeGeneration ||
+      Date.now() < livePlanRealtimeRetryAfterMs) return;
 
   livePlanRealtimeInFlight = true;
   if (statusElement) statusElement.textContent = 'Realtimegegevens vernieuwen…';
@@ -2553,9 +2558,14 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
     const refreshed = await response.json().catch(() => ({}));
     if (!response.ok) {
       const detail = refreshed.detail ? ` · ${refreshed.detail}` : '';
-      throw new Error(`HTTP ${response.status}: ${refreshed.error || 'Realtime-update mislukt'}${detail}`);
+      const refreshError = new Error(`HTTP ${response.status}: ${refreshed.error || 'Realtime-update mislukt'}${detail}`);
+      refreshError.status = response.status;
+      refreshError.retryAfterSeconds = Number(response.headers.get('retry-after') || 0);
+      throw refreshError;
     }
     if (generation !== livePlanRealtimeGeneration) return;
+    livePlanRealtimeFailureStreak = 0;
+    livePlanRealtimeRetryAfterMs = 0;
 
     const itineraries = Array.isArray(refreshed.itineraries)
       ? refreshed.itineraries
@@ -2628,11 +2638,30 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       ndov: refreshed.ndovRealtimeMeta ?? null
     };
   } catch (error) {
-    console.warn('[OVLIVE_REALTIME_REFRESH]', error instanceof Error ? error.message : String(error));
+    const reason = error instanceof Error ? error.message : String(error);
+    const statusFromMessage = reason.match(/\\bHTTP\\s+(\\d{3})\\b/i);
+    const statusCode = Number(error?.status ?? statusFromMessage?.[1] ?? 0);
+    const retryableStatus = [429, 502, 503, 504].includes(statusCode);
+    const retryableTransport = /timeout|timed out|networkerror|network request failed|fetch failed|aborterror/i.test(reason);
+    const retryable = retryableStatus || retryableTransport;
+    console.warn('[OVLIVE_REALTIME_REFRESH]', JSON.stringify({
+      statusCode: statusCode || null,
+      reason: reason.slice(0, 180),
+      retryable
+    }));
     if (generation === livePlanRealtimeGeneration) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (statusElement) {
-        statusElement.textContent = `Realtime-update mislukt: ${reason}. Bestaande tijden blijven staan; er volgt automatisch een nieuwe poging.`;
+      if (retryable) {
+        livePlanRealtimeFailureStreak += 1;
+        const retryAfterSeconds = Number(error?.retryAfterSeconds ?? 0);
+        const backoffMs = retryAfterSeconds > 0
+          ? Math.min(120000, retryAfterSeconds * 1000)
+          : Math.min(60000, 5000 * (2 ** Math.min(livePlanRealtimeFailureStreak - 1, 4)));
+        livePlanRealtimeRetryAfterMs = Date.now() + backoffMs;
+        if (statusElement) {
+          statusElement.textContent = 'Realtimegegevens zijn tijdelijk niet beschikbaar. De bestaande tijden blijven staan; OVLive controleert automatisch opnieuw.';
+        }
+      } else if (statusElement) {
+        statusElement.textContent = 'Realtimecontrole kon niet worden afgerond. De bestaande tijden blijven staan; OVLive probeert het automatisch opnieuw.';
       }
       if (window.__ovliveDeferredRealtimePlan === true) {
         const message = 'Reisopties geladen · realtimecontrole is tijdelijk niet beschikbaar. De geplande tijden blijven zichtbaar.';
@@ -2649,6 +2678,8 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
 
 function startLivePlanRealtimeRefresh(plan) {
   stopLivePlanRealtimeRefresh();
+  livePlanRealtimeFailureStreak = 0;
+  livePlanRealtimeRetryAfterMs = 0;
   window.__ovliveDeferredRealtimePlan = plan?.openovRealtimeMeta?.status === 'deferred';
   try {
     window.__ovliveRealtimeRefreshBaseline = buildRealtimeRefreshBaseline(plan);
