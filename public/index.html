@@ -2881,8 +2881,14 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       const freshJourney = byKey.get(displayedKeys[index]);
       if (!freshJourney) continue;
       const sourceLegs = journeySourceLegs(freshJourney);
+      const activeWalkSettings = window.__ovliveActiveWalkSettings ?? {
+        firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds(),
+        walkingSpeedKmh: selectedWalkingSpeedKmh()
+      };
       const { legs } = prepareJourneyLegsForDisplay(
-        freshJourney, sourceLegs, selectedFirstVehicleBufferSeconds(), Number($('walkingSpeed').value)
+        freshJourney, sourceLegs,
+        activeWalkSettings.firstArrivalBufferSeconds,
+        activeWalkSettings.walkingSpeedKmh
       );
       const card = document.querySelector(`details.journey-card[data-tracking-index="${index}"]`);
       const legContainer = card?.querySelector('.journey-leg-details');
@@ -3031,6 +3037,14 @@ $('planBtn').onclick = async () => {
       $('planStatus').textContent = 'Kies een geldige vertrektijd.';
       return;
     }
+
+    // Houd de gekozen instellingen vast voor deze reisresultaten zodat een
+    // latere realtime-refresh niet andere loop- of buffertijden gaat tonen.
+    const walkSettings = {
+      firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds(),
+      walkingSpeedKmh: selectedWalkingSpeedKmh()
+    };
+    window.__ovliveActiveWalkSettings = walkSettings;
 
     q.set('time', requestedDeparture.toISOString());
     const selectedModes = Array.from(
@@ -3261,7 +3275,8 @@ q.set('pedestrianSpeed', '1.5');
       const { legs, adjustedJourneyStart } = prepareJourneyLegsForDisplay(
         journey,
         sourceLegs,
-        selectedFirstVehicleBufferSeconds(), Number($('walkingSpeed').value)
+        walkSettings.firstArrivalBufferSeconds,
+        walkSettings.walkingSpeedKmh
       );
       const sortMetrics = journeySortMetrics(journey, legs, adjustedJourneyStart);
       const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
