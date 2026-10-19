@@ -58,7 +58,7 @@ assert.ok(html.includes("const refreshErrorSummary = refreshErrors") &&
   "the UI must show which source failed instead of hiding the actual error");
 
 const openovMatcherStart = workerSource.indexOf("function matchOpenovRealtime(");
-const openovMatcherEnd = workerSource.indexOf("\\nfunction findRealtimeStop(", openovMatcherStart);
+const openovMatcherEnd = workerSource.indexOf("\nfunction findRealtimeStop(", openovMatcherStart);
 assert.ok(openovMatcherStart >= 0 && openovMatcherEnd > openovMatcherStart,
   "the OpenOV realtime matcher must remain inspectable");
 const openovMatcherSource = workerSource.slice(openovMatcherStart, openovMatcherEnd);
