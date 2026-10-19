@@ -5,6 +5,7 @@ import {
   findPropagatedRealtimeEvent,
 } from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
+import { decodeOpenovVehiclePositions } from "./openov-vehicle-position-fast-decode.js";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
 import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
@@ -596,6 +597,22 @@ function normalizeAlerts(feed: any) {
   return rows;
 }
 
+function normalizeVehiclePositions(feed: any): any[] {
+  return (feed.entity ?? []).map((entity: any) => ({
+    entityId: entity.id,
+    vehicleId: entity.vehicle?.vehicle?.id,
+    tripId: entity.vehicle?.trip?.tripId,
+    routeId: entity.vehicle?.trip?.routeId,
+    startDate: entity.vehicle?.trip?.startDate,
+    startTime: entity.vehicle?.trip?.startTime,
+    directionId: entity.vehicle?.trip?.directionId,
+    stopId: entity.vehicle?.stopId,
+    latitude: entity.vehicle?.position?.latitude,
+    longitude: entity.vehicle?.position?.longitude,
+    timestamp: toNumber(entity.vehicle?.timestamp)
+  })).filter((entity: any) => entity.vehicleId || entity.tripId || entity.latitude != null);
+}
+
 
 type OpenovFeedKind =
   | "tripUpdates"
@@ -608,8 +625,9 @@ type OpenovFeedCacheEntry = {
   fetchedAtMs: number;
 };
 
-// Korte, gedeelde cache afgestemd op de 10-sec frontendpoll; feed-coalescing
-// en de 30-sec cooldown bij upstream-429 blijven overbelasting begrenzen.
+// Houd deze per-isolate cache bewust korter dan de 10-sec frontendpoll.
+// Gelijktijdige aanvragen blijven via single-flight samengevoegd; de gerichte
+// voertuigdecoder vermindert de CPU-kosten bij een noodzakelijke nieuwe feed.
 const OPENOV_FEED_CACHE_TTL_MS = 8_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
@@ -847,27 +865,52 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
     return { ok: false, status: 502, sourceUrl: url, checkedAt: new Date().toISOString(), error: "Feed groter dan ingestelde veiligheidslimiet." };
   }
 
-  const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
-  const feedTimestamp = toNumber(feed.header?.timestamp);
+  let feedTimestamp: number | undefined;
+  let entities: any[];
+  let decoder = "gtfs-realtime-bindings";
+  const decodeStartedAt = Date.now();
+
+  if (kind === "vehiclePositions") {
+    try {
+      // Only walk the protobuf fields needed for vehicle positions. The regular
+      // generated decoder builds the full object graph for every feed field and
+      // can exhaust the Free Worker CPU budget on this comparatively large feed.
+      const decoded = decodeOpenovVehiclePositions(bytes);
+      feedTimestamp = decoded.feedTimestamp;
+      entities = decoded.entities;
+      decoder = "selective-protobuf";
+    } catch (error) {
+      // Keep the existing generated decoder as a compatibility fallback if an
+      // upstream schema/encoding changes. The fallback is logged so it cannot
+      // silently hide a regression in the selective decoder.
+      console.warn("[OVLIVE_VEHICLE_POSITION_FAST_DECODE_FALLBACK]", JSON.stringify({
+        byteCount: bytes.byteLength,
+        error: error instanceof Error ? error.message : String(error)
+      }));
+      const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
+      feedTimestamp = toNumber(feed.header?.timestamp);
+      entities = normalizeVehiclePositions(feed);
+      decoder = "gtfs-realtime-bindings-fallback";
+    }
+  } else {
+    const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
+    feedTimestamp = toNumber(feed.header?.timestamp);
+    entities = kind === "tripUpdates" || kind === "trainUpdates"
+      ? normalizeTripUpdates(feed)
+      : normalizeAlerts(feed);
+  }
+
+  if (kind === "vehiclePositions") {
+    console.log("[OVLIVE_VEHICLE_POSITION_DECODE]", JSON.stringify({
+      decoder,
+      byteCount: bytes.byteLength,
+      entityCount: entities.length,
+      decodeDurationMs: Date.now() - decodeStartedAt
+    }));
+  }
+
   const ageSeconds = feedTimestamp == null ? undefined : Math.max(0, Math.round(Date.now() / 1000 - feedTimestamp));
   const isStale = ageSeconds == null || ageSeconds > 180;
-  const entities = kind === "tripUpdates" || kind === "trainUpdates"
-    ? normalizeTripUpdates(feed)
-    : kind === "alerts"
-      ? normalizeAlerts(feed)
-      : (feed.entity ?? []).map((e: any) => ({
-          entityId: e.id,
-          vehicleId: e.vehicle?.vehicle?.id,
-          tripId: e.vehicle?.trip?.tripId,
-          routeId: e.vehicle?.trip?.routeId,
-          startDate: e.vehicle?.trip?.startDate,
-          startTime: e.vehicle?.trip?.startTime,
-          directionId: e.vehicle?.trip?.directionId,
-          stopId: e.vehicle?.stopId,
-          latitude: e.vehicle?.position?.latitude,
-          longitude: e.vehicle?.position?.longitude,
-          timestamp: toNumber(e.vehicle?.timestamp)
-        })).filter((e: any) => e.vehicleId || e.tripId || e.latitude != null);
 
   return {
     ok: true,
