@@ -2661,7 +2661,9 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
           statusElement.textContent = 'Realtimegegevens zijn tijdelijk niet beschikbaar. De bestaande tijden blijven staan; OVLive controleert automatisch opnieuw.';
         }
       } else if (statusElement) {
-        statusElement.textContent = 'Realtimecontrole kon niet worden afgerond. De bestaande tijden blijven staan; OVLive probeert het automatisch opnieuw.';
+        // Keep actionable detail for non-transient errors. HTTP 503 and other
+        // transient transport/server failures take the quiet retry path above.
+        statusElement.textContent = `Realtime-update mislukt: ${reason}. Bestaande tijden blijven staan; er volgt automatisch een nieuwe poging.`;
       }
       if (window.__ovliveDeferredRealtimePlan === true) {
         const message = 'Reisopties geladen · realtimecontrole is tijdelijk niet beschikbaar. De geplande tijden blijven zichtbaar.';
