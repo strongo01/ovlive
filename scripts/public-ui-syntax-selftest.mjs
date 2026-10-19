@@ -42,6 +42,20 @@ assert.ok(html.includes("void refreshLivePlanRealtime(generation);"),
   "the realtime pass must start immediately instead of waiting for the first timer tick");
 assert.ok(html.includes("signal: AbortSignal.timeout(30000)"),
   "a realtime refresh must time out so one slow source cannot lock the UI indefinitely");
+// Realtime providers must fail independently so one outage does not discard other fresh feeds.
+const refreshHandlerStart = workerSource.indexOf('if (isRealtimeRefresh && request.method === "POST")');
+const refreshHandlerEnd = workerSource.indexOf('if (url.pathname === "/api/health")', refreshHandlerStart);
+const refreshHandlerSource = workerSource.slice(refreshHandlerStart, refreshHandlerEnd);
+assert.ok(refreshHandlerSource.includes("[OVLIVE_REALTIME_REFRESH_NS_ERROR]") &&
+  refreshHandlerSource.includes("[OVLIVE_REALTIME_REFRESH_OPENOV_ERROR]") &&
+  refreshHandlerSource.includes("[OVLIVE_REALTIME_REFRESH_NDOV_ERROR]"),
+  "NS, OpenOV and NDOV failures must be isolated and logged separately");
+assert.ok(refreshHandlerSource.includes('status: sourceErrors.length === 0 ? "complete" : "partial"') &&
+  refreshHandlerSource.includes("successfulSources === 0"),
+  "the realtime endpoint must return partial successes and fail only when every provider fails");
+assert.ok(html.includes("const refreshErrorSummary = refreshErrors") &&
+  html.includes("Realtime-update mislukt: ${reason}"),
+  "the UI must show which source failed instead of hiding the actual error");
 assert.ok(workerSource.includes('if (url.searchParams.get("deferRealtime") === "1")'),
   "the Worker must have an explicit route-only response mode");
 const deferredStart = workerSource.indexOf('if (url.searchParams.get("deferRealtime") === "1")');
