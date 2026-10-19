@@ -2552,7 +2552,8 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
     });
     const refreshed = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(refreshed.error || `HTTP ${response.status}`);
+      const detail = refreshed.detail ? ` · ${refreshed.detail}` : '';
+      throw new Error(`HTTP ${response.status}: ${refreshed.error || 'Realtime-update mislukt'}${detail}`);
     }
     if (generation !== livePlanRealtimeGeneration) return;
 
@@ -2591,15 +2592,25 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
     const checkedAt = new Date().toLocaleTimeString('nl-NL', {
       hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
+    const refreshErrors = Array.isArray(refreshed.realtimeRefreshMeta?.errors)
+      ? refreshed.realtimeRefreshMeta.errors
+      : [];
+    const refreshErrorSummary = refreshErrors
+      .map(item => `${item.source}: ${item.error}`)
+      .join(' · ');
     if (statusElement) {
-      statusElement.textContent = `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 10 sec.`;
+      statusElement.textContent = refreshErrors.length
+        ? `Livegegevens gedeeltelijk gecontroleerd om ${checkedAt} · ${refreshErrorSummary}`
+        : `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 10 sec.`;
     }
     if (window.__ovliveDeferredRealtimePlan === true &&
         generation === livePlanRealtimeGeneration) {
       const openovMeta = refreshed.openovRealtimeMeta;
-      const message = openovMeta?.status === 'enrichment_failed'
-        ? `Reisopties geladen · realtimecontrole niet volledig beschikbaar om ${checkedAt}. De geplande tijden blijven zichtbaar.`
-        : `Reisplanner klaar · realtime gecontroleerd om ${checkedAt}. OpenOV: ${openovMeta?.matchedLegCount ?? 0} ritten gekoppeld, ${openovMeta?.freshPredictionLegCount ?? 0} met verse halteprognose.`;
+      const message = refreshErrors.length
+        ? `Reisopties geladen · gedeeltelijke realtimecontrole om ${checkedAt}: ${refreshErrorSummary}`
+        : openovMeta?.status === 'enrichment_failed'
+          ? `Reisopties geladen · realtimecontrole niet volledig beschikbaar om ${checkedAt}. De geplande tijden blijven zichtbaar.`
+          : `Reisplanner klaar · realtime gecontroleerd om ${checkedAt}. OpenOV: ${openovMeta?.matchedLegCount ?? 0} ritten gekoppeld, ${openovMeta?.freshPredictionLegCount ?? 0} met verse halteprognose.`;
       const planStatus = document.getElementById('planStatus');
       if (planStatus) planStatus.textContent = message;
       const diagnosticStatus = document.getElementById('realtime-plan-diagnostic-status');
@@ -2619,8 +2630,9 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
   } catch (error) {
     console.warn('[OVLIVE_REALTIME_REFRESH]', error instanceof Error ? error.message : String(error));
     if (generation === livePlanRealtimeGeneration) {
+      const reason = error instanceof Error ? error.message : String(error);
       if (statusElement) {
-        statusElement.textContent = 'Realtime-update mislukt; bestaande tijden blijven staan. Er volgt automatisch een nieuwe poging.';
+        statusElement.textContent = `Realtime-update mislukt: ${reason}. Bestaande tijden blijven staan; er volgt automatisch een nieuwe poging.`;
       }
       if (window.__ovliveDeferredRealtimePlan === true) {
         const message = 'Reisopties geladen · realtimecontrole is tijdelijk niet beschikbaar. De geplande tijden blijven zichtbaar.';
