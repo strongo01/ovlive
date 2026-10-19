@@ -128,16 +128,25 @@ assert.deepEqual(planBlocked.calls, ["client:203.0.113.8"]);
 console.log("PASS: reisplanning heeft een aparte strengere limiet");
 
 const refreshCommon = limiter([true]);
-const refreshBlocked = limiter([false]);
+const refreshPlan = limiter([false]);
 const refreshResponse = await enforcePublicApiRateLimit(
   request("https://ovlive.example/api/realtime-refresh"),
-  { API_RATE_LIMITER: refreshCommon, PLAN_RATE_LIMITER: refreshBlocked },
+  { API_RATE_LIMITER: refreshCommon, PLAN_RATE_LIMITER: refreshPlan },
   headers
 );
-assert.equal(refreshResponse.status, 429);
+assert.equal(refreshResponse, null);
 assert.deepEqual(refreshCommon.calls, ["client:203.0.113.8"]);
-assert.deepEqual(refreshBlocked.calls, ["client:203.0.113.8"]);
-console.log("PASS: realtime-verversing deelt de aparte strengere reisplanninglimiet");
+assert.deepEqual(refreshPlan.calls, []);
+console.log("PASS: realtime-polling gebruikt de algemene limiet zonder het reisplanquotum op te maken");
+
+const refreshCommonBlocked = limiter([false]);
+const refreshRateLimited = await enforcePublicApiRateLimit(
+  request("https://ovlive.example/api/realtime-refresh"),
+  { API_RATE_LIMITER: refreshCommonBlocked, PLAN_RATE_LIMITER: limiter([true]) },
+  headers
+);
+assert.equal(refreshRateLimited.status, 429);
+console.log("PASS: de algemene API-limiet beschermt ook realtime-polling");
 
 const failingLimiter = {
   async limit() { throw new Error("simulated limiter failure"); }
