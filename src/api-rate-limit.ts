@@ -60,12 +60,13 @@ export async function enforcePublicApiRateLimit(
     );
   }
 
-  const isExpensiveJourneyRefresh =
-    url.pathname === "/api/plan" ||
-    url.pathname === "/api/realtime-refresh";
+  // Route planning is user-triggered and uses the stricter quota.
+  // /api/realtime-refresh is a background poll every 10 seconds; it stays
+  // protected by the common API limiter but must not consume the plan quota.
+  const isJourneyPlanRequest = url.pathname === "/api/plan";
 
   if (!env.API_RATE_LIMITER ||
-      (isExpensiveJourneyRefresh && !env.PLAN_RATE_LIMITER)) {
+      (isJourneyPlanRequest && !env.PLAN_RATE_LIMITER)) {
     return errorResponse(
       "De API-beveiliging is niet volledig geconfigureerd.",
       503,
@@ -86,7 +87,7 @@ export async function enforcePublicApiRateLimit(
       );
     }
 
-    if (isExpensiveJourneyRefresh) {
+    if (isJourneyPlanRequest) {
       const plan = await env.PLAN_RATE_LIMITER!.limit({
         key: `client:${clientIp}`
       });
