@@ -164,7 +164,8 @@
     .live-follow-legend{display:flex;gap:6px 12px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--muted)}
     .live-follow-legend span{display:inline-flex;align-items:center;gap:5px}
     .live-legend-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#fb923c}
-    .live-legend-line{display:inline-block;width:16px;height:3px;background:#f59e0b;border-radius:3px}
+    .live-legend-line{display:inline-block;width:16px;height:4px;background:#f59e0b;border-radius:3px}
+    .live-legend-segment{display:inline-block;width:16px;height:4px;background:#22c55e;border-radius:3px}
     @media(max-width:600px){.live-follow{padding:9px}.live-map{height:245px}.live-stop-row{gap:6px}.live-stop-times{font-size:11px}.live-stop-times strong{font-size:13px}}
 
 </style>
@@ -680,6 +681,8 @@ function openovVehiclePositionHtml(rt) {
 
 let liveLeafletPromise = null;
 const liveJourneyMapStates = new Map();
+// One full scheduled trip shape can be reused by multiple journey cards.
+const liveFullTripGeometryCache = new Map();
 const LIVE_VEHICLE_POLL_MS = 10000;
 const LIVE_VEHICLE_MAX_AGE_SECONDS = 30;
 const LIVE_NDOV_VEHICLE_MAX_AGE_SECONDS = 30;
@@ -1068,6 +1071,15 @@ async function createLiveJourneyMap(index) {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   }).addTo(map);
 
+  // Full scheduled trip shape sits beneath the user's selected segment.
+  // Stop markers and the live vehicle marker remain above both route layers.
+  const fullRoutePane = map.createPane("ovliveFullTripRoutePane");
+  fullRoutePane.style.zIndex = "360";
+  fullRoutePane.style.pointerEvents = "none";
+  const selectedRoutePane = map.createPane("ovliveSelectedTripRoutePane");
+  selectedRoutePane.style.zIndex = "380";
+  selectedRoutePane.style.pointerEvents = "none";
+
   const bounds = [];
   const addCoordinateToBounds = point => {
     if (point && Number.isFinite(point[0]) && Number.isFinite(point[1])) bounds.push(point);
@@ -1076,12 +1088,16 @@ async function createLiveJourneyMap(index) {
   for (const leg of data.legs) {
     const lineCoordinates = liveLegCoordinates(leg);
     if (lineCoordinates.length > 1) {
+      // The green overlay is the exact part the passenger needs to ride.
+      // The complete scheduled trip is loaded asynchronously in orange below it.
       L.polyline(lineCoordinates, {
-        color: liveModeColor(leg.mode),
-        weight: 5,
-        opacity: 0.82,
+        pane: "ovliveSelectedTripRoutePane",
+        color: "#22c55e",
+        weight: 6,
+        opacity: 0.96,
         lineCap: "round",
-        lineJoin: "round"
+        lineJoin: "round",
+        interactive: false
       }).addTo(map);
       lineCoordinates.forEach(addCoordinateToBounds);
     }
@@ -1125,12 +1141,119 @@ async function createLiveJourneyMap(index) {
     interval: null,
     cardOpen: true,
     refreshing: false,
+    routeBounds: bounds.slice(),
+    fullTripBounds: [],
+    fullTripRouteLayers: new Map(),
+    fullTripRoutesNeedFit: false,
+    userInteracted: false,
     trackableLegs: data.legs.filter(leg => String(leg?.mode ?? "").toUpperCase() !== "WALK"),
     didInitialFit: bounds.length > 0
   };
   liveJourneyMapStates.set(index, state);
+  // If the user has already started panning/zooming, a late shape response
+  // must never yank the map away from them.
+  map.on("mousedown touchstart wheel", () => { state.userInteracted = true; });
   window.setTimeout(() => map.invalidateSize(), 150);
+  void loadLiveFullTripRouteOverlays(index);
   return state;
+}
+
+function fitLiveJourneyMapToRouteBounds(state) {
+  if (!state?.map || state.userInteracted) return;
+  const points = [...(state.routeBounds ?? []), ...(state.fullTripBounds ?? [])];
+  if (points.length >= 2) {
+    state.map.fitBounds(window.L.latLngBounds(points), {
+      padding: [24, 24],
+      maxZoom: state.fullTripBounds.length ? 12 : 15
+    });
+    state.fullTripRoutesNeedFit = false;
+  } else if (points.length === 1) {
+    state.map.setView(points[0], 14);
+    state.fullTripRoutesNeedFit = false;
+  }
+}
+
+function fetchLiveFullTripGeometry(leg) {
+  const tripId = String(leg?.tripId ?? "").trim();
+  if (!tripId) return Promise.resolve([]);
+
+  const cached = liveFullTripGeometryCache.get(tripId);
+  if (cached) return cached;
+
+  const params = new URLSearchParams({ tripId });
+  const task = fetch("/api/trip-shape?" + params.toString(), {
+    cache: "default",
+    signal: AbortSignal.timeout(10000)
+  }).then(async response => {
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok !== true || !Array.isArray(payload.legs)) {
+      throw new Error(payload?.error || ("HTTP " + response.status));
+    }
+
+    const expectedRouteId = normalizeLiveVehicleId(leg?.routeId ?? leg?.route?.id);
+    const expectedTripId = String(leg?.tripId ?? "").trim();
+    return payload.legs.filter(candidate => {
+      const candidateRouteId = normalizeLiveVehicleId(candidate?.routeId);
+      const candidateTripId = String(candidate?.tripId ?? "").trim();
+      const mode = String(candidate?.mode ?? "").toUpperCase();
+      return mode !== "WALK" && mode !== "FOOT" &&
+        candidateRouteId && candidateRouteId === expectedRouteId &&
+        (!candidateTripId || candidateTripId === expectedTripId);
+    }).map(candidate => liveLegCoordinates({ legGeometry: candidate.legGeometry }))
+      .filter(points => points.length > 1);
+  }).catch(error => {
+    // Don't permanently cache a transient failure; the user can open the card
+    // again later and the shape request will be retried.
+    liveFullTripGeometryCache.delete(tripId);
+    console.info("[OVLIVE_FULL_TRIP_SHAPE]", {
+      status: "unavailable",
+      route: lineTitle(leg),
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return [];
+  });
+
+  liveFullTripGeometryCache.set(tripId, task);
+  return task;
+}
+
+async function loadLiveFullTripRouteOverlays(index) {
+  const state = liveJourneyMapStates.get(index);
+  const data = window.__ovliveTrackingJourneys?.[index];
+  if (!state || !data) return;
+
+  const tasks = state.trackableLegs.map(async leg => {
+    const legIndex = data.legs.indexOf(leg);
+    if (legIndex < 0) return false;
+    const geometries = await fetchLiveFullTripGeometry(leg);
+    const activeState = liveJourneyMapStates.get(index);
+    if (!activeState || activeState !== state || !state.map) return false;
+
+    let added = false;
+    geometries.forEach((coordinates, geometryIndex) => {
+      const layerKey = String(leg.tripId) + "|" + geometryIndex;
+      if (state.fullTripRouteLayers.has(layerKey)) return;
+      const layer = window.L.polyline(coordinates, {
+        pane: "ovliveFullTripRoutePane",
+        color: "#f59e0b",
+        weight: 5,
+        opacity: 0.82,
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: false
+      }).addTo(state.map);
+      state.fullTripRouteLayers.set(layerKey, layer);
+      coordinates.forEach(point => state.fullTripBounds.push(point));
+      added = true;
+    });
+    return added;
+  });
+
+  const results = await Promise.all(tasks);
+  if (!results.some(Boolean)) return;
+  if (state.userInteracted) return;
+  if (state.cardOpen) fitLiveJourneyMapToRouteBounds(state);
+  else state.fullTripRoutesNeedFit = true;
 }
 
 function setLiveJourneyStatus(index, message, kind = "") {
@@ -1312,6 +1435,9 @@ async function startLiveJourneyTracking(index, card) {
   if (!state || !card.open) return;
   state.cardOpen = true;
   state.map.invalidateSize();
+  if (state.fullTripRoutesNeedFit && !state.userInteracted) {
+    fitLiveJourneyMapToRouteBounds(state);
+  }
   await refreshLiveJourneyPositions(index);
   if (state.interval) window.clearInterval(state.interval);
   if (state.trackableLegs.length) {
@@ -3013,7 +3139,7 @@ q.set('pedestrianSpeed', '1.5');
         <div id="journey-live-status-${index}" class="live-follow-status" role="status" aria-live="polite">Open deze reis om de livekaart te laden.</div>
         <div id="journey-live-map-${index}" class="live-map" aria-label="Kaart met route, haltes en laatst gemelde voertuigposities"></div>
         <div class="live-map-attribution">Kaartgegevens © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a> · kaartweergave door Leaflet</div>
-        <div class="live-follow-legend"><span><i class="live-legend-dot"></i>Voertuigpositie uit realtimefeed</span><span><i class="live-legend-line"></i>Route uit routeplanner</span></div>
+        <div class="live-follow-legend"><span><i class="live-legend-line"></i>Volledige lijnroute</span><span><i class="live-legend-segment"></i>Jouw traject</span><span><i class="live-legend-dot"></i>Live voertuigpositie</span></div>
         <h5 class="live-stop-heading">Haltes en verwachte tijden</h5>
         <p class="muted" style="font-size:11px;margin:0 0 5px">Een verwachte tijd staat alleen als realtime wanneer de bron en ritkoppeling dit ondersteunen. Anders is de tijd gepland of afkomstig van de routeplanner.</p>
         <div id="journey-live-stops-${index}" class="live-stop-timeline">${renderLiveJourneyStopTimeline(legs)}</div>
