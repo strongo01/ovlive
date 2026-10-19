@@ -98,6 +98,26 @@ assert.match(
 );
 assert.match(
   worker,
+  /decodeOpenovTripUpdates\(bytes, normalizedTripUpdateFilters\)/,
+  "De planner moet de selectieve protobuf-decoder gebruiken voor ritupdates"
+);
+assert.match(
+  worker,
+  /buildOpenovTripUpdateFilters\(openovLegs\)/,
+  "De trip-updatefilter moet uit de relevante reisopties worden opgebouwd"
+);
+assert.match(
+  worker,
+  /safeOpenovFeed\(OPENOV\.tripUpdates, "tripUpdates", tripUpdateFilters\)/,
+  "De volledige tripupdates-feed mag niet meer ongericht worden gedecodeerd tijdens plannerpolling"
+);
+assert.match(
+  worker,
+  /\[OVLIVE_TRIP_UPDATE_DECODE\]/,
+  "De gerichte ritdecoder moet duur en decoded entity-aantallen loggen"
+);
+assert.match(
+  worker,
   /const OPENOV_FEED_WAIT_TIMEOUT_MS = 10_000;/,
   "OpenOV-feeds moeten een begrensde wachttijd hebben"
 );
@@ -130,6 +150,7 @@ assert.match(
 console.log("PASS: achtergrondpolling gebruikt geen strenge reisplanlimiet");
 console.log("PASS: tijdelijke realtimefouten krijgen back-off en een rustige herstelmelding");
 console.log("PASS: live kaart behoudt de eigen exacte voertuigpositie-update");
+console.log("PASS: planner decodet alleen relevante OpenOV-ritupdates en route-/dienstdatumkandidaten");
 console.log("PASS: grote OpenOV-feeds en matcherindex worden hergebruikt om CPU-limiet te ontzien");
 console.log("PASS: storingsfeeds zijn minder frequent en per bron wordt timing gelogd");
 console.log("Alle realtime-refresh-resilience-selftests geslaagd.");
