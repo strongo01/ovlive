@@ -1083,7 +1083,7 @@ function vehiclePositionCandidatesForLeg(
   index: Map<string, any[]>
 ): any[] {
   const tripMatch = String(leg?.tripId ?? "").match(
-    /^(\\d{8})_(\\d{2}:\\d{2}(?::\\d{2})?)_nl-OpenOV_(.+)$/i
+    /^(\d{8})_(\d{2}:\d{2}(?::\d{2})?)_nl-OpenOV_(.+)$/i
   );
   if (!tripMatch) return [];
   const key = vehiclePositionLookupKey(tripMatch[3], leg?.routeId ?? leg?.route?.id);
