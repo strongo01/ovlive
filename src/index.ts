@@ -2531,7 +2531,6 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const sourceErrors: Array<{ source: string; error: string }> = [];
     let successfulSources = 0;
     const refreshStartedAt = Date.now();
-    const refreshLegCount = collectPlanLegs(planData).length;
     console.log("[OVLIVE_REALTIME_REFRESH_START]", JSON.stringify({
       itineraryCount: itineraries.length,
       legCount: refreshLegCount,
