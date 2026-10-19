@@ -65,6 +65,18 @@ const openovMatcherSource = workerSource.slice(openovMatcherStart, openovMatcher
 assert.ok(openovMatcherSource.includes("indexes.byTripId.get(identity.tripId)") &&
   openovMatcherSource.includes("indexes.byRouteDate.get"),
   "the matcher must use trip and route/date indexes instead of scanning every feed record");
+
+assert.ok(workerSource.includes("function openovRealtimeLegFeedFamily(") &&
+  workerSource.includes('OPENOV_TRAIN_LEG_MODES.has(mode)') &&
+  workerSource.includes('OPENOV_TRIP_LEG_MODES.has(mode)'),
+  "OpenOV realtime feed selection must distinguish rail from bus/tram modes");
+assert.ok(workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates")') &&
+  workerSource.includes('needsTrainUpdates\n      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")') &&
+  workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")'),
+  "refresh must skip large OpenOV feeds that are not relevant to the itinerary mode");
+assert.ok(workerSource.includes('status: "not_requested"') &&
+  workerSource.includes('return "unknown"'),
+  "unknown route modes must preserve the safe fallback and skipped feeds must be explicit");
 assert.doesNotMatch(openovMatcherSource,
   /diagnostic(Route|Date|Direction|FromStop|OrderedStop|Time)Records|diagnosticSamples/,
   "temporary matcher diagnostics must not rescan the full realtime feed on each itinerary leg");
