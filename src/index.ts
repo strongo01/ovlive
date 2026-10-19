@@ -1294,26 +1294,26 @@ function alertIsActive(alert: any, nowSeconds: number): boolean {
 
 type OpenovLegFeedFamily = "train" | "trip" | "unknown";
 
-function openovRealtimeLegFeedFamily(leg: any): OpenovLegFeedFamily {
-  const trainModes = new Set([
-    "RAIL",
-    "REGIONAL_RAIL",
-    "REGIONAL_FAST_RAIL",
-    "LONG_DISTANCE",
-    "NIGHT_RAIL",
-    "SUBURBAN",
-    "HIGHSPEED_RAIL",
-    "HIGH_SPEED_RAIL"
-  ]);
-  const tripModes = new Set([
-    "BUS",
-    "COACH",
-    "TRAM",
-    "METRO",
-    "SUBWAY",
-    "FERRY"
-  ]);
+const OPENOV_TRAIN_LEG_MODES = new Set([
+  "RAIL",
+  "REGIONAL_RAIL",
+  "REGIONAL_FAST_RAIL",
+  "LONG_DISTANCE",
+  "NIGHT_RAIL",
+  "SUBURBAN",
+  "HIGHSPEED_RAIL",
+  "HIGH_SPEED_RAIL"
+]);
+const OPENOV_TRIP_LEG_MODES = new Set([
+  "BUS",
+  "COACH",
+  "TRAM",
+  "METRO",
+  "SUBWAY",
+  "FERRY"
+]);
 
+function openovRealtimeLegFeedFamily(leg: any): OpenovLegFeedFamily {
   for (const rawMode of [
     leg?.mode,
     leg?.transportMode,
@@ -1323,10 +1323,10 @@ function openovRealtimeLegFeedFamily(leg: any): OpenovLegFeedFamily {
     const mode = String(rawMode ?? "")
       .trim()
       .toUpperCase()
-      .replace(/[\\s-]+/g, "_");
+      .replace(/[\s-]+/g, "_");
     if (!mode) continue;
-    if (trainModes.has(mode)) return "train";
-    if (tripModes.has(mode)) return "trip";
+    if (OPENOV_TRAIN_LEG_MODES.has(mode)) return "train";
+    if (OPENOV_TRIP_LEG_MODES.has(mode)) return "trip";
   }
 
   // Unknown mode metadata must fail open: keep the previous broad feed set
