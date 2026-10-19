@@ -55,6 +55,40 @@ function matchesVehiclePositionFilters(
   return true;
 }
 
+// Fast reject using only fields needed by the filter. OpenOV usually serializes
+// tripId first in TripDescriptor; when it is not the requested trip, we can skip
+// the rest of this descriptor without decoding route/date/start-time strings.
+function matchesVehiclePositionDescriptor(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  filters?: OpenovVehiclePositionFilters
+): boolean {
+  const tripIds = filters?.tripIds;
+  const routeIds = filters?.routeIds;
+  const hasTripFilter = Boolean(tripIds?.size);
+  const hasRouteFilter = Boolean(routeIds?.size);
+  if (!hasTripFilter && !hasRouteFilter) return true;
+
+  let tripMatched = !hasTripFilter;
+  let routeMatched = !hasRouteFilter;
+  for (let offset = start; offset < end;) {
+    const field = readField(bytes, offset, end);
+    if (field.number === 1 && field.wireType === 2 && hasTripFilter) {
+      tripMatched = tripIds!.has(normalizedFilterId(readString(bytes, field)));
+      if (!tripMatched) return false;
+      if (routeMatched) return true;
+    } else if (field.number === 5 && field.wireType === 2 && hasRouteFilter) {
+      routeMatched = routeIds!.has(normalizedFilterId(readString(bytes, field)));
+      if (!routeMatched) return false;
+      if (tripMatched) return true;
+    }
+    offset = field.nextOffset;
+  }
+
+  return tripMatched && routeMatched;
+}
+
 interface VarintResult {
   value: number;
   nextOffset: number;
@@ -274,11 +308,16 @@ function decodeVehiclePosition(
     const field = readField(bytes, offset, end);
     if (field.wireType === 2) {
       if (field.number === 1) {
+        // Apply the exact filter before materializing the full descriptor. For
+        // the thousands of unrelated vehicles we only need to inspect tripId
+        // (and routeId when needed), not startTime/date/direction metadata.
+        if (!matchesVehiclePositionDescriptor(
+          bytes,
+          field.contentStart,
+          field.contentEnd,
+          filters
+        )) return null;
         trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
-        // TripDescriptor is field 1 in the standard schema. Once it proves
-        // this is not a requested trip/route, skip the rest of that vehicle
-        // message instead of walking through its coordinates and metadata.
-        if (!matchesVehiclePositionFilters(trip, filters)) return null;
       } else if (field.number === 2) positionField = field;
       else if (field.number === 7) stopIdField = field;
       else if (field.number === 8) vehicleField = field;
