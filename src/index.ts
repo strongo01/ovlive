@@ -946,7 +946,19 @@ async function fetchOpenovFeedUncached(
   let sourceEntityCount: number | undefined;
   let entities: any[];
   let decoder = "gtfs-realtime-bindings";
+  console.log("[OVLIVE_OPENOV_RESPONSE]", JSON.stringify({
+    kind,
+    httpStatus: response.status,
+    contentLengthBytes: Number(response.headers.get("content-length") ?? 0)
+  }));
   const decodeStartedAt = performance.now();
+  console.log("[OVLIVE_OPENOV_DECODE_START]", JSON.stringify({
+    kind,
+    byteCount: bytes.byteLength,
+    targeted: kind === "vehiclePositions"
+      ? Boolean(filters?.tripIds?.length || filters?.routeIds?.length)
+      : Boolean(filters?.tripIds?.length || filters?.routeIds?.length || filters?.routeDateKeys?.length)
+  }));
   const normalizedVehicleFilters = kind === "vehiclePositions" &&
     (filters?.tripIds?.length || filters?.routeIds?.length)
     ? {
@@ -2748,8 +2760,31 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
     const nsStartedAt = Date.now();
     try {
+      const nsPrepareStartedAt = Date.now();
+      console.log("[OVLIVE_REALTIME_REFRESH_STEP_START]", JSON.stringify({
+        source: "NS",
+        step: "prepare-identities",
+        startedAt: new Date(nsPrepareStartedAt).toISOString()
+      }));
       await prepareNsTrainIdentities(planData, env);
+      console.log("[OVLIVE_REALTIME_REFRESH_STEP_COMPLETE]", JSON.stringify({
+        source: "NS",
+        step: "prepare-identities",
+        durationMs: Date.now() - nsPrepareStartedAt
+      }));
+
+      const nsEnrichStartedAt = Date.now();
+      console.log("[OVLIVE_REALTIME_REFRESH_STEP_START]", JSON.stringify({
+        source: "NS",
+        step: "enrich-train-plan",
+        candidateLegCount: planData.nsRealtimeMeta?.candidateLegCount ?? 0
+      }));
       await enrichNsTrainPlan(planData, env);
+      console.log("[OVLIVE_REALTIME_REFRESH_STEP_COMPLETE]", JSON.stringify({
+        source: "NS",
+        step: "enrich-train-plan",
+        durationMs: Date.now() - nsEnrichStartedAt
+      }));
       successfulSources++;
       console.log("[OVLIVE_REALTIME_REFRESH_STAGE]", JSON.stringify({
         source: "NS",
@@ -2807,6 +2842,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
     const ndovStartedAt = Date.now();
     try {
+      console.log("[OVLIVE_REALTIME_REFRESH_STEP_START]", JSON.stringify({
+        source: "NDOV",
+        step: "apply-cancellations",
+        candidateLegCount: refreshLegCount
+      }));
       await applyNdovCancellationsToPlan(planData, env, {
         // This route is polled frequently. Avoid expensive static route matching
         // when the live BISON snapshot is already stale or unavailable.
