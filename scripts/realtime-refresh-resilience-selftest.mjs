@@ -74,6 +74,26 @@ assert.match(
   "Storingsmeldingen moeten van de snelle ritfeeds gescheiden gecachet worden"
 );
 assert.match(
+  worker,
+  /const OPENOV_FEED_WAIT_TIMEOUT_MS = 10_000;/,
+  "OpenOV-feeds moeten een begrensde wachttijd hebben"
+);
+assert.match(
+  worker,
+  /Promise\.race\(\[feedPromise, timeoutPromise\]\)/,
+  "Een trage OpenOV-feed mag de volledige realtime-update niet ophouden"
+);
+assert.match(
+  worker,
+  /\[OVLIVE_OPENOV_FEED_WAIT_TIMEOUT\]/,
+  "Een vastlopende OpenOV-feed moet zichtbaar worden gelogd"
+);
+assert.match(
+  refreshHandler,
+  /\[OVLIVE_REALTIME_REFRESH_OPENOV_START\]/,
+  "De start van de OpenOV-verversingsstap moet zichtbaar worden gelogd"
+);
+assert.match(
   refreshHandler,
   /\[OVLIVE_REALTIME_REFRESH_STAGE\]/,
   "Per-bron timingdiagnostiek ontbreekt"
