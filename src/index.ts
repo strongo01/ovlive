@@ -673,6 +673,8 @@ const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
 const openovFeedCache = new Map<string, OpenovFeedCacheEntry>();
 const openovFeedInflight = new Map<string, Promise<any>>();
+const openovFeedInflightStartedAt = new Map<string, number>();
+const OPENOV_FEED_INFLIGHT_MAX_AGE_MS = 18_000;
 const openovRateLimitedUntil = new Map<string, number>();
 
 function cachedOpenovFeedView(
@@ -752,11 +754,26 @@ async function getOpenovFeed(
   // aanvraag overschrijven (of andersom).
   const inflight = openovFeedInflight.get(cacheKey);
   if (inflight) {
-    console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
+    const inflightAgeMs = now - (openovFeedInflightStartedAt.get(cacheKey) ?? 0);
+    if (inflightAgeMs <= OPENOV_FEED_INFLIGHT_MAX_AGE_MS) {
+      console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
+        kind,
+        mode: "single_flight_join",
+        inflightAgeMs
+      }));
+      return inflight;
+    }
+
+    // A Worker CPU-limit termination can leave the isolate-local single-flight
+    // promise without a settlement. Never let that stale promise poison every
+    // refresh for the rest of the isolate lifetime.
+    console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
       kind,
-      mode: "single_flight_join"
+      mode: "stale_single_flight_evicted",
+      inflightAgeMs
     }));
-    return inflight;
+    openovFeedInflight.delete(cacheKey);
+    openovFeedInflightStartedAt.delete(cacheKey);
   }
 
   // 3. Probeer tijdens de cooldown de bron niet opnieuw te belasten.
@@ -877,12 +894,14 @@ async function getOpenovFeed(
   })();
 
   openovFeedInflight.set(cacheKey, task);
+  openovFeedInflightStartedAt.set(cacheKey, Date.now());
 
   try {
     return await task;
   } finally {
     if (openovFeedInflight.get(cacheKey) === task) {
       openovFeedInflight.delete(cacheKey);
+      openovFeedInflightStartedAt.delete(cacheKey);
     }
   }
 }
