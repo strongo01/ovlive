@@ -273,8 +273,13 @@ function decodeVehiclePosition(
   while (offset < end) {
     const field = readField(bytes, offset, end);
     if (field.wireType === 2) {
-      if (field.number === 1) trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
-      else if (field.number === 2) positionField = field;
+      if (field.number === 1) {
+        trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
+        // TripDescriptor is field 1 in the standard schema. Once it proves
+        // this is not a requested trip/route, skip the rest of that vehicle
+        // message instead of walking through its coordinates and metadata.
+        if (!matchesVehiclePositionFilters(trip, filters)) return null;
+      } else if (field.number === 2) positionField = field;
       else if (field.number === 7) stopIdField = field;
       else if (field.number === 8) vehicleField = field;
     } else if (field.number === 5 && field.wireType === 0) {
