@@ -625,9 +625,28 @@ type OpenovFeedCacheEntry = {
   fetchedAtMs: number;
 };
 
+type OpenovVehiclePositionFilters = {
+  tripIds?: string[];
+  routeIds?: string[];
+};
+
+function openovFeedCacheKey(
+  url: string,
+  kind: OpenovFeedKind,
+  filters?: OpenovVehiclePositionFilters
+): string {
+  if (kind !== "vehiclePositions" ||
+      !(filters?.tripIds?.length || filters?.routeIds?.length)) return url;
+
+  // Different exact trip/route queries must never share a filtered response.
+  const tripIds = [...new Set(filters.tripIds ?? [])].sort();
+  const routeIds = [...new Set(filters.routeIds ?? [])].sort();
+  return url + "#vehicle-position-filter:" + JSON.stringify({ tripIds, routeIds });
+}
+
 // Houd deze per-isolate cache bewust korter dan de 10-sec frontendpoll.
-// Gelijktijdige aanvragen blijven via single-flight samengevoegd; de gerichte
-// voertuigdecoder vermindert de CPU-kosten bij een noodzakelijke nieuwe feed.
+// Gerichte voertuigvragen decoderen alleen de aangevraagde ritten en routes,
+// zodat een kaartverversing geen 2.000 volledige voertuigobjecten hoeft te bouwen.
 const OPENOV_FEED_CACHE_TTL_MS = 8_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
@@ -675,10 +694,12 @@ function cachedOpenovFeedView(
 
 async function getOpenovFeed(
   url: string,
-  kind: OpenovFeedKind
+  kind: OpenovFeedKind,
+  filters?: OpenovVehiclePositionFilters
 ): Promise<any> {
   const now = Date.now();
-  const cached = openovFeedCache.get(url);
+  const cacheKey = openovFeedCacheKey(url, kind, filters);
+  const cached = openovFeedCache.get(cacheKey);
 
   // 1. Hergebruik een recent resultaat.
   if (cached && now - cached.fetchedAtMs < OPENOV_FEED_CACHE_TTL_MS) {
@@ -698,8 +719,11 @@ async function getOpenovFeed(
     );
   }
 
-  // 2. Deel een download als meerdere aanvragen tegelijk dezelfde feed nodig hebben.
-  const inflight = openovFeedInflight.get(url);
+  // 2. Deel een download als meerdere aanvragen tegelijk dezelfde volledige
+  // feed óf exact dezelfde getargete route/ritset nodig hebben. Filters moeten
+  // onderdeel zijn van de key; een full-feed promise mag niet een gefilterde
+  // aanvraag overschrijven (of andersom).
+  const inflight = openovFeedInflight.get(cacheKey);
   if (inflight) {
     console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
       kind,
@@ -713,15 +737,17 @@ async function getOpenovFeed(
   if (rateLimitUntil > now) {
     const retryAfterSeconds = Math.ceil((rateLimitUntil - now) / 1000);
 
-    if (cached) {
+    const fallbackCache = cached ?? (cacheKey !== url ? openovFeedCache.get(url) : undefined);
+    if (fallbackCache) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
         kind,
         mode: "rate_limit_cached_fallback",
+        filteredCacheAvailable: Boolean(cached),
         retryAfterSeconds
       }));
 
       return cachedOpenovFeedView(
-        cached,
+        fallbackCache,
         true,
         "De bron beperkt verzoeken; de laatst opgehaalde feed wordt gecontroleerd op actualiteit."
       );
@@ -750,7 +776,7 @@ async function getOpenovFeed(
     let result: any;
 
     try {
-      result = await fetchOpenovFeedUncached(url, kind);
+      result = await fetchOpenovFeedUncached(url, kind, filters);
     } catch (error) {
       result = {
         ok: false,
@@ -772,7 +798,7 @@ async function getOpenovFeed(
         fetchedAtMs: Date.now()
       };
 
-      openovFeedCache.set(url, entry);
+      openovFeedCache.set(cacheKey, entry);
       openovRateLimitedUntil.delete(url);
 
       console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
@@ -792,7 +818,7 @@ async function getOpenovFeed(
       );
     }
 
-    const lastGood = openovFeedCache.get(url);
+    const lastGood = openovFeedCache.get(cacheKey) ?? openovFeedCache.get(url);
 
     if (lastGood) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
@@ -822,19 +848,23 @@ async function getOpenovFeed(
     return result;
   })();
 
-  openovFeedInflight.set(url, task);
+  openovFeedInflight.set(cacheKey, task);
 
   try {
     return await task;
   } finally {
-    if (openovFeedInflight.get(url) === task) {
-      openovFeedInflight.delete(url);
+    if (openovFeedInflight.get(cacheKey) === task) {
+      openovFeedInflight.delete(cacheKey);
     }
   }
 }
 
 
-async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions") {
+async function fetchOpenovFeedUncached(
+  url: string,
+  kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions",
+  filters?: OpenovVehiclePositionFilters
+) {
   const startedAt = Date.now();
   const response = await fetch(url, {
     headers: {
@@ -866,19 +896,27 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
   }
 
   let feedTimestamp: number | undefined;
+  let sourceEntityCount: number | undefined;
   let entities: any[];
   let decoder = "gtfs-realtime-bindings";
-  const decodeStartedAt = Date.now();
+  const decodeStartedAt = performance.now();
+  const normalizedVehicleFilters = kind === "vehiclePositions" &&
+    (filters?.tripIds?.length || filters?.routeIds?.length)
+    ? {
+        tripIds: new Set((filters.tripIds ?? []).map(normalizeOpenovId)),
+        routeIds: new Set((filters.routeIds ?? []).map(normalizeOpenovId)),
+      }
+    : undefined;
 
   if (kind === "vehiclePositions") {
     try {
-      // Only walk the protobuf fields needed for vehicle positions. The regular
-      // generated decoder builds the full object graph for every feed field and
-      // can exhaust the Free Worker CPU budget on this comparatively large feed.
-      const decoded = decodeOpenovVehiclePositions(bytes);
+      // Decode only the protobuf nested position/vehicle fields for the exact
+      // requested trip+route set; unrelated entity position objects are skipped.
+      const decoded = decodeOpenovVehiclePositions(bytes, normalizedVehicleFilters);
       feedTimestamp = decoded.feedTimestamp;
+      sourceEntityCount = decoded.sourceEntityCount;
       entities = decoded.entities;
-      decoder = "selective-protobuf";
+      decoder = normalizedVehicleFilters ? "selective-protobuf-targeted" : "selective-protobuf";
     } catch (error) {
       // Keep the existing generated decoder as a compatibility fallback if an
       // upstream schema/encoding changes. The fallback is logged so it cannot
@@ -889,7 +927,16 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
       }));
       const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
       feedTimestamp = toNumber(feed.header?.timestamp);
-      entities = normalizeVehiclePositions(feed);
+      const allEntities = normalizeVehiclePositions(feed);
+      sourceEntityCount = allEntities.length;
+      entities = normalizedVehicleFilters
+        ? allEntities.filter((entity: any) =>
+            (!normalizedVehicleFilters.tripIds.size ||
+              normalizedVehicleFilters.tripIds.has(normalizeOpenovId(parseOpenovTripId(entity.tripId).tripId))) &&
+            (!normalizedVehicleFilters.routeIds.size ||
+              normalizedVehicleFilters.routeIds.has(normalizeOpenovId(entity.routeId)))
+          )
+        : allEntities;
       decoder = "gtfs-realtime-bindings-fallback";
     }
   } else {
@@ -904,8 +951,10 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
     console.log("[OVLIVE_VEHICLE_POSITION_DECODE]", JSON.stringify({
       decoder,
       byteCount: bytes.byteLength,
-      entityCount: entities.length,
-      decodeDurationMs: Date.now() - decodeStartedAt
+      sourceEntityCount: sourceEntityCount ?? entities.length,
+      decodedEntityCount: entities.length,
+      targeted: Boolean(normalizedVehicleFilters),
+      decodeDurationMs: Number((performance.now() - decodeStartedAt).toFixed(2))
     }));
   }
 
@@ -922,7 +971,7 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
     feedTimestamp: feedTimestamp == null ? null : new Date(feedTimestamp * 1000).toISOString(),
     ageSeconds: ageSeconds ?? null,
     freshness: isStale ? "stale_or_unknown" : "fresh",
-    entityCount: entities.length,
+    entityCount: sourceEntityCount ?? entities.length,
     entities
   };
 }
@@ -2602,28 +2651,37 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       return json({ error: "Ongeldig kind. Gebruik tripUpdates, alerts, trainUpdates of vehiclePositions." }, 400, headers);
     }
     const feedUrl = OPENOV[kind as keyof typeof OPENOV];
+    const routeFilters = (url.searchParams.get("routeId") ?? "")
+      .split(",")
+      .map((value: string) => normalizeOpenovId(value))
+      .filter(Boolean);
+
+    const tripFilters = (url.searchParams.get("tripId") ?? "")
+      .split(",")
+      .map((value: string) => parseOpenovTripId(value).tripId)
+      .filter(Boolean);
+
+    const stopFilters = (url.searchParams.get("stopId") ?? "")
+      .split(",")
+      .map((value: string) => normalizeOpenovId(value))
+      .filter(Boolean);
+
+    const vehiclePositionFilters = kind === "vehiclePositions" &&
+      (routeFilters.length > 0 || tripFilters.length > 0)
+      ? { routeIds: routeFilters, tripIds: tripFilters }
+      : undefined;
+
     try {
-      const data = await getOpenovFeed(feedUrl, kind as keyof typeof OPENOV);
+      const data = await getOpenovFeed(
+        feedUrl,
+        kind as keyof typeof OPENOV,
+        vehiclePositionFilters
+      );
       const { entities = [], ...meta } = data as any;
 
-      // Optionele filters: filter de volledige gedecodeerde feed vóór de limiet.
-      // Zo kunnen we een specifieke route onderzoeken zonder duizenden
-      // niet-relevante realtime-items terug te sturen.
-      const routeFilters = (url.searchParams.get("routeId") ?? "")
-        .split(",")
-        .map((value: string) => normalizeOpenovId(value))
-        .filter(Boolean);
-
-      const tripFilters = (url.searchParams.get("tripId") ?? "")
-        .split(",")
-        .map((value: string) => parseOpenovTripId(value).tripId)
-        .filter(Boolean);
-
-      const stopFilters = (url.searchParams.get("stopId") ?? "")
-        .split(",")
-        .map((value: string) => normalizeOpenovId(value))
-        .filter(Boolean);
-
+      // Vehicle-position requests with exact trip/route filters were filtered
+      // during protobuf decoding. This final guard keeps the public API contract
+      // and handles the compatibility fallback / unfiltered diagnostics too.
       const filteredEntities = (entities as any[]).filter((entity: any) => {
         if (
           routeFilters.length > 0 &&

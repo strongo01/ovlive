@@ -2313,51 +2313,60 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     kv6Error = error instanceof Error ? error.message : "KV6-actuele ritgegevens niet beschikbaar.";
   }
 
-  // Run the richer identity scan only when requested by the diagnostic endpoint,
-  // or at the existing low-frequency log interval. Partial KV6 success must not
-  // hide other planned identities that did not receive a fresh exact match.
+  // The broad identity scan can inspect 1,000+ stored BISON trips. Only run
+  // it for explicit diagnostic requests, never on the normal 10-second refresh.
   const requestedKv6Misses = [...kv6UnmatchedIdentityKeys].slice(0, 8);
-  const kv6IdentityLogDue = Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000;
   if (
+    includeIdentityDiagnostics &&
     requestedKv6Misses.length > 0 &&
-    kv6RequestedIdentityKeys.length > 0 &&
-    (includeIdentityDiagnostics || kv6IdentityLogDue)
+    kv6RequestedIdentityKeys.length > 0
   ) {
     const bisonIdentityDiagnostics = await getBisonIdentityDiagnostics(env, requestedKv6Misses).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     }));
-    if (includeIdentityDiagnostics) {
-      kv6IdentityAudit = summarizeRealtimeIdentityDiagnostics(requestedKv6Misses, bisonIdentityDiagnostics, "bison");
-    }
-    if (kv6IdentityLogDue) {
-      lastKv6NoExactMatchDiagnosticAt = Date.now();
-      const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
-      const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
-        identity: toIdentity(
-          valueOf(event, "dataOwnerCode", "DataOwnerCode"),
-          valueOf(event, "operationDate", "OperationDate"),
-          valueOf(event, "linePlanningNumber", "LinePlanningNumber"),
-          valueOf(event, "journeyNumber", "JourneyNumber"),
-          valueOf(event, "reinforcementNumber", "ReinforcementNumber") ?? "0"
-        ),
-        eventType: valueOf(event, "eventType", "EventType") ?? null,
-        receivedAt: valueOf(event, "receivedAt") ?? null,
-      }));
-      console.log("[OVLIVE_KV6_UNMATCHED_IDENTITY_DIAG]", JSON.stringify({
-        feedState: snapshot.state ?? null,
-        latestMessageAt: snapshot.latestMessageAt ?? null,
-        messageCount: snapshot.messageCount ?? null,
-        rawBytes: snapshot.rawBytes ?? null,
-        envelopeCounts: snapshot.envelopeCounts ?? {},
-        storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
-        bisonIdentityDiagnostics,
-        storedEventSampleCount: storedEventIdentitySamples.length,
-        requestedIdentityKeys: requestedKv6Misses,
-        returnedExactEventCount: kv6ReturnedEventCount,
-        storedEventIdentitySamples,
-        kv6Error,
-      }));
-    }
+    kv6IdentityAudit = summarizeRealtimeIdentityDiagnostics(
+      requestedKv6Misses,
+      bisonIdentityDiagnostics,
+      "bison"
+    );
+  }
+
+  // Keep a low-cost, bounded production log for diagnosis. It deliberately
+  // contains only the 12 most-recent events and target IDs; it does not fetch
+  // or serialize the full stored-trip identity index.
+  const kv6IdentityLogDue = Date.now() - lastKv6NoExactMatchDiagnosticAt >= 60_000;
+  if (
+    requestedKv6Misses.length > 0 &&
+    kv6RequestedIdentityKeys.length > 0 &&
+    kv6IdentityLogDue
+  ) {
+    lastKv6NoExactMatchDiagnosticAt = Date.now();
+    const latestStoredEvents = Array.isArray(snapshot.latestEvents) ? snapshot.latestEvents : [];
+    const storedEventIdentitySamples = latestStoredEvents.slice(-12).map((event) => ({
+      identity: toIdentity(
+        valueOf(event, "dataOwnerCode", "DataOwnerCode"),
+        valueOf(event, "operationDate", "OperationDate"),
+        valueOf(event, "linePlanningNumber", "LinePlanningNumber"),
+        valueOf(event, "journeyNumber", "JourneyNumber"),
+        valueOf(event, "reinforcementNumber", "ReinforcementNumber") ?? "0"
+      ),
+      eventType: valueOf(event, "eventType", "EventType") ?? null,
+      receivedAt: valueOf(event, "receivedAt") ?? null,
+    }));
+    console.log("[OVLIVE_KV6_UNMATCHED_IDENTITY_DIAG]", JSON.stringify({
+      feedState: snapshot.state ?? null,
+      latestMessageAt: snapshot.latestMessageAt ?? null,
+      messageCount: snapshot.messageCount ?? null,
+      rawBytes: snapshot.rawBytes ?? null,
+      envelopeCounts: snapshot.envelopeCounts ?? {},
+      storedKv6TripCount: snapshot.storedKv6TripCount ?? latestStoredEvents.length,
+      storedEventSampleCount: storedEventIdentitySamples.length,
+      requestedIdentityKeys: requestedKv6Misses,
+      returnedExactEventCount: kv6ReturnedEventCount,
+      storedEventIdentitySamples,
+      kv6Error,
+      fullIdentityScan: includeIdentityDiagnostics,
+    }));
   }
 
   // Delay enrichment is independent of the KV17 state: it reads already-collected

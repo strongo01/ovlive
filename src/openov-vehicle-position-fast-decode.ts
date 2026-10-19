@@ -24,7 +24,35 @@ export interface DecodedOpenovVehiclePosition {
 
 export interface DecodedOpenovVehicleFeed {
   feedTimestamp?: number;
+  /** Number of VehiclePosition messages seen, before optional trip filtering. */
+  sourceEntityCount: number;
   entities: DecodedOpenovVehiclePosition[];
+}
+
+export interface OpenovVehiclePositionFilters {
+  /** Normalized GTFS trip IDs; "nl-OpenOV_" prefixes are not required. */
+  tripIds?: ReadonlySet<string>;
+  /** Normalized GTFS route IDs; "nl-OpenOV_" prefixes are not required. */
+  routeIds?: ReadonlySet<string>;
+}
+
+function normalizedFilterId(value: unknown): string {
+  return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
+}
+
+function matchesVehiclePositionFilters(
+  trip: { tripId?: string; routeId?: string } | undefined,
+  filters?: OpenovVehiclePositionFilters
+): boolean {
+  if (!filters) return true;
+  const tripIds = filters.tripIds;
+  const routeIds = filters.routeIds;
+  const tripId = normalizedFilterId(trip?.tripId);
+  const routeId = normalizedFilterId(trip?.routeId);
+
+  if (tripIds && tripIds.size > 0 && !tripIds.has(tripId)) return false;
+  if (routeIds && routeIds.size > 0 && !routeIds.has(routeId)) return false;
+  return true;
 }
 
 interface VarintResult {
@@ -228,29 +256,48 @@ function decodeVehicleDescriptor(
 function decodeVehiclePosition(
   bytes: Uint8Array,
   start: number,
-  end: number
-): Omit<DecodedOpenovVehiclePosition, "entityId"> {
+  end: number,
+  filters?: OpenovVehiclePositionFilters
+): Omit<DecodedOpenovVehiclePosition, "entityId"> | null {
   let trip: ReturnType<typeof decodeTripDescriptor> | undefined;
-  let vehicle: ReturnType<typeof decodeVehicleDescriptor> | undefined;
-  let position: ReturnType<typeof decodePosition> | undefined;
+  let positionField: Field | undefined;
+  let stopIdField: Field | undefined;
+  let vehicleField: Field | undefined;
   // VehiclePosition scalar/string defaults are 0 and "" in protobufjs.
   let timestamp = 0;
-  let stopId = "";
   let offset = start;
 
+  // Keep the raw nested-field boundaries until we know whether this exact trip
+  // is requested. For map requests, thousands of unrelated coordinates and
+  // vehicle descriptors need not be decoded into temporary JS objects.
   while (offset < end) {
     const field = readField(bytes, offset, end);
     if (field.wireType === 2) {
-      if (field.number === 1) trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
-      else if (field.number === 2) position = decodePosition(bytes, field.contentStart, field.contentEnd);
-      else if (field.number === 7) stopId = readString(bytes, field);
-      else if (field.number === 8) vehicle = decodeVehicleDescriptor(bytes, field.contentStart, field.contentEnd);
+      if (field.number === 1) {
+        trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
+        // TripDescriptor is field 1 in the standard schema. Once it proves
+        // this is not a requested trip/route, skip the rest of that vehicle
+        // message instead of walking through its coordinates and metadata.
+        if (!matchesVehiclePositionFilters(trip, filters)) return null;
+      } else if (field.number === 2) positionField = field;
+      else if (field.number === 7) stopIdField = field;
+      else if (field.number === 8) vehicleField = field;
     } else if (field.number === 5 && field.wireType === 0) {
       // VehiclePosition.timestamp = field 5, uint64 epoch seconds.
       timestamp = field.value ?? 0;
     }
     offset = field.nextOffset;
   }
+
+  if (!matchesVehiclePositionFilters(trip, filters)) return null;
+
+  const position = positionField
+    ? decodePosition(bytes, positionField.contentStart, positionField.contentEnd)
+    : undefined;
+  const vehicle = vehicleField
+    ? decodeVehicleDescriptor(bytes, vehicleField.contentStart, vehicleField.contentEnd)
+    : undefined;
+  const stopId = stopIdField ? readString(bytes, stopIdField) : "";
 
   return {
     vehicleId: vehicle?.vehicleId,
@@ -269,30 +316,40 @@ function decodeVehiclePosition(
 function decodeFeedEntity(
   bytes: Uint8Array,
   start: number,
-  end: number
-): DecodedOpenovVehiclePosition | null {
-  let entityId: string | undefined;
-  let vehiclePosition: Omit<DecodedOpenovVehiclePosition, "entityId"> | undefined;
+  end: number,
+  filters?: OpenovVehiclePositionFilters
+): { isVehiclePosition: boolean; entity: DecodedOpenovVehiclePosition | null } {
+  let entityIdField: Field | undefined;
+  let vehiclePosition: Omit<DecodedOpenovVehiclePosition, "entityId"> | null | undefined;
+  let isVehiclePosition = false;
   let offset = start;
 
   while (offset < end) {
     const field = readField(bytes, offset, end);
     if (field.number === 1 && field.wireType === 2) {
-      entityId = readString(bytes, field);
+      entityIdField = field;
     } else if (field.number === 4 && field.wireType === 2) {
       // FeedEntity.vehicle = field 4. Trip updates, alerts and other entity
       // variants are skipped without constructing their object graphs.
-      vehiclePosition = decodeVehiclePosition(bytes, field.contentStart, field.contentEnd);
+      isVehiclePosition = true;
+      vehiclePosition = decodeVehiclePosition(bytes, field.contentStart, field.contentEnd, filters);
     }
     offset = field.nextOffset;
   }
 
-  if (!vehiclePosition) return null;
-  return { entityId, ...vehiclePosition };
+  if (!isVehiclePosition || !vehiclePosition) {
+    return { isVehiclePosition, entity: null };
+  }
+  const entityId = entityIdField ? readString(bytes, entityIdField) : undefined;
+  return { isVehiclePosition: true, entity: { entityId, ...vehiclePosition } };
 }
 
-export function decodeOpenovVehiclePositions(bytes: Uint8Array): DecodedOpenovVehicleFeed {
+export function decodeOpenovVehiclePositions(
+  bytes: Uint8Array,
+  filters?: OpenovVehiclePositionFilters
+): DecodedOpenovVehicleFeed {
   let feedTimestamp: number | undefined;
+  let sourceEntityCount = 0;
   const entities: DecodedOpenovVehiclePosition[] = [];
   let offset = 0;
 
@@ -304,7 +361,9 @@ export function decodeOpenovVehiclePositions(bytes: Uint8Array): DecodedOpenovVe
     } else if (field.number === 2 && field.wireType === 2) {
       // FeedMessage.entity = field 2. Decode the message only far enough to
       // find its VehiclePosition payload and skip other entity variants.
-      const entity = decodeFeedEntity(bytes, field.contentStart, field.contentEnd);
+      const decoded = decodeFeedEntity(bytes, field.contentStart, field.contentEnd, filters);
+      if (decoded.isVehiclePosition) sourceEntityCount += 1;
+      const entity = decoded.entity;
       if (entity && (entity.vehicleId || entity.tripId || entity.latitude != null)) {
         entities.push(entity);
       }
@@ -313,5 +372,5 @@ export function decodeOpenovVehiclePositions(bytes: Uint8Array): DecodedOpenovVe
     offset = field.nextOffset;
   }
 
-  return { feedTimestamp, entities };
+  return { feedTimestamp, sourceEntityCount, entities };
 }
