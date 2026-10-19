@@ -572,8 +572,10 @@ assert.ok(html.includes("firstArrivalBufferSeconds: selectedFirstVehicleBufferSe
   html.includes("const minutes = Number.isFinite(parsed) ? Math.min(30, Math.max(0, parsed)) : 5;"),
   "initial planning and realtime refresh must both apply the current buffer and walking speed");
 assert.ok(html.includes("distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6)") &&
-  html.includes("const estimatedWalkSeconds = walkingDurationSeconds(leg.distance)"),
-  "walking duration and the generated wait segment must use the configured speed");
+  html.includes("walkingDurationSeconds(leg.distance, activeWalkingSpeedKmh)") &&
+  html.includes("walkingLegTimingAtSpeed(leg, startTime, walkingSpeedKmh)") &&
+  html.includes("walkingConnectionStatus(timing.endTime, nextDeparture)"),
+  "all walking durations and transfer feasibility must use the configured speed");
 
 const walkingHelpersStart = html.indexOf("function normalizeWalkingSpeedKmh(value) {");
 const renderLegAfterWalkingHelpers = html.indexOf("function renderLeg(leg, index = 0) {", walkingHelpersStart);
@@ -585,7 +587,9 @@ assert.ok(walkingHelpersStart >= 0 && renderLegAfterWalkingHelpers > walkingHelp
 const walkingHelperContext = {};
 new vm.Script(
   html.slice(walkingHelpersStart, renderLegAfterWalkingHelpers).trim() +
-  "\nthis.walkingDurationSeconds = walkingDurationSeconds;"
+  "\nthis.walkingDurationSeconds = walkingDurationSeconds;" +
+  "\nthis.walkingLegTimingAtSpeed = walkingLegTimingAtSpeed;" +
+  "\nthis.walkingConnectionStatus = walkingConnectionStatus;"
 ).runInNewContext(walkingHelperContext);
 
 assert.equal(walkingHelperContext.normalizeWalkingSpeedKmh(2), 2,
@@ -630,7 +634,13 @@ slider.listeners.input();
 assert.equal(speedOutput.textContent, "15 km/u",
   "the readout must display the slider maximum accurately");
 console.log("PASS: walking speed slider displays its live value and enforces the 2–15 km/h range");
-const prepareBufferContext = { plannedEndpointTime, walkingDurationSeconds: walkingHelperContext.walkingDurationSeconds };
+const prepareBufferContext = {
+  plannedEndpointTime,
+  walkingDurationSeconds: walkingHelperContext.walkingDurationSeconds,
+  walkingLegTimingAtSpeed: walkingHelperContext.walkingLegTimingAtSpeed,
+  walkingConnectionStatus: walkingHelperContext.walkingConnectionStatus,
+  normalizeWalkingSpeedKmh: walkingHelperContext.normalizeWalkingSpeedKmh
+};
 prepareBufferContext.prepareJourneyLegsForDisplay = new vm.Script(
   "(" + html.slice(prepareForBufferStart, journeySortAfterPrepare).trim() + ")"
 ).runInNewContext(prepareBufferContext);
@@ -680,4 +690,58 @@ assert.ok(Date.parse(slowWalk.adjustedJourneyStart) < Date.parse(fastWalk.adjust
 assert.equal(slowWalk.legs[0].initialDepartureCalculated, true,
   "the computed walking departure must take precedence over original walking timetable fields");
 console.log("PASS: first-vehicle buffer and walking speed calculate consistent origin departure and station arrival times");
+
+// Later walks must use the selected speed and check whether the next transit is reachable.
+const transferWalk = {
+  mode: "WALK",
+  startTime: "2026-10-20T06:22:00.000Z",
+  endTime: "2026-10-20T06:24:00.000Z",
+  distance: 392,
+  from: { name: "Utrecht Vaartsche Rijn", departure: "2026-10-20T06:22:00.000Z" },
+  to: { name: "Utrecht, Station Vaartsche Rijn", arrival: "2026-10-20T06:24:00.000Z" }
+};
+const sampleTram = {
+  mode: "TRAM",
+  scheduledStartTime: "2026-10-20T06:30:00.000Z",
+  scheduledEndTime: "2026-10-20T06:40:00.000Z",
+  from: { name: "Utrecht, Station Vaartsche Rijn", scheduledDeparture: "2026-10-20T06:30:00.000Z" },
+  to: { name: "Utrecht, Heidelberglaan", scheduledArrival: "2026-10-20T06:40:00.000Z" }
+};
+const finalWalk = {
+  mode: "WALK",
+  startTime: "2026-10-20T06:40:00.000Z",
+  endTime: "2026-10-20T06:45:00.000Z",
+  distance: 367,
+  from: { name: "Utrecht, Heidelberglaan", departure: "2026-10-20T06:40:00.000Z" },
+  to: { name: "Bestemming", arrival: "2026-10-20T06:45:00.000Z" }
+};
+const multiWalkJourney = {
+  startTime: sampleWalk.startTime,
+  endTime: "2026-10-20T06:45:00.000Z",
+  legs: [sampleWalk, sampleTrain, transferWalk, sampleTram, finalWalk]
+};
+const normalSpeedJourney = prepareBufferContext.prepareJourneyLegsForDisplay(
+  multiWalkJourney, multiWalkJourney.legs, 300, 5
+);
+assert.equal(normalSpeedJourney.legs[2].duration, 282,
+  "392 m at 5 km/h must take four minutes and 42 seconds");
+assert.equal(normalSpeedJourney.legs[2].endTime, "2026-10-20T06:26:42.000Z",
+  "the transfer walking arrival must use the selected speed");
+assert.equal(normalSpeedJourney.legs[2].connectionFeasibility, "available",
+  "arriving before the next tram must leave a feasible connection");
+assert.equal(normalSpeedJourney.legs[4].endTime, "2026-10-20T06:44:24.000Z",
+  "the final walking leg must update journey arrival too");
+const twoKmhJourney = prepareBufferContext.prepareJourneyLegsForDisplay(
+  multiWalkJourney, multiWalkJourney.legs, 300, 2
+);
+assert.equal(twoKmhJourney.legs[2].endTime, "2026-10-20T06:33:46.000Z",
+  "392 m at 2 km/h must take 11 minutes and 46 seconds");
+assert.equal(twoKmhJourney.legs[2].connectionFeasibility, "missed",
+  "walking slowly must flag the 06:30 tram as an infeasible connection");
+assert.equal(
+  walkingHelperContext.walkingConnectionStatus("2026-10-20T06:29:30.000Z", "2026-10-20T06:30:00.000Z").status,
+  "tight",
+  "a connection with under one minute remaining must be marked tight"
+);
+console.log("PASS: all walking legs use the selected speed and check transfer feasibility");
 console.log("All public UI JavaScript checks passed.");
