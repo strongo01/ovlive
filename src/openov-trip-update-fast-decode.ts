@@ -397,11 +397,11 @@ export function decodeOpenovTripUpdates(
     if (field.number === 1 && field.wireType === 2) {
       feedTimestamp = decodeHeaderTimestamp(bytes, field.contentStart, field.contentEnd);
     } else if (field.number === 2 && field.wireType === 2) {
-      let entityId = "";
+      let entityIdField: Field | undefined;
       let tripUpdateField: Field | undefined;
       for (let entityOffset = field.contentStart; entityOffset < field.contentEnd;) {
         const entityField = readField(bytes, entityOffset, field.contentEnd);
-        if (entityField.number === 1 && entityField.wireType === 2) entityId = readString(bytes, entityField);
+        if (entityField.number === 1 && entityField.wireType === 2) entityIdField = entityField;
         else if (entityField.number === 3 && entityField.wireType === 2) tripUpdateField = entityField;
         entityOffset = entityField.nextOffset;
       }
@@ -409,6 +409,7 @@ export function decodeOpenovTripUpdates(
         sourceEntityCount += 1;
         const raw = decodeTripUpdate(bytes, tripUpdateField.contentStart, tripUpdateField.contentEnd, filters);
         if (raw?.trip) {
+          const entityId = entityIdField ? readString(bytes, entityIdField) : "";
           const stops = raw.stopFields.map((stopField) =>
             decodeStopTimeUpdate(bytes, stopField)
           );
