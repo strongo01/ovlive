@@ -128,7 +128,7 @@ console.log("PASS: feed timestamp and per-vehicle timestamp are preserved indepe
 // route/trip positions, which avoids allocating thousands of unrelated objects.
 const filtered = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
   tripIds: new Set(["391215411"]),
-  routeIds: new Set(["nl-OpenOV_159450"])
+  routeIds: new Set(["159450"])
 });
 assert.equal(filtered.sourceEntityCount, 4);
 assert.deepEqual(filtered.entities, [fast.entities[0]]);
