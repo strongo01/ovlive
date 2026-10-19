@@ -1628,7 +1628,7 @@ async function enrichTransitousPlan(
   );
 
   // Reuse deduplication and matcher indexes until a source feed actually changes.
-  const { records, indexes: realtimeMatcherIndexes } =
+  const { indexes: realtimeMatcherIndexes } =
     getOpenovRealtimeFeedIndexCache(tripFeed, trainFeed);
   // Gebruik alleen posities uit een verse feedheader. De helper controleert
   // daarnaast de individuele tijdstempel van iedere voertuigpositie.
