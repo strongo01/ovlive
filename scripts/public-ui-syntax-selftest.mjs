@@ -126,11 +126,12 @@ assert.equal(stopFunction.includes("livePlanRealtimeInFlight = false;"), false,
   "stopping/restarting the timer must not release the lock for an unfinished request");
 console.log("PASS: timetable and vehicle updates poll every 10 seconds with an in-flight overlap guard");
 
-assert.ok(workerSource.includes("const OPENOV_FEED_CACHE_TTL_MS = 8_000;"),
-  "the Worker feed memory cache must expire in under 10 seconds");
+assert.ok(workerSource.includes("const OPENOV_FEED_CACHE_TTL_MS = 30_000;") &&
+  workerSource.includes("const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 12_000;"),
+  "large trip/train feeds must be cached long enough to avoid repeated full-feed CPU work while vehicle positions stay short-lived");
 assert.ok(workerSource.includes("cf: { cacheTtl: 5, cacheEverything: true }"),
   "the upstream OpenOV feed cache must be shorter than the ten-second poll");
-console.log("PASS: OpenOV feed caches are shorter than the 10-second polling interval");
+console.log("PASS: large OpenOV trip/train feeds are cached longer while vehicle positions stay short-lived");
 
 // Regression guard: the itinerary summary must not read block-scoped values
 // before their declarations, which would abort the planner at runtime.
