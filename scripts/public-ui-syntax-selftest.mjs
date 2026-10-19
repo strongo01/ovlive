@@ -281,7 +281,7 @@ console.log("PASS: OpenOV events keep OpenOV identity and remain unconfirmed wit
  // Always select explicit scheduled times first; never silently substitute a realtime time.
 const plannedStart = html.indexOf("function plannedEndpointTime(leg, kind) {");
 const chronologyStart = html.indexOf("function journeyChronologyIssue(legs, toleranceSeconds = 60) {", plannedStart);
-const renderLegStartForHelpers = html.indexOf("function renderLeg(leg, index = 0) {", chronologyStart);
+const renderLegStartForHelpers = html.indexOf("function renderLeg(leg, index = 0, journeyLegs = null) {", chronologyStart);
 assert.ok(plannedStart >= 0 && chronologyStart > plannedStart && renderLegStartForHelpers > chronologyStart,
   "planned-time and itinerary chronology helpers must exist");
 const plannedTimeSource = html.slice(plannedStart, chronologyStart).trim();
@@ -578,7 +578,7 @@ assert.ok(html.includes("distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6)")
   "all walking durations and transfer feasibility must use the configured speed");
 
 const walkingHelpersStart = html.indexOf("function normalizeWalkingSpeedKmh(value) {");
-const renderLegAfterWalkingHelpers = html.indexOf("function renderLeg(leg, index = 0) {", walkingHelpersStart);
+const renderLegAfterWalkingHelpers = html.indexOf("function renderLeg(leg, index = 0, journeyLegs = null) {", walkingHelpersStart);
 const prepareForBufferStart = html.indexOf("function prepareJourneyLegsForDisplay(");
 const journeySortAfterPrepare = html.indexOf("function journeySortMetrics(", prepareForBufferStart);
 assert.ok(walkingHelpersStart >= 0 && renderLegAfterWalkingHelpers > walkingHelpersStart &&
