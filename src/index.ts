@@ -644,12 +644,14 @@ function openovFeedCacheKey(
   return url + "#vehicle-position-filter:" + JSON.stringify({ tripIds, routeIds });
 }
 
-// Houd deze per-isolate cache bewust korter dan de 10-sec frontendpoll.
-// Gerichte voertuigvragen decoderen alleen de aangevraagde ritten en routes,
-// zodat een kaartverversing geen 2.000 volledige voertuigobjecten hoeft te bouwen.
-const OPENOV_FEED_CACHE_TTL_MS = 8_000;
-// Disruption alerts change less frequently than live trip updates. Cache them
-// for 30 seconds so 10-second timetable polling does not refetch the same feed.
+// Full trip/train feeds contain thousands of records and decoding them on
+// every 10-second UI poll can exceed the Workers Free CPU budget. Their source
+// timestamps already lag by tens of seconds, so reusing the decoded feed for
+// 30 seconds is safer than repeatedly downloading and decoding the same data.
+const OPENOV_FEED_CACHE_TTL_MS = 30_000;
+// Vehicle positions remain short-lived because the map uses them for tracking.
+const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 8_000;
+// Disruption alerts change less frequently than live trip updates.
 const OPENOV_ALERTS_CACHE_TTL_MS = 30_000;
 // Een lopende bron mag niet de hele 10-seconden-plannerpoll ophouden.
 // De daadwerkelijke fetch heeft daarnaast zijn eigen 15-seconden abort-timeout.
@@ -711,7 +713,9 @@ async function getOpenovFeed(
   // every 10 seconds; trip and vehicle feeds keep their shorter live cache.
   const cacheTtlMs = kind === "alerts"
     ? OPENOV_ALERTS_CACHE_TTL_MS
-    : OPENOV_FEED_CACHE_TTL_MS;
+    : kind === "vehiclePositions"
+      ? OPENOV_VEHICLE_POSITION_CACHE_TTL_MS
+      : OPENOV_FEED_CACHE_TTL_MS;
   if (cached && now - cached.fetchedAtMs < cacheTtlMs) {
     console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
       kind,
@@ -1196,6 +1200,93 @@ function buildOpenovRealtimeMatcherIndexes(records: any[]): OpenovRealtimeMatche
 
   return { byTripId, byRouteDate };
 }
+type OpenovRealtimeFeedIndexCacheEntry = {
+  tripEntities: any[] | null;
+  trainEntities: any[] | null;
+  records: any[];
+  indexes: OpenovRealtimeMatcherIndexes;
+};
+
+let openovRealtimeFeedIndexCache: OpenovRealtimeFeedIndexCacheEntry | null = null;
+
+function getOpenovRealtimeFeedIndexCache(tripFeed: any, trainFeed: any): {
+  records: any[];
+  indexes: OpenovRealtimeMatcherIndexes;
+} {
+  const tripEntities = tripFeed?.ok === true && tripFeed?.freshness === "fresh"
+    ? tripFeed.entities ?? []
+    : null;
+  const trainEntities = trainFeed?.ok === true && trainFeed?.freshness === "fresh"
+    ? trainFeed.entities ?? []
+    : null;
+
+  // Feed-cache hits preserve the decoded entities array identity. Reuse the
+  // 7k-record deduplication/index work across consecutive 10-second polls.
+  if (
+    openovRealtimeFeedIndexCache &&
+    openovRealtimeFeedIndexCache.tripEntities === tripEntities &&
+    openovRealtimeFeedIndexCache.trainEntities === trainEntities
+  ) {
+    return {
+      records: openovRealtimeFeedIndexCache.records,
+      indexes: openovRealtimeFeedIndexCache.indexes
+    };
+  }
+
+  const byIdentity = new Map<string, any>();
+  for (const feed of [tripFeed, trainFeed]) {
+    if (feed?.ok !== true || feed?.freshness !== "fresh") continue;
+
+    const headerMs = typeof feed.feedTimestamp === "string"
+      ? Date.parse(feed.feedTimestamp)
+      : Number.NaN;
+    const feedTimestampSeconds = Number.isFinite(headerMs) && headerMs > 0
+      ? headerMs / 1000
+      : undefined;
+
+    for (const record of feed.entities ?? []) {
+      if (!record.tripId) continue;
+      const enrichedRecord = { ...record, feedTimestampSeconds };
+      const identity = parseOpenovTripId(record.tripId);
+      const key = [
+        normalizeOpenovId(record.routeId),
+        identity.tripId,
+        record.startDate ?? "",
+        normalizeClock(record.startTime) ?? ""
+      ].join("|");
+
+      const existing = byIdentity.get(key);
+      const newHasTimestamp =
+        typeof enrichedRecord.timestamp === "number" &&
+        Number.isFinite(enrichedRecord.timestamp) &&
+        enrichedRecord.timestamp > 0;
+      const oldHasTimestamp = existing
+        ? typeof existing.timestamp === "number" &&
+          Number.isFinite(existing.timestamp) &&
+          existing.timestamp > 0
+        : false;
+      const shouldReplace =
+        !existing ||
+        (newHasTimestamp && !oldHasTimestamp) ||
+        (
+          newHasTimestamp === oldHasTimestamp &&
+          (
+            newHasTimestamp
+              ? enrichedRecord.timestamp > existing.timestamp
+              : (enrichedRecord.feedTimestampSeconds ?? 0) >
+                (existing.feedTimestampSeconds ?? 0)
+          )
+        );
+      if (shouldReplace) byIdentity.set(key, enrichedRecord);
+    }
+  }
+
+  const records = [...byIdentity.values()];
+  const indexes = buildOpenovRealtimeMatcherIndexes(records);
+  openovRealtimeFeedIndexCache = { tripEntities, trainEntities, records, indexes };
+  return { records, indexes };
+}
+
 
 function normalizeVehiclePositionLookupPart(value: any): string {
   // Keep parity with findExactVehiclePositionForLeg's ID normalization.
@@ -1527,7 +1618,7 @@ async function enrichTransitousPlan(
       : Promise.resolve(skippedOpenovFeedResult())
   ]);
 
-  // TIJDELIJKE DIAGNOSE: controleer de daadwerkelijke invoer van de matcher.
+  // The normalized feed and its trip matcher index are memoized until source data changes.
 
   const usableFeeds = [
     tripFeed,
@@ -1536,69 +1627,9 @@ async function enrichTransitousPlan(
     feed.ok === true && feed.freshness === "fresh"
   );
 
-  // Combineer en dedupliceer updates uit de bus/tram- en treinfeed.
-  const byIdentity = new Map<string, any>();
-
-  const hasTripTimestamp = (record: any) =>
-    typeof record.timestamp === "number" &&
-    Number.isFinite(record.timestamp) &&
-    record.timestamp > 0;
-
-  for (const feed of usableFeeds) {
-    const headerMs = typeof feed.feedTimestamp === "string"
-      ? Date.parse(feed.feedTimestamp)
-      : Number.NaN;
-
-    const feedTimestampSeconds =
-      Number.isFinite(headerMs) && headerMs > 0
-        ? headerMs / 1000
-        : undefined;
-
-    for (const record of feed.entities ?? []) {
-      if (!record.tripId) continue;
-
-      const enrichedRecord = {
-        ...record,
-        feedTimestampSeconds,
-        feedAgeSeconds: feed.ageSeconds ?? null
-      };
-
-      const identity = parseOpenovTripId(record.tripId);
-      const key = [
-        normalizeOpenovId(record.routeId),
-        identity.tripId,
-        record.startDate ?? "",
-        normalizeClock(record.startTime) ?? ""
-      ].join("|");
-
-      const existing = byIdentity.get(key);
-      const newHasTimestamp = hasTripTimestamp(enrichedRecord);
-      const oldHasTimestamp = existing
-        ? hasTripTimestamp(existing)
-        : false;
-
-      const shouldReplace =
-        !existing ||
-        (newHasTimestamp && !oldHasTimestamp) ||
-        (
-          newHasTimestamp === oldHasTimestamp &&
-          (
-            newHasTimestamp
-              ? enrichedRecord.timestamp > existing.timestamp
-              : (enrichedRecord.feedTimestampSeconds ?? 0) >
-                (existing.feedTimestampSeconds ?? 0)
-          )
-        );
-
-      if (shouldReplace) {
-        byIdentity.set(key, enrichedRecord);
-      }
-    }
-  }
-
-  // TIJDELIJKE DIAGNOSE: aantallen binnen dezelfde routeaanvraag.
-  const records = [...byIdentity.values()];
-  const realtimeMatcherIndexes = buildOpenovRealtimeMatcherIndexes(records);
+  // Reuse deduplication and matcher indexes until a source feed actually changes.
+  const { records, indexes: realtimeMatcherIndexes } =
+    getOpenovRealtimeFeedIndexCache(tripFeed, trainFeed);
   // Gebruik alleen posities uit een verse feedheader. De helper controleert
   // daarnaast de individuele tijdstempel van iedere voertuigpositie.
   const vehiclePositions =
