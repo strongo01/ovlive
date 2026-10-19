@@ -2683,7 +2683,6 @@ function prepareJourneyLegsForDisplay(
 
   // De overige loopstukken worden ook op de gekozen loopsnelheid berekend.
   // OV-vertrektijden blijven staan; onhaalbare aansluitingen krijgen een waarschuwing.
-  const nonTransitModes = new Set(['WALK', 'WAIT', 'TRANSFER']);
   for (let index = 1; index < legs.length; index += 1) {
     const leg = legs[index];
     if (String(leg?.mode ?? '').toUpperCase() !== 'WALK' ||
