@@ -118,7 +118,7 @@ const feedObject = {
           {
             stopSequence: 2,
             stopId: "3923899",
-            scheduleRelationship: "NO_DATA"
+            scheduleRelationship: 2
           },
           {
             stopSequence: 3,
