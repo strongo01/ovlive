@@ -285,7 +285,11 @@ const renderLegStartForHelpers = html.indexOf("function renderLeg(leg, index = 0
 assert.ok(plannedStart >= 0 && chronologyStart > plannedStart && renderLegStartForHelpers > chronologyStart,
   "planned-time and itinerary chronology helpers must exist");
 const plannedTimeSource = html.slice(plannedStart, chronologyStart).trim();
-const chronologySource = html.slice(chronologyStart, renderLegStartForHelpers).trim();
+const walkingHelpersStartForChronology = html.indexOf("function normalizeWalkingSpeedKmh(value) {", chronologyStart);
+assert.ok(walkingHelpersStartForChronology > chronologyStart &&
+  renderLegStartForHelpers > walkingHelpersStartForChronology,
+  "walking helper functions must remain outside the chronology checker function");
+const chronologySource = html.slice(chronologyStart, walkingHelpersStartForChronology).trim();
 const plannedEndpointTime = new vm.Script("(" + plannedTimeSource + ")").runInNewContext();
 const journeyChronologyIssue = new vm.Script("(" + chronologySource + ")").runInNewContext({ plannedEndpointTime });
 
