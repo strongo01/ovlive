@@ -45,10 +45,23 @@ assert.match(
   /Realtimegegevens zijn tijdelijk niet beschikbaar\. De bestaande tijden blijven staan; OVLive controleert automatisch opnieuw\./,
   "Tijdelijke storingen moeten de bestaande tijden behouden en automatisch opnieuw proberen"
 );
+const refreshStart = frontend.indexOf("async function refreshLivePlanRealtime(");
+const refreshEnd = frontend.indexOf("function startLivePlanRealtimeRefresh(", refreshStart);
+assert.ok(refreshStart >= 0 && refreshEnd > refreshStart, "De realtime-verversingsfunctie ontbreekt");
+const refreshFunction = frontend.slice(refreshStart, refreshEnd);
+const retryableBranchStart = refreshFunction.indexOf("if (retryable) {");
+const nonRetryableBranchStart = refreshFunction.indexOf("} else if (statusElement)", retryableBranchStart);
+assert.ok(retryableBranchStart >= 0 && nonRetryableBranchStart > retryableBranchStart,
+  "Tijdelijke en niet-tijdelijke fouten moeten apart worden afgehandeld");
 assert.doesNotMatch(
-  frontend,
+  refreshFunction.slice(retryableBranchStart, nonRetryableBranchStart),
   /Realtime-update mislukt: \$\{reason\}/,
-  "De oude ruwe foutstatus mag niet aan de reiziger worden getoond"
+  "Tijdelijke HTTP 503-fouten mogen niet de herhaalde ruwe foutstatus tonen"
+);
+assert.match(
+  refreshFunction,
+  /Realtime-update mislukt: \$\{reason\}/,
+  "Niet-tijdelijke fouten moeten hun bruikbare foutdetails behouden"
 );
 assert.match(
   refreshHandler,
