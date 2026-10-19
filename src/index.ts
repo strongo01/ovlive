@@ -6,6 +6,7 @@ import {
 } from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 import { decodeOpenovVehiclePositions } from "./openov-vehicle-position-fast-decode.js";
+import { decodeOpenovTripUpdates } from "./openov-trip-update-fast-decode.js";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
 import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
@@ -625,23 +626,33 @@ type OpenovFeedCacheEntry = {
   fetchedAtMs: number;
 };
 
-type OpenovVehiclePositionFilters = {
+type OpenovFeedFilters = {
   tripIds?: string[];
   routeIds?: string[];
+  routeDateKeys?: string[];
 };
 
 function openovFeedCacheKey(
   url: string,
   kind: OpenovFeedKind,
-  filters?: OpenovVehiclePositionFilters
+  filters?: OpenovFeedFilters
 ): string {
-  if (kind !== "vehiclePositions" ||
-      !(filters?.tripIds?.length || filters?.routeIds?.length)) return url;
+  if (kind === "vehiclePositions" &&
+      (filters?.tripIds?.length || filters?.routeIds?.length)) {
+    const tripIds = [...new Set(filters.tripIds ?? [])].sort();
+    const routeIds = [...new Set(filters.routeIds ?? [])].sort();
+    return url + "#vehicle-position-filter:" + JSON.stringify({ tripIds, routeIds });
+  }
 
-  // Different exact trip/route queries must never share a filtered response.
-  const tripIds = [...new Set(filters.tripIds ?? [])].sort();
-  const routeIds = [...new Set(filters.routeIds ?? [])].sort();
-  return url + "#vehicle-position-filter:" + JSON.stringify({ tripIds, routeIds });
+  if ((kind === "tripUpdates" || kind === "trainUpdates") &&
+      (filters?.tripIds?.length || filters?.routeIds?.length || filters?.routeDateKeys?.length)) {
+    const tripIds = [...new Set(filters.tripIds ?? [])].sort();
+    const routeIds = [...new Set(filters.routeIds ?? [])].sort();
+    const routeDateKeys = [...new Set(filters.routeDateKeys ?? [])].sort();
+    return url + "#trip-update-filter:" + JSON.stringify({ tripIds, routeIds, routeDateKeys });
+  }
+
+  return url;
 }
 
 // Full trip/train feeds contain thousands of records and decoding them on
@@ -705,7 +716,7 @@ function cachedOpenovFeedView(
 async function getOpenovFeed(
   url: string,
   kind: OpenovFeedKind,
-  filters?: OpenovVehiclePositionFilters
+  filters?: OpenovFeedFilters
 ): Promise<any> {
   const now = Date.now();
   const cacheKey = openovFeedCacheKey(url, kind, filters);
@@ -753,7 +764,7 @@ async function getOpenovFeed(
   if (rateLimitUntil > now) {
     const retryAfterSeconds = Math.ceil((rateLimitUntil - now) / 1000);
 
-    const fallbackCache = cached ?? (cacheKey !== url ? openovFeedCache.get(url) : undefined);
+    const fallbackCache = cached ?? (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
     if (fallbackCache) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
         kind,
@@ -879,7 +890,7 @@ async function getOpenovFeed(
 async function fetchOpenovFeedUncached(
   url: string,
   kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions",
-  filters?: OpenovVehiclePositionFilters
+  filters?: OpenovFeedFilters
 ) {
   const startedAt = Date.now();
   const response = await fetch(url, {
@@ -1066,16 +1077,17 @@ function collectPlanLegs(plan: any): any[] {
 
 async function safeOpenovFeed(
   url: string,
-  kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions"
+  kind: "tripUpdates" | "alerts" | "trainUpdates" | "vehiclePositions",
+  filters?: OpenovFeedFilters
 ): Promise<any> {
   const startedAt = Date.now();
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const feedPromise = getOpenovFeed(url, kind);
+  const feedPromise = getOpenovFeed(url, kind, filters);
   const timeoutPromise = new Promise<any>((resolve) => {
     timeoutHandle = setTimeout(() => {
-      const cacheKey = openovFeedCacheKey(url, kind);
+      const cacheKey = openovFeedCacheKey(url, kind, filters);
       const cached = openovFeedCache.get(cacheKey) ??
-        (cacheKey !== url ? openovFeedCache.get(url) : undefined);
+        (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
       console.warn("[OVLIVE_OPENOV_FEED_WAIT_TIMEOUT]", JSON.stringify({
         kind,
         timeoutMs: OPENOV_FEED_WAIT_TIMEOUT_MS,
