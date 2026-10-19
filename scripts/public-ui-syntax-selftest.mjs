@@ -67,8 +67,8 @@ assert.ok(openovMatcherSource.includes("indexes.byTripId.get(identity.tripId)") 
   "the matcher must use trip and route/date indexes instead of scanning every feed record");
 
 assert.ok(workerSource.includes("function openovRealtimeLegFeedFamily(") &&
-  workerSource.includes('trainModes.has(mode)') &&
-  workerSource.includes('tripModes.has(mode)'),
+  workerSource.includes('OPENOV_TRAIN_LEG_MODES.has(mode)') &&
+  workerSource.includes('OPENOV_TRIP_LEG_MODES.has(mode)'),
   "OpenOV realtime feed selection must distinguish rail from bus/tram modes");
 assert.ok(workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates")') &&
   workerSource.includes('needsTrainUpdates\n      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")') &&
