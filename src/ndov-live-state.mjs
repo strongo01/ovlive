@@ -1,5 +1,30 @@
 const DAY_RE = /^(\d{4})-?(\d{2})-?(\d{2})$/;
 
+// A persisted "enabled" flag is not proof that the live stream is receiving
+// messages. Use the last payload time (or session start before the first
+// payload) to detect a collector that stopped making progress.
+export function continuousCollectorHealth(snapshot, nowMs = Date.now(), maxIdleMs = 150_000) {
+  const state = String(snapshot?.state ?? "").toLowerCase();
+  const timestampValue = snapshot?.latestMessageAt ?? snapshot?.startedAt;
+  const timestampMs = Date.parse(String(timestampValue ?? ""));
+  const ageMs = Number.isFinite(timestampMs) ? nowMs - timestampMs : null;
+  const ageSeconds = ageMs === null ? null : Math.round(Math.max(0, ageMs) / 1000);
+
+  if (state === "error") {
+    return { stale: true, reason: "collector_error", ageSeconds };
+  }
+  if (ageMs === null) {
+    return { stale: true, reason: "missing_activity_timestamp", ageSeconds: null };
+  }
+  if (ageMs < -30_000) {
+    return { stale: true, reason: "activity_timestamp_in_future", ageSeconds };
+  }
+  if (ageMs > maxIdleMs) {
+    return { stale: true, reason: "no_recent_messages", ageSeconds };
+  }
+  return { stale: false, reason: null, ageSeconds };
+}
+
 export function normalizeOperatingDate(value) {
   const raw = String(value ?? '').trim();
   const match = raw.match(DAY_RE);
