@@ -2377,27 +2377,80 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       if (wasNdovCancelled) delete leg.cancelled;
     }
 
+    // Elke realtimebron is onafhankelijk. Een fout in bijvoorbeeld NDOV mag
+    // verse OpenOV-bus/tramprognoses niet weggooien of de hele update laten falen.
+    const sourceErrors: Array<{ source: string; error: string }> = [];
+    let successfulSources = 0;
+    const errorText = (error: unknown) =>
+      error instanceof Error ? error.message : String(error ?? "Onbekende fout");
+
     try {
       await prepareNsTrainIdentities(planData, env);
       await enrichNsTrainPlan(planData, env);
-      planData = await enrichTransitousPlan(planData);
-      await applyNdovCancellationsToPlan(planData, env);
-      return json(planData, 200, {
-        ...headers,
-        "cache-control": "no-store",
-        "x-upstream": "OVLive realtime refresh"
-      });
+      successfulSources++;
     } catch (error) {
-      console.error(
-        "[OVLIVE_REALTIME_REFRESH_ERROR]",
-        error instanceof Error ? error.stack ?? error.message : error
-      );
-      return json({
-        error: "De realtimegegevens konden niet volledig worden vernieuwd.",
-        detail: error instanceof Error ? error.message : "Onbekende fout",
+      const message = errorText(error);
+      sourceErrors.push({ source: "NS", error: message });
+      planData.nsRealtimeMeta = {
+        status: "unavailable",
+        error: message,
         checkedAt: new Date().toISOString()
+      };
+      console.error("[OVLIVE_REALTIME_REFRESH_NS_ERROR]", message);
+    }
+
+    try {
+      planData = await enrichTransitousPlan(planData);
+      successfulSources++;
+    } catch (error) {
+      const message = errorText(error);
+      sourceErrors.push({ source: "OpenOV", error: message });
+      planData.openovRealtimeMeta = {
+        source: "OpenOV GTFS-Realtime",
+        status: "enrichment_failed",
+        message: "OpenOV kon deze realtimecontrole niet afronden.",
+        error: message,
+        checkedAt: new Date().toISOString()
+      };
+      console.error("[OVLIVE_REALTIME_REFRESH_OPENOV_ERROR]", message);
+    }
+
+    try {
+      await applyNdovCancellationsToPlan(planData, env);
+      successfulSources++;
+    } catch (error) {
+      const message = errorText(error);
+      sourceErrors.push({ source: "NDOV", error: message });
+      planData.ndovRealtimeMeta = {
+        status: "unavailable",
+        error: message,
+        checkedAt: new Date().toISOString()
+      };
+      console.error("[OVLIVE_REALTIME_REFRESH_NDOV_ERROR]", message);
+    }
+
+    planData.realtimeRefreshMeta = {
+      status: sourceErrors.length === 0 ? "complete" : "partial",
+      checkedAt: new Date().toISOString(),
+      successfulSources,
+      errors: sourceErrors
+    };
+
+    if (successfulSources === 0) {
+      return json({
+        error: "Geen enkele realtimebron kon de update afronden.",
+        detail: sourceErrors.map((item) => `${item.source}: ${item.error}`).join(" | "),
+        sourceErrors,
+        checkedAt: planData.realtimeRefreshMeta.checkedAt
       }, 502, headers);
     }
+
+    return json(planData, 200, {
+      ...headers,
+      "cache-control": "no-store",
+      "x-upstream": "OVLive realtime refresh",
+      "x-ovlive-refresh-status": sourceErrors.length === 0 ? "complete" : "partial"
+    });
   }
 
   if (url.pathname === "/api/health") {
