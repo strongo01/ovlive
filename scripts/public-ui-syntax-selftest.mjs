@@ -448,4 +448,107 @@ assert.ok(html.includes("candidateRouteId === expectedRouteId") &&
   html.includes("candidateTripId === expectedTripId"),
   "full-trip overlays must match the selected leg's exact route and trip identity");
 console.log("PASS: map overlays use exact full-trip geometry, with orange route and green selected segment");
+// Journey sorting must compare absolute timestamps so today's late departure precedes tomorrow morning.
+assert.ok(html.includes('id="journeySort"') &&
+  html.includes('value="departure" selected') &&
+  html.includes('value="arrival"') &&
+  html.includes('value="duration"') &&
+  html.includes('value="transfers"') &&
+  html.includes('value="transferWait"'),
+  "journey results must expose all five sorting choices");
+assert.ok(html.includes('data-sort-departure-ms=') &&
+  html.includes('data-sort-transfer-wait-seconds=') &&
+  html.includes("sortJourneyCards(journeySort.value)") &&
+  html.includes("data-tracking-index remains stable") === false,
+  "journey cards must expose calculated sorting metrics and a live sort control");
+const sortPlannedStart = html.indexOf("function plannedEndpointTime(leg, kind) {");
+const sortChronologyStart = html.indexOf("function journeyChronologyIssue(legs, toleranceSeconds = 60) {", sortPlannedStart);
+const sortPrepareStart = html.indexOf("function prepareJourneyLegsForDisplay(");
+const sortItineraryKeyStart = html.indexOf("\nfunction itineraryRealtimeKey(", sortPrepareStart);
+const sortMetricsStart = html.indexOf("function journeySortMetrics(");
+const sortComparatorStart = html.indexOf("\nfunction compareJourneySortMetrics(", sortMetricsStart);
+const sortCardMetricsStart = html.indexOf("\nfunction journeyCardSortMetrics(", sortComparatorStart);
+assert.ok(sortPlannedStart >= 0 && sortChronologyStart > sortPlannedStart &&
+  sortPrepareStart >= 0 && sortItineraryKeyStart > sortPrepareStart &&
+  sortMetricsStart >= 0 && sortComparatorStart > sortMetricsStart &&
+  sortCardMetricsStart > sortComparatorStart,
+  "journey sort metric helpers must be inspectable for deterministic tests");
+const sortMetricContext = {};
+new vm.Script(
+  html.slice(sortPlannedStart, sortChronologyStart).trim() + "\n" +
+  html.slice(sortPrepareStart, sortItineraryKeyStart).trim() + "\n" +
+  html.slice(sortMetricsStart, sortComparatorStart).trim() + "\n" +
+  html.slice(sortComparatorStart, sortCardMetricsStart).trim() + "\n" +
+  "this.journeySortMetrics = journeySortMetrics; this.compareJourneySortMetrics = compareJourneySortMetrics;"
+).runInNewContext(sortMetricContext);
+
+const tonightBus = {
+  startTime: "2026-10-19T21:00:00.000Z",
+  endTime: "2026-10-19T21:25:00.000Z",
+  legs: [{
+    mode: "BUS",
+    scheduledStartTime: "2026-10-19T21:00:00.000Z",
+    scheduledEndTime: "2026-10-19T21:25:00.000Z"
+  }]
+};
+const tomorrowTrain = {
+  startTime: "2026-10-20T07:06:00.000Z",
+  endTime: "2026-10-20T08:11:00.000Z",
+  legs: [
+    { mode: "TRAIN", scheduledStartTime: "2026-10-20T07:06:00.000Z", scheduledEndTime: "2026-10-20T07:35:00.000Z" },
+    { mode: "BUS", scheduledStartTime: "2026-10-20T07:45:00.000Z", scheduledEndTime: "2026-10-20T08:11:00.000Z" }
+  ]
+};
+const tonightMetrics = sortMetricContext.journeySortMetrics(tonightBus, tonightBus.legs);
+const tomorrowMetrics = sortMetricContext.journeySortMetrics(tomorrowTrain, tomorrowTrain.legs);
+assert.ok(sortMetricContext.compareJourneySortMetrics(tonightMetrics, tomorrowMetrics, "departure") < 0,
+  "a bus departing tonight must sort before an itinerary departing tomorrow morning");
+assert.ok(sortMetricContext.compareJourneySortMetrics(tonightMetrics, tomorrowMetrics, "arrival") < 0,
+  "earliest-arrival sorting must compare full date-times");
+assert.ok(sortMetricContext.compareJourneySortMetrics(tonightMetrics, tomorrowMetrics, "duration") < 0,
+  "shortest-trip sorting must compare total itinerary duration");
+
+const directLongJourney = {
+  startTime: "2026-10-19T21:02:00.000Z",
+  endTime: "2026-10-19T23:02:00.000Z",
+  legs: [{ mode: "BUS", scheduledStartTime: "2026-10-19T21:02:00.000Z", scheduledEndTime: "2026-10-19T23:02:00.000Z" }]
+};
+const fasterTransferJourney = {
+  startTime: "2026-10-19T21:03:00.000Z",
+  endTime: "2026-10-19T21:48:00.000Z",
+  legs: [
+    { mode: "BUS", scheduledStartTime: "2026-10-19T21:03:00.000Z", scheduledEndTime: "2026-10-19T21:15:00.000Z" },
+    { mode: "BUS", scheduledStartTime: "2026-10-19T21:20:00.000Z", scheduledEndTime: "2026-10-19T21:48:00.000Z" }
+  ]
+};
+const directMetrics = sortMetricContext.journeySortMetrics(directLongJourney, directLongJourney.legs);
+const transferMetrics = sortMetricContext.journeySortMetrics(fasterTransferJourney, fasterTransferJourney.legs);
+assert.ok(sortMetricContext.compareJourneySortMetrics(directMetrics, transferMetrics, "transfers") < 0,
+  "fewest-transfers sorting must prefer a direct itinerary even when it takes longer");
+
+const shortConnection = {
+  startTime: "2026-10-19T20:00:00.000Z",
+  endTime: "2026-10-19T20:40:00.000Z",
+  legs: [
+    { mode: "BUS", scheduledStartTime: "2026-10-19T20:00:00.000Z", scheduledEndTime: "2026-10-19T20:10:00.000Z" },
+    { mode: "WALK", startTime: "2026-10-19T20:10:00.000Z", endTime: "2026-10-19T20:12:00.000Z", distance: 180 },
+    { mode: "BUS", scheduledStartTime: "2026-10-19T20:14:00.000Z", scheduledEndTime: "2026-10-19T20:40:00.000Z" }
+  ]
+};
+const longConnection = {
+  startTime: "2026-10-19T20:00:00.000Z",
+  endTime: "2026-10-19T20:44:00.000Z",
+  legs: [
+    { mode: "BUS", scheduledStartTime: "2026-10-19T20:00:00.000Z", scheduledEndTime: "2026-10-19T20:10:00.000Z" },
+    { mode: "WALK", startTime: "2026-10-19T20:10:00.000Z", endTime: "2026-10-19T20:12:00.000Z", distance: 180 },
+    { mode: "BUS", scheduledStartTime: "2026-10-19T20:18:00.000Z", scheduledEndTime: "2026-10-19T20:44:00.000Z" }
+  ]
+};
+const shortConnectionMetrics = sortMetricContext.journeySortMetrics(shortConnection, shortConnection.legs);
+const longConnectionMetrics = sortMetricContext.journeySortMetrics(longConnection, longConnection.legs);
+assert.equal(shortConnectionMetrics.transferWaitSeconds, 120,
+  "transfer waiting must subtract the scheduled walk duration from the connection gap");
+assert.ok(sortMetricContext.compareJourneySortMetrics(shortConnectionMetrics, longConnectionMetrics, "transferWait") < 0,
+  "least-transfer-wait sorting must prefer the shorter actual wait, not just the shortest total journey");
+console.log("PASS: journey sorting compares absolute dates, duration, transfer count and transfer waiting accurately");
 console.log("All public UI JavaScript checks passed.");
