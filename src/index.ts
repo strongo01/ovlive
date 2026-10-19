@@ -648,6 +648,9 @@ function openovFeedCacheKey(
 // Gerichte voertuigvragen decoderen alleen de aangevraagde ritten en routes,
 // zodat een kaartverversing geen 2.000 volledige voertuigobjecten hoeft te bouwen.
 const OPENOV_FEED_CACHE_TTL_MS = 8_000;
+// Disruption alerts change less frequently than live trip updates. Cache them
+// for 30 seconds so 10-second timetable polling does not refetch the same feed.
+const OPENOV_ALERTS_CACHE_TTL_MS = 30_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
 const openovFeedCache = new Map<string, OpenovFeedCacheEntry>();
@@ -701,8 +704,12 @@ async function getOpenovFeed(
   const cacheKey = openovFeedCacheKey(url, kind, filters);
   const cached = openovFeedCache.get(cacheKey);
 
-  // 1. Hergebruik een recent resultaat.
-  if (cached && now - cached.fetchedAtMs < OPENOV_FEED_CACHE_TTL_MS) {
+  // 1. Hergebruik een recent resultaat. Alerts do not need a full refresh
+  // every 10 seconds; trip and vehicle feeds keep their shorter live cache.
+  const cacheTtlMs = kind === "alerts"
+    ? OPENOV_ALERTS_CACHE_TTL_MS
+    : OPENOV_FEED_CACHE_TTL_MS;
+  if (cached && now - cached.fetchedAtMs < cacheTtlMs) {
     console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
       kind,
       mode: "memory_hit",
@@ -1441,7 +1448,11 @@ function skippedOpenovFeedResult(): any {
   };
 }
 
-async function enrichTransitousPlan(plan: any): Promise<any> {
+async function enrichTransitousPlan(
+  plan: any,
+  options: { includeVehiclePositions?: boolean } = {}
+): Promise<any> {
+  const includeVehiclePositions = options.includeVehiclePositions !== false;
   const legs = collectPlanLegs(plan);
 
   const openovLegs = legs.filter((leg: any) =>
@@ -1469,7 +1480,7 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
       ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")
       : Promise.resolve(skippedOpenovFeedResult()),
     safeOpenovFeed(OPENOV.alerts, "alerts"),
-    needsTripUpdates
+    needsTripUpdates && includeVehiclePositions
       ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")
       : Promise.resolve(skippedOpenovFeedResult())
   ]);
@@ -1549,7 +1560,9 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
   // Gebruik alleen posities uit een verse feedheader. De helper controleert
   // daarnaast de individuele tijdstempel van iedere voertuigpositie.
   const vehiclePositions =
-    vehicleFeed.ok === true && vehicleFeed.freshness === "fresh"
+    includeVehiclePositions &&
+    vehicleFeed.ok === true &&
+    vehicleFeed.freshness === "fresh"
       ? (vehicleFeed.entities ?? [])
       : [];
   const vehiclePositionsByTripRoute = buildVehiclePositionIndex(vehiclePositions);
@@ -2517,16 +2530,32 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // verse OpenOV-bus/tramprognoses niet weggooien of de hele update laten falen.
     const sourceErrors: Array<{ source: string; error: string }> = [];
     let successfulSources = 0;
+    const refreshStartedAt = Date.now();
+    console.log("[OVLIVE_REALTIME_REFRESH_START]", JSON.stringify({
+      itineraryCount: itineraries.length,
+      legCount: refreshLegCount,
+      startedAt: new Date(refreshStartedAt).toISOString()
+    }));
     const errorText = (error: unknown) =>
       error instanceof Error ? error.message : String(error ?? "Onbekende fout");
 
+    const nsStartedAt = Date.now();
     try {
       await prepareNsTrainIdentities(planData, env);
       await enrichNsTrainPlan(planData, env);
       successfulSources++;
+      console.log("[OVLIVE_REALTIME_REFRESH_STAGE]", JSON.stringify({
+        source: "NS",
+        status: "ok",
+        durationMs: Date.now() - nsStartedAt,
+        candidateLegCount: planData.nsRealtimeMeta?.candidateLegCount ?? 0
+      }));
     } catch (error) {
       const message = errorText(error);
       sourceErrors.push({ source: "NS", error: message });
+      console.warn("[OVLIVE_REALTIME_REFRESH_STAGE]", JSON.stringify({
+        source: "NS", status: "error", durationMs: Date.now() - nsStartedAt
+      }));
       planData.nsRealtimeMeta = {
         status: "unavailable",
         error: message,
@@ -2535,12 +2564,27 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       console.error("[OVLIVE_REALTIME_REFRESH_NS_ERROR]", message);
     }
 
+    const openovStartedAt = Date.now();
     try {
-      planData = await enrichTransitousPlan(planData);
+      // The map has its own 10-second, exact-trip vehicle-position endpoint.
+      // Do not download/decode the entire vehiclePositions feed again during
+      // each full-plan refresh; keep trip predictions and alerts independent.
+      planData = await enrichTransitousPlan(planData, { includeVehiclePositions: false });
       successfulSources++;
+      console.log("[OVLIVE_REALTIME_REFRESH_STAGE]", JSON.stringify({
+        source: "OpenOV",
+        status: "ok",
+        durationMs: Date.now() - openovStartedAt,
+        matchedLegCount: planData.openovRealtimeMeta?.matchedLegCount ?? 0,
+        freshPredictionLegCount: planData.openovRealtimeMeta?.freshPredictionLegCount ?? 0,
+        vehiclePositionsSkipped: true
+      }));
     } catch (error) {
       const message = errorText(error);
       sourceErrors.push({ source: "OpenOV", error: message });
+      console.warn("[OVLIVE_REALTIME_REFRESH_STAGE]", JSON.stringify({
+        source: "OpenOV", status: "error", durationMs: Date.now() - openovStartedAt
+      }));
       planData.openovRealtimeMeta = {
         source: "OpenOV GTFS-Realtime",
         status: "enrichment_failed",
@@ -2551,6 +2595,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       console.error("[OVLIVE_REALTIME_REFRESH_OPENOV_ERROR]", message);
     }
 
+    const ndovStartedAt = Date.now();
     try {
       await applyNdovCancellationsToPlan(planData, env, {
         // This route is polled frequently. Avoid expensive static route matching
@@ -2558,9 +2603,19 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         preflightBisonBeforeCrosswalk: true,
       });
       successfulSources++;
+      console.log("[OVLIVE_REALTIME_REFRESH_STAGE]", JSON.stringify({
+        source: "NDOV",
+        status: "ok",
+        durationMs: Date.now() - ndovStartedAt,
+        statusDetail: planData.ndovRealtimeMeta?.status ?? "unknown",
+        crosswalkSkipped: planData.ndovRealtimeMeta?.crosswalkSkipped === true
+      }));
     } catch (error) {
       const message = errorText(error);
       sourceErrors.push({ source: "NDOV", error: message });
+      console.warn("[OVLIVE_REALTIME_REFRESH_STAGE]", JSON.stringify({
+        source: "NDOV", status: "error", durationMs: Date.now() - ndovStartedAt
+      }));
       planData.ndovRealtimeMeta = {
         status: "unavailable",
         error: message,
@@ -2575,6 +2630,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       successfulSources,
       errors: sourceErrors
     };
+    console.log("[OVLIVE_REALTIME_REFRESH_COMPLETE]", JSON.stringify({
+      status: planData.realtimeRefreshMeta.status,
+      durationMs: Date.now() - refreshStartedAt,
+      successfulSources,
+      errors: sourceErrors.map((item) => item.source),
+      itineraryCount: itineraries.length,
+      legCount: refreshLegCount
+    }));
 
     if (successfulSources === 0) {
       return json({

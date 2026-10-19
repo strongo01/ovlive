@@ -18,6 +18,7 @@
     "ndov:build-openov-route-crosswalk": "python3 scripts/build-ndov-openov-route-crosswalk.py",
     "ndov:openov-route-crossmatch-selftest": "node scripts/ndov-openov-route-crossmatch-selftest.mjs",
     "openov:prediction-selftest": "node scripts/openov-realtime-prediction-selftest.mjs && node scripts/openov-vehicle-position-fast-decode-selftest.mjs",
+    "realtime-refresh:selftest": "node scripts/realtime-refresh-resilience-selftest.mjs",
     "openov:vehicle-position-fast-decode-selftest": "node scripts/openov-vehicle-position-fast-decode-selftest.mjs",
     "ns:realtime-selftest": "node scripts/ns-train-realtime-selftest.mjs",
     "api:rate-limit-selftest": "node scripts/api-rate-limit-selftest.mjs",

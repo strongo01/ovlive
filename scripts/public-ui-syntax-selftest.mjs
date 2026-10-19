@@ -72,7 +72,7 @@ assert.ok(workerSource.includes("function openovRealtimeLegFeedFamily(") &&
   "OpenOV realtime feed selection must distinguish rail from bus/tram modes");
 assert.ok(workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates")') &&
   workerSource.includes('needsTrainUpdates\n      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")') &&
-  workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")'),
+  workerSource.includes('needsTripUpdates && includeVehiclePositions\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")'),
   "refresh must skip large OpenOV feeds that are not relevant to the itinerary mode");
 assert.ok(workerSource.includes('status: "not_requested"') &&
   workerSource.includes('return "unknown"'),
@@ -100,6 +100,23 @@ assert.ok(refreshStart >= 0 && refreshEnd > refreshStart,
 const refreshFunction = html.slice(refreshStart, refreshEnd);
 assert.ok(refreshFunction.includes("!baseline || livePlanRealtimeInFlight"),
   "a refresh must be skipped while another refresh is already running");
+assert.ok(refreshFunction.includes("const retryableStatus = [429, 502, 503, 504].includes(statusCode);"),
+  "transient HTTP 503 and related server responses must use automatic recovery");
+assert.ok(refreshFunction.includes("livePlanRealtimeRetryAfterMs = Date.now() + backoffMs"),
+  "repeated transient failures must back off instead of hammering the API");
+assert.ok(refreshFunction.includes("Realtimegegevens zijn tijdelijk niet beschikbaar. De bestaande tijden blijven staan; OVLive controleert automatisch opnieuw."),
+  "transient failures must keep existing times and show a calm automatic-retry message");
+assert.ok(refreshFunction.includes("Realtime-update mislukt: ${reason}"),
+  "non-transient errors must retain actionable diagnostic details");
+const retryableBranchStart = refreshFunction.indexOf("if (retryable) {");
+const nonRetryableBranchStart = refreshFunction.indexOf("} else if (statusElement)", retryableBranchStart);
+assert.ok(retryableBranchStart >= 0 && nonRetryableBranchStart > retryableBranchStart,
+  "retryable and non-retryable errors must have separate UI handling");
+assert.equal(
+  refreshFunction.slice(retryableBranchStart, nonRetryableBranchStart).includes("Realtime-update mislukt: ${reason}"),
+  false,
+  "transient HTTP 503 must not show the repeated raw failure message"
+);
 const stopStart = html.indexOf("function stopLivePlanRealtimeRefresh() {");
 const stopEnd = html.indexOf("async function refreshLivePlanRealtime(", stopStart);
 assert.ok(stopStart >= 0 && stopEnd > stopStart,
