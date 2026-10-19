@@ -103,7 +103,7 @@ assert.match(
 );
 assert.match(
   worker,
-  /buildOpenovTripUpdateFilters\(openovLegs\)/,
+  /buildOpenovTripUpdateFilters\(\s*openovLegs\.filter\(/,
   "De trip-updatefilter moet uit de relevante reisopties worden opgebouwd"
 );
 assert.match(
