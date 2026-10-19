@@ -285,7 +285,11 @@ const renderLegStartForHelpers = html.indexOf("function renderLeg(leg, index = 0
 assert.ok(plannedStart >= 0 && chronologyStart > plannedStart && renderLegStartForHelpers > chronologyStart,
   "planned-time and itinerary chronology helpers must exist");
 const plannedTimeSource = html.slice(plannedStart, chronologyStart).trim();
-const chronologySource = html.slice(chronologyStart, renderLegStartForHelpers).trim();
+const walkingHelpersStartForChronology = html.indexOf("function normalizeWalkingSpeedKmh(value) {", chronologyStart);
+assert.ok(walkingHelpersStartForChronology > chronologyStart &&
+  renderLegStartForHelpers > walkingHelpersStartForChronology,
+  "walking helper functions must remain outside the chronology checker function");
+const chronologySource = html.slice(chronologyStart, walkingHelpersStartForChronology).trim();
 const plannedEndpointTime = new vm.Script("(" + plannedTimeSource + ")").runInNewContext();
 const journeyChronologyIssue = new vm.Script("(" + chronologySource + ")").runInNewContext({ plannedEndpointTime });
 
@@ -551,4 +555,83 @@ assert.equal(shortConnectionMetrics.transferWaitSeconds, 120,
 assert.ok(sortMetricContext.compareJourneySortMetrics(shortConnectionMetrics, longConnectionMetrics, "transferWait") < 0,
   "least-transfer-wait sorting must prefer the shorter actual wait, not just the shortest total journey");
 console.log("PASS: journey sorting compares absolute dates, duration, transfer count and transfer waiting accurately");
+// The first-vehicle buffer and walking speed must determine when to leave the origin.
+assert.ok(html.includes('id="firstVehicleBuffer"') &&
+  html.includes('type="number" min="0" max="30" step="1" value="5"') &&
+  html.includes('id="walkingSpeed"') &&
+  html.includes('value="5" selected>Normaal · 5 km/u') &&
+  !html.includes('id="initialWaitLimit"'),
+  "the planner must expose a five-minute first-vehicle arrival buffer and selectable walking speeds");
+assert.ok(html.includes("firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds()") &&
+  html.includes("walkingSpeedKmh: selectedWalkingSpeedKmh()") &&
+  html.includes("activeWalkSettings.firstArrivalBufferSeconds") &&
+  html.includes("activeWalkSettings.walkingSpeedKmh") &&
+  html.includes("const minutes = Number.isFinite(parsed) ? Math.min(30, Math.max(0, parsed)) : 5;"),
+  "initial planning and realtime refresh must both apply the current buffer and walking speed");
+assert.ok(html.includes("distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6)") &&
+  html.includes("const estimatedWalkSeconds = walkingDurationSeconds(leg.distance)"),
+  "walking duration and the generated wait segment must use the configured speed");
+
+const walkingHelpersStart = html.indexOf("function normalizeWalkingSpeedKmh(value) {");
+const renderLegAfterWalkingHelpers = html.indexOf("function renderLeg(leg, index = 0) {", walkingHelpersStart);
+const prepareForBufferStart = html.indexOf("function prepareJourneyLegsForDisplay(");
+const journeySortAfterPrepare = html.indexOf("function journeySortMetrics(", prepareForBufferStart);
+assert.ok(walkingHelpersStart >= 0 && renderLegAfterWalkingHelpers > walkingHelpersStart &&
+  prepareForBufferStart >= 0 && journeySortAfterPrepare > prepareForBufferStart,
+  "walking duration and first-departure helpers must exist for deterministic tests");
+const walkingHelperContext = {};
+new vm.Script(
+  html.slice(walkingHelpersStart, renderLegAfterWalkingHelpers).trim() +
+  "\nthis.walkingDurationSeconds = walkingDurationSeconds;"
+).runInNewContext(walkingHelperContext);
+const prepareBufferContext = { plannedEndpointTime, walkingDurationSeconds: walkingHelperContext.walkingDurationSeconds };
+prepareBufferContext.prepareJourneyLegsForDisplay = new vm.Script(
+  "(" + html.slice(prepareForBufferStart, journeySortAfterPrepare).trim() + ")"
+).runInNewContext(prepareBufferContext);
+const stationDeparture = "2026-10-20T06:09:00.000Z";
+const sampleWalk = {
+  mode: "WALK",
+  startTime: "2026-10-20T05:55:00.000Z",
+  endTime: stationDeparture,
+  distance: 899,
+  from: { name: "START", departure: "2026-10-20T05:55:00.000Z" },
+  to: { name: "Utrecht Terwijde", arrival: stationDeparture }
+};
+const sampleTrain = {
+  mode: "TRAIN",
+  scheduledStartTime: stationDeparture,
+  scheduledEndTime: "2026-10-20T06:22:00.000Z",
+  from: { scheduledDeparture: stationDeparture },
+  to: { scheduledArrival: "2026-10-20T06:22:00.000Z" }
+};
+const sampleJourney = {
+  startTime: sampleWalk.startTime,
+  endTime: sampleTrain.scheduledEndTime,
+  legs: [sampleWalk, sampleTrain]
+};
+const fiveMinuteBuffer = prepareBufferContext.prepareJourneyLegsForDisplay(
+  sampleJourney, [sampleWalk, sampleTrain], 300, 5
+);
+assert.equal(fiveMinuteBuffer.adjustedJourneyStart, "2026-10-20T05:53:13.000Z",
+  "899 m at 5 km/h and a five-minute buffer must calculate a 05:53:13 departure for a 06:09 train");
+const calculatedWalkSeconds = walkingHelperContext.walkingDurationSeconds(899, 5);
+const calculatedArrivalMs = Date.parse(fiveMinuteBuffer.legs[0].startTime) + calculatedWalkSeconds * 1000;
+assert.equal((Date.parse(stationDeparture) - calculatedArrivalMs) / 1000, 300,
+  "the estimated arrival at the first vehicle must be exactly the configured buffer before departure");
+const threeMinuteBuffer = prepareBufferContext.prepareJourneyLegsForDisplay(
+  sampleJourney, [sampleWalk, sampleTrain], 180, 5
+);
+assert.equal(threeMinuteBuffer.adjustedJourneyStart, "2026-10-20T05:55:13.000Z",
+  "reducing the buffer from five minutes to three must move the origin departure two minutes later");
+const slowWalk = prepareBufferContext.prepareJourneyLegsForDisplay(
+  sampleJourney, [sampleWalk, sampleTrain], 300, 3
+);
+const fastWalk = prepareBufferContext.prepareJourneyLegsForDisplay(
+  sampleJourney, [sampleWalk, sampleTrain], 300, 6
+);
+assert.ok(Date.parse(slowWalk.adjustedJourneyStart) < Date.parse(fastWalk.adjustedJourneyStart),
+  "a slower selected walking speed must calculate an earlier origin departure");
+assert.equal(slowWalk.legs[0].initialDepartureCalculated, true,
+  "the computed walking departure must take precedence over original walking timetable fields");
+console.log("PASS: first-vehicle buffer and walking speed calculate consistent origin departure and station arrival times");
 console.log("All public UI JavaScript checks passed.");
