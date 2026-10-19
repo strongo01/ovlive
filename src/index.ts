@@ -649,8 +649,10 @@ function openovFeedCacheKey(
 // timestamps already lag by tens of seconds, so reusing the decoded feed for
 // 30 seconds is safer than repeatedly downloading and decoding the same data.
 const OPENOV_FEED_CACHE_TTL_MS = 30_000;
-// Vehicle positions remain short-lived because the map uses them for tracking.
-const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 8_000;
+// Slightly longer than the map's 10-second poll so a repeated identical feed
+// is not decoded again on the very next tick. Per-vehicle timestamps still
+// decide whether a point may be displayed as live-confirmed.
+const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 12_000;
 // Disruption alerts change less frequently than live trip updates.
 const OPENOV_ALERTS_CACHE_TTL_MS = 30_000;
 // Een lopende bron mag niet de hele 10-seconden-plannerpoll ophouden.
