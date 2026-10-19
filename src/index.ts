@@ -1292,6 +1292,63 @@ function alertIsActive(alert: any, nowSeconds: number): boolean {
   );
 }
 
+type OpenovLegFeedFamily = "train" | "trip" | "unknown";
+
+function openovRealtimeLegFeedFamily(leg: any): OpenovLegFeedFamily {
+  const trainModes = new Set([
+    "RAIL",
+    "REGIONAL_RAIL",
+    "REGIONAL_FAST_RAIL",
+    "LONG_DISTANCE",
+    "NIGHT_RAIL",
+    "SUBURBAN",
+    "HIGHSPEED_RAIL",
+    "HIGH_SPEED_RAIL"
+  ]);
+  const tripModes = new Set([
+    "BUS",
+    "COACH",
+    "TRAM",
+    "METRO",
+    "SUBWAY",
+    "FERRY"
+  ]);
+
+  for (const rawMode of [
+    leg?.mode,
+    leg?.transportMode,
+    leg?.route?.mode,
+    leg?.trip?.mode
+  ]) {
+    const mode = String(rawMode ?? "")
+      .trim()
+      .toUpperCase()
+      .replace(/[\\s-]+/g, "_");
+    if (!mode) continue;
+    if (trainModes.has(mode)) return "train";
+    if (tripModes.has(mode)) return "trip";
+  }
+
+  // Unknown mode metadata must fail open: keep the previous broad feed set
+  // rather than risk silently missing an official update for this journey.
+  return "unknown";
+}
+
+function skippedOpenovFeedResult(): any {
+  return {
+    ok: false,
+    status: "not_requested",
+    httpStatus: null,
+    freshness: "not_requested",
+    ageSeconds: null,
+    servedFromCache: false,
+    cacheAgeSeconds: null,
+    entityCount: 0,
+    entities: [],
+    error: null
+  };
+}
+
 async function enrichTransitousPlan(plan: any): Promise<any> {
   const legs = collectPlanLegs(plan);
 
@@ -1303,13 +1360,26 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
   if (openovLegs.length === 0) return plan;
 
-  // Haal de feeds parallel op. Alleen verse feeds worden gebruikt
-  // voor actuele reisinformatie.
+  // Haal alleen de ritfeeds op die passen bij de OpenOV-modi in de
+  // gevonden reis. Trein-only routes hoeven geen grote bus/tram-ritfeed en
+  // voertuigposities te decoderen; de kaart vraagt posities apart op.
+  // Bij onbekende modusmetadata behouden we de brede, veilige fallback.
+  const feedFamilies = new Set(openovLegs.map(openovRealtimeLegFeedFamily));
+  const needsTripUpdates =
+    feedFamilies.has("trip") || feedFamilies.has("unknown");
+  const needsTrainUpdates =
+    feedFamilies.has("train") || feedFamilies.has("unknown");
   const [tripFeed, trainFeed, alertFeed, vehicleFeed] = await Promise.all([
-    safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates"),
-    safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates"),
+    needsTripUpdates
+      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates")
+      : Promise.resolve(skippedOpenovFeedResult()),
+    needsTrainUpdates
+      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")
+      : Promise.resolve(skippedOpenovFeedResult()),
     safeOpenovFeed(OPENOV.alerts, "alerts"),
-    safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")
+    needsTripUpdates
+      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")
+      : Promise.resolve(skippedOpenovFeedResult())
   ]);
 
   // TIJDELIJKE DIAGNOSE: controleer de daadwerkelijke invoer van de matcher.
