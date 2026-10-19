@@ -80,7 +80,7 @@ assert.match(
 );
 assert.match(
   worker,
-  /const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 8_000;/,
+  /const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 12_000;/,
   "De voertuigposities voor de live kaart moeten kort gecachet blijven"
 );
 assert.match(
