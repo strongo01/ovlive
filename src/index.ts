@@ -935,6 +935,21 @@ async function fetchOpenovFeedUncached(
       }
     : undefined;
 
+  const normalizedTripUpdateFilters = (kind === "tripUpdates" || kind === "trainUpdates") &&
+    (filters?.tripIds?.length || filters?.routeIds?.length || filters?.routeDateKeys?.length)
+    ? {
+        tripIds: new Set((filters.tripIds ?? []).map(normalizeOpenovId)),
+        routeIds: new Set((filters.routeIds ?? []).map(normalizeOpenovId)),
+        routeDateKeys: new Set((filters.routeDateKeys ?? []).map((key) => {
+          const separator = key.lastIndexOf("|");
+          if (separator < 0) return key;
+          const route = normalizeOpenovId(key.slice(0, separator));
+          const date = key.slice(separator + 1).replace(/\\D/g, "").slice(0, 8);
+          return route + "|" + date;
+        }))
+      }
+    : undefined;
+
   if (kind === "vehiclePositions") {
     try {
       // Decode only the protobuf nested position/vehicle fields for the exact
@@ -966,12 +981,46 @@ async function fetchOpenovFeedUncached(
         : allEntities;
       decoder = "gtfs-realtime-bindings-fallback";
     }
+  } else if (kind === "tripUpdates" || kind === "trainUpdates") {
+    if (normalizedTripUpdateFilters) {
+      try {
+        // The planner only needs matching trip IDs and same-route/service-date
+        // candidates. Skip normalizing thousands of unrelated stop updates.
+        const decoded = decodeOpenovTripUpdates(bytes, normalizedTripUpdateFilters);
+        feedTimestamp = decoded.feedTimestamp;
+        sourceEntityCount = decoded.sourceEntityCount;
+        entities = decoded.entities;
+        decoder = "selective-protobuf-targeted";
+      } catch (error) {
+        console.error("[OVLIVE_TRIP_UPDATE_FAST_DECODE_ERROR]", JSON.stringify({
+          kind,
+          byteCount: bytes.byteLength,
+          error: error instanceof Error ? error.message : String(error)
+        }));
+        // Do not fall back to full-feed object decoding in a production planner
+        // request: that is the CPU-heavy path this targeted decoder replaces.
+        return {
+          ok: false,
+          status: 502,
+          source: "OpenOV / OVapi GTFS-Realtime",
+          sourceUrl: url,
+          checkedAt: new Date().toISOString(),
+          freshness: "unavailable",
+          ageSeconds: null,
+          entityCount: 0,
+          entities: [],
+          error: "De gerichte OpenOV-ritdecoder kon deze feed niet verwerken."
+        };
+      }
+    } else {
+      const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
+      feedTimestamp = toNumber(feed.header?.timestamp);
+      entities = normalizeTripUpdates(feed);
+    }
   } else {
     const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
     feedTimestamp = toNumber(feed.header?.timestamp);
-    entities = kind === "tripUpdates" || kind === "trainUpdates"
-      ? normalizeTripUpdates(feed)
-      : normalizeAlerts(feed);
+    entities = normalizeAlerts(feed);
   }
 
   if (kind === "vehiclePositions") {
@@ -981,6 +1030,16 @@ async function fetchOpenovFeedUncached(
       sourceEntityCount: sourceEntityCount ?? entities.length,
       decodedEntityCount: entities.length,
       targeted: Boolean(normalizedVehicleFilters),
+      decodeDurationMs: Number((performance.now() - decodeStartedAt).toFixed(2))
+    }));
+  } else if ((kind === "tripUpdates" || kind === "trainUpdates") && normalizedTripUpdateFilters) {
+    console.log("[OVLIVE_TRIP_UPDATE_DECODE]", JSON.stringify({
+      kind,
+      decoder,
+      byteCount: bytes.byteLength,
+      sourceEntityCount: sourceEntityCount ?? entities.length,
+      decodedEntityCount: entities.length,
+      targeted: true,
       decodeDurationMs: Number((performance.now() - decodeStartedAt).toFixed(2))
     }));
   }
@@ -998,7 +1057,10 @@ async function fetchOpenovFeedUncached(
     feedTimestamp: feedTimestamp == null ? null : new Date(feedTimestamp * 1000).toISOString(),
     ageSeconds: ageSeconds ?? null,
     freshness: isStale ? "stale_or_unknown" : "fresh",
-    entityCount: sourceEntityCount ?? entities.length,
+    entityCount: normalizedTripUpdateFilters
+      ? entities.length
+      : sourceEntityCount ?? entities.length,
+    ...(sourceEntityCount != null ? { sourceEntityCount } : {}),
     entities
   };
 }
@@ -1595,6 +1657,32 @@ function skippedOpenovFeedResult(): any {
   };
 }
 
+function buildOpenovTripUpdateFilters(openovLegs: any[]): OpenovFeedFilters | undefined {
+  const tripIds = new Set<string>();
+  const routeIds = new Set<string>();
+  const routeDateKeys = new Set<string>();
+
+  for (const leg of openovLegs) {
+    const routeId = normalizeOpenovId(leg?.routeId ?? leg?.route?.id ?? "");
+    const rawTripId = String(leg?.tripId ?? "").trim();
+    const identity = rawTripId ? parseOpenovTripId(rawTripId) : { tripId: "", startDate: undefined };
+
+    if (identity.tripId) tripIds.add(normalizeOpenovId(identity.tripId));
+    const startDate = String(identity.startDate ?? "").replace(/\\D/g, "").slice(0, 8);
+    if (routeId && startDate) routeDateKeys.add(routeId + "|" + startDate);
+    else if (routeId && !identity.tripId) routeIds.add(routeId);
+  }
+
+  if (tripIds.size === 0 && routeIds.size === 0 && routeDateKeys.size === 0) {
+    return undefined;
+  }
+  return {
+    tripIds: [...tripIds].sort(),
+    routeIds: [...routeIds].sort(),
+    routeDateKeys: [...routeDateKeys].sort()
+  };
+}
+
 async function enrichTransitousPlan(
   plan: any,
   options: { includeVehiclePositions?: boolean } = {}
@@ -1619,12 +1707,24 @@ async function enrichTransitousPlan(
     feedFamilies.has("trip") || feedFamilies.has("unknown");
   const needsTrainUpdates =
     feedFamilies.has("train") || feedFamilies.has("unknown");
+  const tripUpdateFilters = buildOpenovTripUpdateFilters(
+    openovLegs.filter((leg: any) => {
+      const family = openovRealtimeLegFeedFamily(leg);
+      return family === "trip" || family === "unknown";
+    })
+  );
+  const trainUpdateFilters = buildOpenovTripUpdateFilters(
+    openovLegs.filter((leg: any) => {
+      const family = openovRealtimeLegFeedFamily(leg);
+      return family === "train" || family === "unknown";
+    })
+  );
   const [tripFeed, trainFeed, alertFeed, vehicleFeed] = await Promise.all([
     needsTripUpdates
-      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates")
+      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates", tripUpdateFilters)
       : Promise.resolve(skippedOpenovFeedResult()),
     needsTrainUpdates
-      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates")
+      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates", trainUpdateFilters)
       : Promise.resolve(skippedOpenovFeedResult()),
     safeOpenovFeed(OPENOV.alerts, "alerts"),
     needsTripUpdates && includeVehiclePositions
