@@ -2321,7 +2321,8 @@ function plannedEndpointTime(leg, kind) {
   const mode = String(leg?.mode || '').toUpperCase();
   // De eerste wandeling kan door de gebruikerinstellingen opnieuw zijn berekend.
   // Gebruik dan die berekende tijd vóór eventuele oorspronkelijke planningsvelden.
-  if (mode === 'WALK' && leg?.initialDepartureCalculated === true) {
+  if (mode === 'WALK' &&
+      (leg?.initialDepartureCalculated === true || leg?.walkingDurationRecalculated === true)) {
     return isDeparture
       ? (leg?.startTime || leg?.from?.departure || null)
       : (leg?.endTime || leg?.to?.arrival || null);
@@ -2397,7 +2398,31 @@ function walkingDurationSeconds(distanceMeters, speedKmh = selectedWalkingSpeedK
   return Math.round(distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6));
 }
 
-function renderLeg(leg, index = 0) {
+function walkingLegTimingAtSpeed(leg, startTime, speedKmh = selectedWalkingSpeedKmh()) {
+  const durationSeconds = walkingDurationSeconds(leg?.distance, speedKmh);
+  const startMs = Date.parse(startTime || '');
+  if (!Number.isFinite(durationSeconds) || !Number.isFinite(startMs)) return null;
+  return {
+    startTime: new Date(startMs).toISOString(),
+    endTime: new Date(startMs + durationSeconds * 1000).toISOString(),
+    durationSeconds,
+    speedKmh: normalizeWalkingSpeedKmh(speedKmh)
+  };
+}
+
+function walkingConnectionStatus(arrivalTime, departureTime) {
+  const arrivalMs = Date.parse(arrivalTime || '');
+  const departureMs = Date.parse(departureTime || '');
+  if (!Number.isFinite(arrivalMs) || !Number.isFinite(departureMs)) return null;
+  const secondsUntilDeparture = (departureMs - arrivalMs) / 1000;
+  return {
+    status: secondsUntilDeparture < 0 ? 'missed' :
+      secondsUntilDeparture < 60 ? 'tight' : 'available',
+    waitSeconds: Math.round(secondsUntilDeparture)
+  };
+}
+
+function renderLeg(leg, index = 0, journeyLegs = null) {
   const title = lineTitle(leg);
   const fromName = leg.from?.name || leg.origin?.name || 'Onbekende halte';
   const toName = leg.to?.name || leg.destination?.name || 'Onbekende halte';
@@ -2408,7 +2433,7 @@ function renderLeg(leg, index = 0) {
   const fromPrediction = timelineRealtimePrediction(leg, 'departure', fromSchedule);
   const toPrediction = timelineRealtimePrediction(leg, 'arrival', toSchedule);
 
-  const fromTime = leg.mode !== 'WALK' && fromPrediction
+  let fromTime = leg.mode !== 'WALK' && fromPrediction
     ? fromPrediction.time
     : fromSchedule;
 
@@ -2421,9 +2446,11 @@ function renderLeg(leg, index = 0) {
 
   let displayLeg = leg;
   let initialWalkWaitHtml = '';
+  const activeWalkingSpeedKmh = normalizeWalkingSpeedKmh(
+    window.__ovliveActiveWalkSettings?.walkingSpeedKmh ?? selectedWalkingSpeedKmh()
+  );
 
-  // Alleen de eerste wandeling apart schatten.
-  // 1,5 m/s komt voor 899 meter neer op ongeveer 10 minuten.
+  // De eerste wandeling wordt gekoppeld aan de gewenste buffer vóór het eerste OV.
   if (
     index === 0 &&
     leg.mode === 'WALK' &&
@@ -2434,7 +2461,7 @@ function renderLeg(leg, index = 0) {
     const startMs = Date.parse(fromTime);
     const originalEndMs = Date.parse(toTime);
     const elapsedSeconds = (originalEndMs - startMs) / 1000;
-    const estimatedWalkSeconds = walkingDurationSeconds(leg.distance);
+    const estimatedWalkSeconds = walkingDurationSeconds(leg.distance, activeWalkingSpeedKmh);
     const waitingSeconds = elapsedSeconds - estimatedWalkSeconds;
 
     // Splits alleen als er minstens een minuut overblijft.
@@ -2480,6 +2507,81 @@ function renderLeg(leg, index = 0) {
           </div>
         </div>
       `;
+    }
+  } else if (
+    String(leg?.mode ?? '').toUpperCase() === 'WALK' &&
+    typeof leg.distance === 'number' && leg.distance > 0 && fromTime
+  ) {
+    const allLegs = Array.isArray(journeyLegs) ? journeyLegs : [];
+    let walkStartTime = fromTime;
+    let priorWalk = null;
+    for (let i = index - 1; i >= 0; i -= 1) {
+      const mode = String(allLegs[i]?.mode ?? '').toUpperCase();
+      if (mode === 'WALK') { priorWalk = allLegs[i]; break; }
+      if (mode === 'WAIT' || mode === 'TRANSFER') continue;
+      const plannedArrival = plannedEndpointTime(allLegs[i], 'arrival');
+      const prediction = timelineRealtimePrediction(allLegs[i], 'arrival', plannedArrival);
+      const startMs = Date.parse(walkStartTime || '');
+      const arrivalMs = Date.parse(prediction?.time || '');
+      if (Number.isFinite(startMs) && Number.isFinite(arrivalMs) && arrivalMs > startMs) {
+        walkStartTime = prediction.time;
+      }
+      break;
+    }
+    if (priorWalk) {
+      const priorEnd = plannedEndpointTime(priorWalk, 'arrival');
+      if (Date.parse(priorEnd || '') > Date.parse(walkStartTime || '')) walkStartTime = priorEnd;
+    }
+
+    const timing = walkingLegTimingAtSpeed(leg, walkStartTime, activeWalkingSpeedKmh);
+    if (timing) {
+      fromTime = timing.startTime;
+      toTime = timing.endTime;
+      displayLeg = { ...leg, startTime: timing.startTime, endTime: timing.endTime,
+        duration: timing.durationSeconds, estimatedWalkingTime: true,
+        walkingDurationRecalculated: true };
+
+      let nextIndex = -1;
+      for (let i = index + 1; i < allLegs.length; i += 1) {
+        const mode = String(allLegs[i]?.mode ?? '').toUpperCase();
+        if (mode === 'WALK' || mode === 'WAIT' || mode === 'TRANSFER') continue;
+        nextIndex = i; break;
+      }
+      const hasLaterWalk = nextIndex > index + 1 &&
+        allLegs.slice(index + 1, nextIndex).some(x => String(x?.mode ?? '').toUpperCase() === 'WALK');
+      if (nextIndex >= 0 && !hasLaterWalk) {
+        const next = allLegs[nextIndex];
+        const plannedDeparture = plannedEndpointTime(next, 'departure');
+        const prediction = timelineRealtimePrediction(next, 'departure', plannedDeparture);
+        const nextDeparture = prediction?.time || plannedDeparture;
+        const connection = walkingConnectionStatus(timing.endTime, nextDeparture);
+        if (connection?.status === 'missed') {
+          const speedLabel = activeWalkingSpeedKmh.toLocaleString('nl-NL', { maximumFractionDigits: 1 });
+          initialWalkWaitHtml = `
+            <div class="rt-details" role="status" style="color:var(--warning, #b45309);font-weight:600">
+              Let op: deze overstap lijkt niet haalbaar bij ${esc(speedLabel)} km/u.
+              Geschatte aankomst: ${esc(clock(timing.endTime))}; het volgende OV vertrekt om
+              ${esc(clock(nextDeparture))}.
+            </div>`;
+        } else if (connection?.status === 'tight') {
+          initialWalkWaitHtml = `
+            <div class="rt-details" role="status" style="color:var(--warning, #b45309)">
+              Aansluiting erg krap: ongeveer ${Math.max(0, connection.waitSeconds)} sec tot vertrek
+              (${esc(clock(nextDeparture))}).
+            </div>`;
+        } else if (connection?.status === 'available') {
+          initialWalkWaitHtml = `
+            <div class="leg">
+              <div class="leg-head"><span class="pill">Wachten</span><strong>Wachten op de aansluiting</strong></div>
+              <div style="margin-top:8px">
+                <div><span class="leg-time">${esc(clock(timing.endTime))}</span> · ${esc(toName)} (geschat aangekomen)</div>
+                <div style="margin:8px 0;color:var(--muted)">↓</div>
+                <div><span class="leg-time">${esc(clock(nextDeparture))}</span> · ${esc(next.from?.name || toName)} (vertrek volgend OV)</div>
+              </div>
+              <div class="rt-details">Ongeveer ${Math.round(connection.waitSeconds / 60)} min · geschatte wachttijd</div>
+            </div>`;
+        }
+      }
     }
   }
 
@@ -2565,30 +2667,55 @@ function prepareJourneyLegsForDisplay(
       Number.isFinite(estimatedWalkSeconds) &&
       estimatedWalkSeconds >= 0
     ) {
-      // Plan terug vanaf het vertrek van het eerste voertuig:
-      // eerst de gewenste buffer, daarvoor de geschatte eerste wandeling.
-      const startMs = transitStartMs -
-        bufferSeconds * 1000 -
-        estimatedWalkSeconds * 1000;
+      const startMs = transitStartMs - bufferSeconds * 1000 - estimatedWalkSeconds * 1000;
       adjustedJourneyStart = new Date(startMs).toISOString();
-
       firstWalk.initialDepartureCalculated = true;
       firstWalk.startTime = adjustedJourneyStart;
       firstWalk.endTime = transitStartValue;
       firstWalk.to = {
-        ...(firstWalk.to && typeof firstWalk.to === 'object'
-          ? firstWalk.to
-          : {}),
+        ...(firstWalk.to && typeof firstWalk.to === 'object' ? firstWalk.to : {}),
         arrival: transitStartValue
       };
+      if (firstWalk.from) firstWalk.from.departure = adjustedJourneyStart;
+      else firstWalk.from = { name: 'START', departure: adjustedJourneyStart };
+    }
+  }
 
-      if (firstWalk.from) {
-        firstWalk.from.departure = adjustedJourneyStart;
-      } else {
-        firstWalk.from = {
-          name: 'START',
-          departure: adjustedJourneyStart
-        };
+  // De overige loopstukken worden ook op de gekozen loopsnelheid berekend.
+  // OV-vertrektijden blijven staan; onhaalbare aansluitingen krijgen een waarschuwing.
+  for (let index = 1; index < legs.length; index += 1) {
+    const leg = legs[index];
+    if (String(leg?.mode ?? '').toUpperCase() !== 'WALK' ||
+        !Number.isFinite(leg.distance) || leg.distance <= 0) continue;
+
+    const previousArrival = plannedEndpointTime(legs[index - 1], 'arrival');
+    let startTime = plannedEndpointTime(leg, 'departure') || previousArrival;
+    if (Date.parse(previousArrival || '') > Date.parse(startTime || '')) startTime = previousArrival;
+    const timing = walkingLegTimingAtSpeed(leg, startTime, walkingSpeedKmh);
+    if (!timing) continue;
+
+    leg.startTime = timing.startTime;
+    leg.endTime = timing.endTime;
+    leg.duration = timing.durationSeconds;
+    leg.estimatedWalkingTime = true;
+    leg.walkingDurationRecalculated = true;
+    leg.walkingSpeedKmh = timing.speedKmh;
+    leg.from = { ...(leg.from && typeof leg.from === 'object' ? leg.from : {}), departure: timing.startTime };
+    leg.to = { ...(leg.to && typeof leg.to === 'object' ? leg.to : {}), arrival: timing.endTime };
+
+    let nextIndex = -1;
+    for (let i = index + 1; i < legs.length; i += 1) {
+      if (!nonTransitModes.has(String(legs[i]?.mode ?? '').toUpperCase())) { nextIndex = i; break; }
+    }
+    const hasLaterWalk = nextIndex > index + 1 &&
+      legs.slice(index + 1, nextIndex).some(x => String(x?.mode ?? '').toUpperCase() === 'WALK');
+    if (nextIndex >= 0 && !hasLaterWalk) {
+      const nextDeparture = plannedEndpointTime(legs[nextIndex], 'departure');
+      const connection = walkingConnectionStatus(timing.endTime, nextDeparture);
+      if (connection) {
+        leg.connectionFeasibility = connection.status;
+        leg.connectionWaitSeconds = connection.waitSeconds;
+        leg.connectionDepartureTime = nextDeparture;
       }
     }
   }
@@ -2605,10 +2732,10 @@ function journeySortMetrics(journey, legs, adjustedJourneyStart = null) {
     first?.from?.departure ||
     first?.startTime ||
     null;
-  const arrival = journey?.endTime ||
-    last?.to?.arrival ||
-    last?.endTime ||
-    null;
+  const recalculatedLastWalk = String(last?.mode ?? '').toUpperCase() === 'WALK' &&
+    last?.walkingDurationRecalculated === true;
+  const arrival = (recalculatedLastWalk ? (last?.endTime || last?.to?.arrival) : null) ||
+    journey?.endTime || last?.to?.arrival || last?.endTime || null;
   const toMilliseconds = value => {
     const parsed = Date.parse(value || '');
     return Number.isFinite(parsed) ? parsed : null;
@@ -2896,7 +3023,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       const card = document.querySelector(`details.journey-card[data-tracking-index="${index}"]`);
       const legContainer = card?.querySelector('.journey-leg-details');
       if (legContainer) {
-        legContainer.innerHTML = legs.map(renderLeg).join('') ||
+        legContainer.innerHTML = legs.map((leg, legIndex) => renderLeg(leg, legIndex, legs)).join('') ||
           '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>';
       }
 
@@ -3304,9 +3431,10 @@ q.set('pedestrianSpeed', '1.5');
         first?.from?.departure ||
         first?.startTime;
 
-      const arrival = journey.endTime ||
-        last?.to?.arrival ||
-        last?.endTime;
+      const recalculatedLastWalk = String(last?.mode ?? '').toUpperCase() === 'WALK' &&
+        last?.walkingDurationRecalculated === true;
+      const arrival = (recalculatedLastWalk ? (last?.endTime || last?.to?.arrival) : null) ||
+        journey.endTime || last?.to?.arrival || last?.endTime;
 
       const transfers = Math.max(0, transitLegs.length - 1);
 
@@ -3405,7 +3533,7 @@ q.set('pedestrianSpeed', '1.5');
         <div class="journey-detail-body">
           ${trackingPanel}
           <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Realtime alleen waar bevestigd</span></div>
-          <div class="journey-leg-details">${legs.map(renderLeg).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}</div>
+          <div class="journey-leg-details">${legs.map((leg, legIndex) => renderLeg(leg, legIndex, legs)).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}</div>
         </div>
       </details>`;
     }).join('');
