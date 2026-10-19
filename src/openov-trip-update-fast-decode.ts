@@ -71,7 +71,22 @@ function readVarintBigInt(bytes: Uint8Array, startOffset: number, limit: number)
   throw new Error("GTFS-Realtime protobuf bevat een varint die langer is dan 10 bytes.");
 }
 
-function asSafeNumber(value: bigint, description: string): number {
+function readVarint(bytes: Uint8Array, startOffset: number, limit: number): VarintResult {
+  // Most protobuf tags, lengths and ordinary timestamps fit in at most seven
+  // bytes. Use Number arithmetic on that hot path; reserve BigInt for 64-bit
+  // values, including the ten-byte encoding of negative int32 delays.
+  let value = 0;
+  let offset = startOffset;
+  for (let index = 0; index < 7; index += 1) {
+    if (offset >= limit) throw new Error("GTFS-Realtime protobuf bevat een afgebroken varint.");
+    const byte = bytes[offset++];
+    value += (byte & 0x7f) * (2 ** (index * 7));
+    if ((byte & 0x80) === 0) return { value, nextOffset: offset };
+  }
+  return readVarintBigInt(bytes, startOffset, limit);
+}
+
+function asSafeNumber(value: number | bigint, description: string): number {
   const result = Number(value);
   if (!Number.isSafeInteger(result)) {
     throw new Error("GTFS-Realtime protobuf bevat een " + description + " buiten het veilige bereik.");
@@ -80,7 +95,7 @@ function asSafeNumber(value: bigint, description: string): number {
 }
 
 function readField(bytes: Uint8Array, offset: number, limit: number): Field {
-  const tagResult = readVarintBigInt(bytes, offset, limit);
+  const tagResult = readVarint(bytes, offset, limit);
   const tag = asSafeNumber(tagResult.value, "protobuf-tag");
   const number = Math.floor(tag / 8);
   const wireType = tag & 7;
@@ -93,10 +108,12 @@ function readField(bytes: Uint8Array, offset: number, limit: number): Field {
 
   switch (wireType) {
     case 0: {
-      const parsed = readVarintBigInt(bytes, tagResult.nextOffset, limit);
-      value = parsed.value <= BigInt(Number.MAX_SAFE_INTEGER)
-        ? Number(parsed.value)
-        : parsed.value;
+      const parsed = readVarint(bytes, tagResult.nextOffset, limit);
+      value = typeof parsed.value === "number"
+        ? parsed.value
+        : parsed.value <= BigInt(Number.MAX_SAFE_INTEGER)
+          ? Number(parsed.value)
+          : parsed.value;
       contentEnd = parsed.nextOffset;
       nextOffset = parsed.nextOffset;
       break;
@@ -106,7 +123,7 @@ function readField(bytes: Uint8Array, offset: number, limit: number): Field {
       nextOffset = contentEnd;
       break;
     case 2: {
-      const length = readVarintBigInt(bytes, tagResult.nextOffset, limit);
+      const length = readVarint(bytes, tagResult.nextOffset, limit);
       const lengthNumber = asSafeNumber(length.value, "veld-lengte");
       if (lengthNumber < 0 || lengthNumber > limit - length.nextOffset) {
         throw new Error("GTFS-Realtime protobuf bevat een ongeldige veldlengte.");
@@ -138,12 +155,14 @@ function numeric(value: number | bigint | undefined): number | undefined {
 
 function readInt32(field: Field): number | undefined {
   if (field.value === undefined) return undefined;
-  const value = typeof field.value === "bigint" ? field.value : BigInt(field.value);
-  return Number(BigInt.asIntN(32, value));
+  if (typeof field.value === "number") return field.value | 0;
+  return Number(BigInt.asIntN(32, field.value));
 }
 
+const textDecoder = new TextDecoder();
+
 function readString(bytes: Uint8Array, field: Field): string {
-  return new TextDecoder().decode(bytes.subarray(field.contentStart, field.contentEnd));
+  return textDecoder.decode(bytes.subarray(field.contentStart, field.contentEnd));
 }
 
 function normalizeId(value: unknown): string {
