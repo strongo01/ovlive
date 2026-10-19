@@ -2381,6 +2381,13 @@ function selectedWalkingSpeedKmh() {
   return normalizeWalkingSpeedKmh(document.getElementById('walkingSpeed')?.value ?? 5);
 }
 
+function selectedFirstVehicleBufferSeconds() {
+  const raw = document.getElementById('firstVehicleBuffer')?.value;
+  const parsed = raw == null || String(raw).trim() === '' ? 5 : Number(raw);
+  const minutes = Number.isFinite(parsed) ? Math.min(30, Math.max(0, parsed)) : 5;
+  return minutes * 60;
+}
+
 function walkingDurationSeconds(distanceMeters, speedKmh = selectedWalkingSpeedKmh()) {
   const distance = Number(distanceMeters);
   if (!Number.isFinite(distance) || distance < 0) return null;
@@ -2875,7 +2882,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       if (!freshJourney) continue;
       const sourceLegs = journeySourceLegs(freshJourney);
       const { legs } = prepareJourneyLegsForDisplay(
-        freshJourney, sourceLegs, Number($('firstVehicleBuffer').value) * 60, Number($('walkingSpeed').value)
+        freshJourney, sourceLegs, selectedFirstVehicleBufferSeconds(), Number($('walkingSpeed').value)
       );
       const card = document.querySelector(`details.journey-card[data-tracking-index="${index}"]`);
       const legContainer = card?.querySelector('.journey-leg-details');
@@ -3254,7 +3261,7 @@ q.set('pedestrianSpeed', '1.5');
       const { legs, adjustedJourneyStart } = prepareJourneyLegsForDisplay(
         journey,
         sourceLegs,
-        Number($('firstVehicleBuffer').value) * 60, Number($('walkingSpeed').value)
+        selectedFirstVehicleBufferSeconds(), Number($('walkingSpeed').value)
       );
       const sortMetrics = journeySortMetrics(journey, legs, adjustedJourneyStart);
       const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
