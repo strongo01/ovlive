@@ -65,6 +65,11 @@
 .mode-help {
   margin-top: 0.5rem;
 }
+.walking-speed-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:5px}
+.walking-speed-heading label{margin:0}
+.walking-speed-value{display:inline-block;min-width:76px;padding:3px 9px;border:1px solid rgba(251,146,60,.4);border-radius:9px;color:#fdba74;background:rgba(251,146,60,.1);font-size:14px;font-weight:750;text-align:center;font-variant-numeric:tabular-nums}
+#walkingSpeed{display:block;width:100%;padding:4px 0;margin:0;border:0;background:transparent;accent-color:var(--accent);cursor:pointer}
+.walking-speed-scale{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px;margin-top:1px}
 
 
     /* Compacte reisresultaten: belangrijke tijden eerst, details op tik. */
@@ -226,16 +231,14 @@
           <input id="firstVehicleBuffer" type="number" min="0" max="30" step="1" value="5" inputmode="numeric">
           <p class="muted mode-help">Aantal minuten vóór vertrek van het eerste OV. Als je eerst moet lopen, berekent OVLive hoelaat je vanaf je beginlocatie moet vertrekken.</p>
         </div>
-        <div>
-          <label for="walkingSpeed">Loopsnelheid</label>
-          <select id="walkingSpeed">
-            <option value="3">Langzaam · 3 km/u</option>
-            <option value="4">Rustig · 4 km/u</option>
-            <option value="5" selected>Normaal · 5 km/u</option>
-            <option value="6">Stevig · 6 km/u</option>
-            <option value="7">Snel · 7 km/u</option>
-          </select>
-          <p class="muted mode-help">Wordt gebruikt voor de berekende looptijd en vertrektijd vóór het eerste OV.</p>
+        <div class="walking-speed-field">
+          <div class="walking-speed-heading">
+            <label for="walkingSpeed">Loopsnelheid</label>
+            <output id="walkingSpeedValue" class="walking-speed-value" for="walkingSpeed" aria-live="polite">5 km/u</output>
+          </div>
+          <input id="walkingSpeed" type="range" min="2" max="15" step="0.5" value="5" aria-describedby="walkingSpeedHelp">
+          <div class="walking-speed-scale" aria-hidden="true"><span>2 km/u</span><span>15 km/u</span></div>
+          <p id="walkingSpeedHelp" class="muted mode-help">Wordt gebruikt voor de berekende looptijd en vertrektijd vóór het eerste OV. Pas de slider aan en zoek de reis opnieuw om de tijden bij te werken.</p>
         </div>
       </div>
     </details>
@@ -2374,7 +2377,7 @@ function journeyChronologyIssue(legs, toleranceSeconds = 60) {
 
 function normalizeWalkingSpeedKmh(value) {
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 12 ? parsed : 5;
+  return Number.isFinite(parsed) && parsed >= 2 && parsed <= 15 ? parsed : 5;
 }
 
 function selectedWalkingSpeedKmh() {
@@ -3012,6 +3015,19 @@ function startLivePlanRealtimeRefresh(plan) {
   } catch (error) {
     console.warn('[OVLIVE_REALTIME_REFRESH_SETUP]', error instanceof Error ? error.message : String(error));
   }
+}
+
+const walkingSpeedInput = document.getElementById('walkingSpeed');
+const walkingSpeedValue = document.getElementById('walkingSpeedValue');
+const updateWalkingSpeedReadout = () => {
+  if (!walkingSpeedInput || !walkingSpeedValue) return;
+  const speed = normalizeWalkingSpeedKmh(walkingSpeedInput.value);
+  walkingSpeedValue.textContent =
+    speed.toLocaleString('nl-NL', { maximumFractionDigits: 1 }) + ' km/u';
+};
+if (walkingSpeedInput && walkingSpeedValue) {
+  walkingSpeedInput.addEventListener('input', updateWalkingSpeedReadout);
+  updateWalkingSpeedReadout();
 }
 
 $('planBtn').onclick = async () => {
