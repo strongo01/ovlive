@@ -1024,7 +1024,73 @@ function scheduledEventAtStop(stop: any):
   // Otherwise, let the matcher apply its wider 300-second candidate tolerance.
   return events.find((event) => event.reconstructed) ?? events[0];
 }
-function matchOpenovRealtime(leg: any, records: any[]) {
+type OpenovRealtimeMatcherIndexes = {
+  byTripId: Map<string, any[]>;
+  byRouteDate: Map<string, any[]>;
+};
+
+function addOpenovIndexedRecord(index: Map<string, any[]>, key: string, record: any): void {
+  if (!key) return;
+  const existing = index.get(key);
+  if (existing) existing.push(record);
+  else index.set(key, [record]);
+}
+
+function buildOpenovRealtimeMatcherIndexes(records: any[]): OpenovRealtimeMatcherIndexes {
+  const byTripId = new Map<string, any[]>();
+  const byRouteDate = new Map<string, any[]>();
+
+  // One pass over the large GTFS-Realtime feed replaces repeated full-feed
+  // scans for every itinerary leg.
+  for (const record of records) {
+    const tripId = parseOpenovTripId(record?.tripId).tripId;
+    if (tripId) addOpenovIndexedRecord(byTripId, tripId, record);
+
+    const routeId = normalizeOpenovId(record?.routeId);
+    const serviceDate = String(record?.startDate ?? "");
+    if (routeId && serviceDate) {
+      addOpenovIndexedRecord(byRouteDate, `${routeId}|${serviceDate}`, record);
+    }
+  }
+
+  return { byTripId, byRouteDate };
+}
+
+function normalizeVehiclePositionLookupPart(value: any): string {
+  // Keep parity with findExactVehiclePositionForLeg's ID normalization.
+  return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
+}
+
+function vehiclePositionLookupKey(tripId: any, routeId: any): string {
+  const normalizedTrip = normalizeVehiclePositionLookupPart(tripId);
+  const normalizedRoute = normalizeVehiclePositionLookupPart(routeId);
+  return normalizedTrip && normalizedRoute
+    ? `${normalizedTrip}|${normalizedRoute}`
+    : "";
+}
+
+function buildVehiclePositionIndex(positions: any[]): Map<string, any[]> {
+  const index = new Map<string, any[]>();
+  for (const position of positions) {
+    const key = vehiclePositionLookupKey(position?.tripId, position?.routeId);
+    if (key) addOpenovIndexedRecord(index, key, position);
+  }
+  return index;
+}
+
+function vehiclePositionCandidatesForLeg(
+  leg: any,
+  index: Map<string, any[]>
+): any[] {
+  const tripMatch = String(leg?.tripId ?? "").match(
+    /^(\d{8})_(\d{2}:\d{2}(?::\d{2})?)_nl-OpenOV_(.+)$/i
+  );
+  if (!tripMatch) return [];
+  const key = vehiclePositionLookupKey(tripMatch[3], leg?.routeId ?? leg?.route?.id);
+  return key ? (index.get(key) ?? []) : [];
+}
+
+function matchOpenovRealtime(leg: any, indexes: OpenovRealtimeMatcherIndexes) {
   const rawRouteId = String(leg?.routeId ?? leg?.route?.id ?? "");
 
   if (!/^nl-OpenOV_/i.test(rawRouteId)) {
@@ -1038,7 +1104,8 @@ function matchOpenovRealtime(leg: any, records: any[]) {
 
   // Voorkeursmethode: exacte rit-ID, met routecontrole als de
   // realtimefeed ook een route-ID bevat.
-  const exact = records.filter((record: any) => {
+  const exactCandidates = identity.tripId ? (indexes.byTripId.get(identity.tripId) ?? []) : [];
+  const exact = exactCandidates.filter((record: any) => {
     const recordIdentity = parseOpenovTripId(record.tripId);
     const recordTripId = recordIdentity.tripId;
     const recordRouteId = normalizeOpenovId(record.routeId);
@@ -1060,102 +1127,6 @@ function matchOpenovRealtime(leg: any, records: any[]) {
       serviceDateMatches;
   });
 
-  // TIJDELIJKE DIAGNOSE: tel kandidaten per matchingstap.
-  // Deze diagnose verandert de matchbeslissing niet.
-  const diagnosticPlannedValue = leg.scheduledStartTime ?? leg.startTime;
-  const diagnosticPlannedTimestamp = epochSeconds(diagnosticPlannedValue);
-  const diagnosticExpectedDirection = leg.directionId ?? leg.trip?.directionId;
-
-  const diagnosticRouteRecords = records.filter(
-    (record: any) => normalizeOpenovId(record.routeId) === routeId
-  );
-
-  const diagnosticDateRecords = diagnosticRouteRecords.filter(
-    (record: any) => record.startDate === identity.startDate
-  );
-
-  const diagnosticDirectionRecords = diagnosticDateRecords.filter(
-    (record: any) =>
-      diagnosticExpectedDirection == null ||
-      record.directionId == null ||
-      String(record.directionId) === String(diagnosticExpectedDirection)
-  );
-
-  const diagnosticFromStopRecords = diagnosticDirectionRecords.filter(
-    (record: any) => (record.stopUpdates ?? []).some(
-      (stop: any) => normalizeOpenovId(stop.stopId) === fromId
-    )
-  );
-
-  const diagnosticOrderedStopRecords = diagnosticFromStopRecords.filter(
-    (record: any) => {
-      const ids = (record.stopUpdates ?? []).map(
-        (stop: any) => normalizeOpenovId(stop.stopId)
-      );
-      const fromIndex = ids.indexOf(fromId);
-      const toIndex = toId ? ids.indexOf(toId) : -1;
-      return fromIndex >= 0 && (toIndex < 0 || toIndex > fromIndex);
-    }
-  );
-
-  const diagnosticTimeRecords = diagnosticOrderedStopRecords.filter(
-    (record: any) => {
-      if (diagnosticPlannedTimestamp == null) return false;
-
-      const boardingUpdate = (record.stopUpdates ?? []).find(
-        (stop: any) => normalizeOpenovId(stop.stopId) === fromId
-      );
-      const event = scheduledEventAtStop(boardingUpdate);
-      if (!event) return false;
-
-      const tolerance = event.reconstructed ? 180 : 300;
-      return Math.abs(event.seconds - diagnosticPlannedTimestamp) <= tolerance;
-    }
-  );
-
-  // Toon alle kandidaten met dezelfde route, datum en richting,
-  // ook als hun halte-updates de vertrekhalte niet bevatten.
-  const diagnosticSampleSource = diagnosticDirectionRecords;
-
-  const diagnosticSamples = diagnosticSampleSource.slice(0, 5).map(
-    (record: any) => {
-      const ids = (record.stopUpdates ?? []).map(
-        (stop: any) => normalizeOpenovId(stop.stopId)
-      );
-      const boardingUpdate = (record.stopUpdates ?? []).find(
-        (stop: any) => normalizeOpenovId(stop.stopId) === fromId
-      );
-      const event = scheduledEventAtStop(boardingUpdate);
-
-      return {
-        tripId: record.tripId ?? null,
-        routeId: record.routeId ?? null,
-        startDate: record.startDate ?? null,
-        startTime: record.startTime ?? null,
-        directionId: record.directionId ?? null,
-        scheduleRelationship: record.scheduleRelationship ?? null,
-        stopUpdateCount: ids.length,
-        stopIdsStart: ids.slice(0, 5),
-        stopIdsEnd: ids.slice(-5),
-        timestamp: record.timestamp ?? null,
-        updateAgeSeconds: typeof record.timestamp === "number"
-          ? Math.round(Date.now() / 1000 - record.timestamp)
-          : null,
-        fromStopPresent: ids.includes(fromId),
-        toStopPresent: Boolean(toId) && ids.includes(toId),
-        fromStopIndex: ids.indexOf(fromId),
-        toStopIndex: toId ? ids.indexOf(toId) : -1,
-        reconstructedBoardingTime: event
-          ? new Date(event.seconds * 1000).toISOString()
-          : null,
-        differenceSeconds: event && diagnosticPlannedTimestamp != null
-          ? Math.round(event.seconds - diagnosticPlannedTimestamp)
-          : null
-      };
-    }
-  );
-
-
   if (exact.length === 1) {
     return { record: exact[0], method: "exact_trip_id" };
   }
@@ -1174,7 +1145,8 @@ function matchOpenovRealtime(leg: any, records: any[]) {
     return { reason: "insufficient_trip_identity" };
   }
 
-  const candidates = records.filter((record: any) => {
+  const routeDateRecords = indexes.byRouteDate.get(`${routeId}|${identity.startDate}`) ?? [];
+  const candidates = routeDateRecords.filter((record: any) => {
     if (normalizeOpenovId(record.routeId) !== routeId) return false;
     if (record.startDate !== identity.startDate) return false;
 
@@ -1232,7 +1204,7 @@ function matchOpenovRealtime(leg: any, records: any[]) {
   // expliciet is geannuleerd. Een rit zonder voorspellingen wordt
   // nooit als op tijd beschouwd.
   const identityCandidates = identity.startTime
-    ? records.filter((record: any) => {
+    ? routeDateRecords.filter((record: any) => {
         if (normalizeOpenovId(record.routeId) !== routeId) return false;
         if (record.startDate !== identity.startDate) return false;
         if (normalizeClock(record.startTime) !== identity.startTime) return false;
@@ -1411,12 +1383,14 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
 
   // TIJDELIJKE DIAGNOSE: aantallen binnen dezelfde routeaanvraag.
   const records = [...byIdentity.values()];
+  const realtimeMatcherIndexes = buildOpenovRealtimeMatcherIndexes(records);
   // Gebruik alleen posities uit een verse feedheader. De helper controleert
   // daarnaast de individuele tijdstempel van iedere voertuigpositie.
   const vehiclePositions =
     vehicleFeed.ok === true && vehicleFeed.freshness === "fresh"
       ? (vehicleFeed.entities ?? [])
       : [];
+  const vehiclePositionsByTripRoute = buildVehiclePositionIndex(vehiclePositions);
   let matchedCount = 0;
   let unknownCount = 0;
   let freshPredictionCount = 0;
@@ -1439,10 +1413,10 @@ async function enrichTransitousPlan(plan: any): Promise<any> {
     const identity = parseOpenovTripId(leg.tripId);
     if (identity.tripId) relevantTrips.add(identity.tripId);
 
-    const result = matchOpenovRealtime(leg, records);
+    const result = matchOpenovRealtime(leg, realtimeMatcherIndexes);
     const vehicleObservation = findExactVehiclePositionForLeg(
       leg,
-      vehiclePositions
+      vehiclePositionCandidatesForLeg(leg, vehiclePositionsByTripRoute)
     );
 
 

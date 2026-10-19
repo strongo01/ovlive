@@ -56,6 +56,23 @@ assert.ok(refreshHandlerSource.includes('status: sourceErrors.length === 0 ? "co
 assert.ok(html.includes("const refreshErrorSummary = refreshErrors") &&
   html.includes("Realtime-update mislukt: ${reason}"),
   "the UI must show which source failed instead of hiding the actual error");
+
+const openovMatcherStart = workerSource.indexOf("function matchOpenovRealtime(");
+const openovMatcherEnd = workerSource.indexOf("\nfunction findRealtimeStop(", openovMatcherStart);
+assert.ok(openovMatcherStart >= 0 && openovMatcherEnd > openovMatcherStart,
+  "the OpenOV realtime matcher must remain inspectable");
+const openovMatcherSource = workerSource.slice(openovMatcherStart, openovMatcherEnd);
+assert.ok(openovMatcherSource.includes("indexes.byTripId.get(identity.tripId)") &&
+  openovMatcherSource.includes("indexes.byRouteDate.get"),
+  "the matcher must use trip and route/date indexes instead of scanning every feed record");
+assert.doesNotMatch(openovMatcherSource,
+  /diagnostic(Route|Date|Direction|FromStop|OrderedStop|Time)Records|diagnosticSamples/,
+  "temporary matcher diagnostics must not rescan the full realtime feed on each itinerary leg");
+assert.ok(workerSource.includes("buildOpenovRealtimeMatcherIndexes(records)") &&
+  workerSource.includes("buildVehiclePositionIndex(vehiclePositions)") &&
+  workerSource.includes("vehiclePositionCandidatesForLeg(leg, vehiclePositionsByTripRoute)"),
+  "large trip updates and vehicle-position feeds must be indexed once per refresh");
+console.log("PASS: OpenOV realtime matching indexes large feeds and skips unused per-leg diagnostic scans");
 assert.ok(workerSource.includes('if (url.searchParams.get("deferRealtime") === "1")'),
   "the Worker must have an explicit route-only response mode");
 const deferredStart = workerSource.indexOf('if (url.searchParams.get("deferRealtime") === "1")');
