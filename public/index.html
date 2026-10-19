@@ -222,15 +222,20 @@
           <p class="muted mode-help">Geldt voor het lopen vóór de eerste rit en ná de laatste rit. Transitous kan zelf een lagere limiet afdwingen.</p>
         </div>
         <div>
-          <label for="initialWaitLimit">Maximale wachttijd vóór de eerste OV-rit</label>
-          <select id="initialWaitLimit">
-            <option value="1">1 minuut</option>
-            <option value="2" selected>2 minuten</option>
-            <option value="3">3 minuten</option>
-            <option value="5">5 minuten</option>
-            <option value="10">10 minuten</option>
+          <label for="firstVehicleBuffer">Hoeveel minuten van tevoren aanwezig?</label>
+          <input id="firstVehicleBuffer" type="number" min="0" max="30" step="1" value="5" inputmode="numeric">
+          <p class="muted mode-help">Aantal minuten vóór vertrek van het eerste OV. Als je eerst moet lopen, berekent OVLive hoelaat je vanaf je beginlocatie moet vertrekken.</p>
+        </div>
+        <div>
+          <label for="walkingSpeed">Loopsnelheid</label>
+          <select id="walkingSpeed">
+            <option value="3">Langzaam · 3 km/u</option>
+            <option value="4">Rustig · 4 km/u</option>
+            <option value="5" selected>Normaal · 5 km/u</option>
+            <option value="6">Stevig · 6 km/u</option>
+            <option value="7">Snel · 7 km/u</option>
           </select>
-          <p class="muted mode-help">Geldt alleen voor de eerste halte. OVLive kan je geplande vertrektijd vanaf het beginpunt later zetten.</p>
+          <p class="muted mode-help">Wordt gebruikt voor de berekende looptijd en vertrektijd vóór het eerste OV.</p>
         </div>
       </div>
     </details>
@@ -2310,6 +2315,14 @@ function timelineTimeHtml(prediction, scheduledTime, displayedTime) {
 
 function plannedEndpointTime(leg, kind) {
   const isDeparture = kind === 'departure';
+  const mode = String(leg?.mode || '').toUpperCase();
+  // De eerste wandeling kan door de gebruikerinstellingen opnieuw zijn berekend.
+  // Gebruik dan die berekende tijd vóór eventuele oorspronkelijke planningsvelden.
+  if (mode === 'WALK' && leg?.initialDepartureCalculated === true) {
+    return isDeparture
+      ? (leg?.startTime || leg?.from?.departure || null)
+      : (leg?.endTime || leg?.to?.arrival || null);
+  }
   const scheduled = isDeparture
     ? (leg?.scheduledStartTime || leg?.from?.scheduledDeparture)
     : (leg?.scheduledEndTime || leg?.to?.scheduledArrival);
@@ -2318,7 +2331,6 @@ function plannedEndpointTime(leg, kind) {
   // Voor lopen zijn startTime/endTime routeplanningstijden.
   // Bij OV kan MOTIS die tijden realtime aanpassen: gebruik ze alleen als
   // realTime expliciet false is. Een realtime tijd is geen dienstregeling.
-  const mode = String(leg?.mode || '').toUpperCase();
   if (mode === 'WALK' || leg?.realTime === false) {
     return isDeparture
       ? (leg?.startTime || leg?.departureTime || leg?.from?.departure || null)
@@ -2360,6 +2372,21 @@ function journeyChronologyIssue(legs, toleranceSeconds = 60) {
   return null;
 }
 
+function normalizeWalkingSpeedKmh(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 12 ? parsed : 5;
+}
+
+function selectedWalkingSpeedKmh() {
+  return normalizeWalkingSpeedKmh(document.getElementById('walkingSpeed')?.value ?? 5);
+}
+
+function walkingDurationSeconds(distanceMeters, speedKmh = selectedWalkingSpeedKmh()) {
+  const distance = Number(distanceMeters);
+  if (!Number.isFinite(distance) || distance < 0) return null;
+  return Math.round(distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6));
+}
+
 function renderLeg(leg, index = 0) {
   const title = lineTitle(leg);
   const fromName = leg.from?.name || leg.origin?.name || 'Onbekende halte';
@@ -2397,7 +2424,7 @@ function renderLeg(leg, index = 0) {
     const startMs = Date.parse(fromTime);
     const originalEndMs = Date.parse(toTime);
     const elapsedSeconds = (originalEndMs - startMs) / 1000;
-    const estimatedWalkSeconds = Math.round(leg.distance / 1.5);
+    const estimatedWalkSeconds = walkingDurationSeconds(leg.distance);
     const waitingSeconds = elapsedSeconds - estimatedWalkSeconds;
 
     // Splits alleen als er minstens een minuut overblijft.
@@ -2489,7 +2516,12 @@ function journeySourceLegs(journey) {
       : [];
 }
 
-function prepareJourneyLegsForDisplay(journey, sourceLegs, maxInitialWaitSeconds) {
+function prepareJourneyLegsForDisplay(
+  journey,
+  sourceLegs,
+  firstArrivalBufferSeconds,
+  walkingSpeedKmh = selectedWalkingSpeedKmh()
+) {
   const legs = sourceLegs.map(leg => ({
     ...leg,
     from: leg.from && typeof leg.from === 'object' ? { ...leg.from } : leg.from,
@@ -2498,27 +2530,40 @@ function prepareJourneyLegsForDisplay(journey, sourceLegs, maxInitialWaitSeconds
 
   let adjustedJourneyStart = null;
   const firstWalk = legs[0];
-  const firstTransit = legs.find(leg => leg.mode !== 'WALK');
+  const nonTransitModes = new Set(['WALK', 'WAIT', 'TRANSFER']);
+  const firstTransit = legs.find(leg =>
+    !nonTransitModes.has(String(leg?.mode ?? '').toUpperCase())
+  );
+
+  const requestedBuffer = Number(firstArrivalBufferSeconds);
+  const bufferSeconds = Number.isFinite(requestedBuffer)
+    ? Math.min(1800, Math.max(0, requestedBuffer))
+    : 300;
 
   if (
     firstWalk?.mode === 'WALK' &&
-    typeof firstWalk.distance === 'number' &&
-    firstTransit &&
-    Number.isFinite(maxInitialWaitSeconds)
+    Number.isFinite(firstWalk.distance) &&
+    firstWalk.distance > 0 &&
+    firstTransit
   ) {
-    const startValue = plannedEndpointTime(firstWalk, 'departure') ||
-      journey.startTime;
     const transitStartValue = plannedEndpointTime(firstTransit, 'departure');
-    const startMs = Date.parse(startValue || '');
     const transitStartMs = Date.parse(transitStartValue || '');
-    const estimatedWalkSeconds = Math.round(firstWalk.distance / 1.5);
+    const estimatedWalkSeconds = walkingDurationSeconds(firstWalk.distance, walkingSpeedKmh);
 
     if (
-      Number.isFinite(startMs) &&
       Number.isFinite(transitStartMs) &&
-      transitStartMs > startMs &&
-      estimatedWalkSeconds > 0
+      Number.isFinite(estimatedWalkSeconds) &&
+      estimatedWalkSeconds >= 0
     ) {
+      // Plan terug vanaf het vertrek van het eerste voertuig:
+      // eerst de gewenste buffer, daarvoor de geschatte eerste wandeling.
+      const startMs = transitStartMs -
+        bufferSeconds * 1000 -
+        estimatedWalkSeconds * 1000;
+      adjustedJourneyStart = new Date(startMs).toISOString();
+
+      firstWalk.initialDepartureCalculated = true;
+      firstWalk.startTime = adjustedJourneyStart;
       firstWalk.endTime = transitStartValue;
       firstWalk.to = {
         ...(firstWalk.to && typeof firstWalk.to === 'object'
@@ -2527,24 +2572,13 @@ function prepareJourneyLegsForDisplay(journey, sourceLegs, maxInitialWaitSeconds
         arrival: transitStartValue
       };
 
-      const currentWaitSeconds =
-        (transitStartMs - startMs) / 1000 - estimatedWalkSeconds;
-
-      if (currentWaitSeconds > maxInitialWaitSeconds) {
-        const shiftSeconds = currentWaitSeconds - maxInitialWaitSeconds;
-        adjustedJourneyStart = new Date(
-          startMs + shiftSeconds * 1000
-        ).toISOString();
-        firstWalk.startTime = adjustedJourneyStart;
-
-        if (firstWalk.from) {
-          firstWalk.from.departure = adjustedJourneyStart;
-        } else {
-          firstWalk.from = {
-            name: 'START',
-            departure: adjustedJourneyStart
-          };
-        }
+      if (firstWalk.from) {
+        firstWalk.from.departure = adjustedJourneyStart;
+      } else {
+        firstWalk.from = {
+          name: 'START',
+          departure: adjustedJourneyStart
+        };
       }
     }
   }
@@ -2602,7 +2636,7 @@ function journeySortMetrics(journey, legs, adjustedJourneyStart = null) {
       if (walkStartMs !== null && walkEndMs !== null && walkEndMs >= walkStartMs) {
         walkingSeconds += (walkEndMs - walkStartMs) / 1000;
       } else if (Number.isFinite(walk?.distance) && walk.distance >= 0) {
-        walkingSeconds += walk.distance / 1.5;
+        walkingSeconds += walkingDurationSeconds(walk.distance);
       } else {
         walkingDurationUnknown = true;
         break;
@@ -2841,7 +2875,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       if (!freshJourney) continue;
       const sourceLegs = journeySourceLegs(freshJourney);
       const { legs } = prepareJourneyLegsForDisplay(
-        freshJourney, sourceLegs, Number($('initialWaitLimit').value) * 60
+        freshJourney, sourceLegs, Number($('firstVehicleBuffer').value) * 60, Number($('walkingSpeed').value)
       );
       const card = document.querySelector(`details.journey-card[data-tracking-index="${index}"]`);
       const legContainer = card?.querySelector('.journey-leg-details');
@@ -3220,7 +3254,7 @@ q.set('pedestrianSpeed', '1.5');
       const { legs, adjustedJourneyStart } = prepareJourneyLegsForDisplay(
         journey,
         sourceLegs,
-        Number($('initialWaitLimit').value) * 60
+        Number($('firstVehicleBuffer').value) * 60, Number($('walkingSpeed').value)
       );
       const sortMetrics = journeySortMetrics(journey, legs, adjustedJourneyStart);
       const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
