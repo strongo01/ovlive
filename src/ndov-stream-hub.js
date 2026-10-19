@@ -12,7 +12,7 @@ import {
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
-import { amsterdamClockSeconds, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
+import { amsterdamClockSeconds, continuousCollectorHealth, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
 const OWNER_PREFIXES = ['/ARR/', '/RIG/', '/GVB/', '/CXX/', '/EBS/', '/QBUZZ/', '/KEOLIS/', '/IVU/', '/OPENOV/'];
@@ -1015,9 +1015,81 @@ export class NdovFeedHub extends DurableObject {
         (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       const window = ndovCollectionWindow();
 
-      // Idempotent: de crontrigger mag niet elke vijf minuten dezelfde
-      // collectorstatus opnieuw wegschrijven.
+      // Idempotent during normal operation, but "enabled" alone is not proof
+      // that the stream is still receiving data. Recover a stuck connection when
+      // its last message (or its session start, before the first message) is stale.
       if (persistedEnabled && state.continuousEnabled) {
+        const nowMs = Date.now();
+        const health = continuousCollectorHealth(
+          state.snapshot,
+          nowMs,
+          AUTO_DATA_IDLE_RECONNECT_MS + 30_000
+        );
+
+        if (health.stale) {
+          const wasRunning = state.running;
+          state.stopRequested = wasRunning;
+
+          // Closing the socket resolves a reader that is still blocked waiting
+          // for a publisher frame. The collect() finally block owns final cleanup.
+          try {
+            if (state.socket) void state.socket.close().catch(() => {});
+          } catch {}
+
+          if (!wasRunning) {
+            const warning = "Collector-watchdog: langdurig geen NDOV-berichten; nieuwe sessie ingepland.";
+            state.snapshot = {
+              ...state.snapshot,
+              state: "stale",
+              ok: false,
+              error: warning,
+              finishedAt: new Date(nowMs).toISOString(),
+              warnings: [
+                ...(Array.isArray(state.snapshot.warnings) ? state.snapshot.warnings.slice(-4) : []),
+                warning,
+              ],
+            };
+            try {
+              await this.persist(stream, true, false);
+            } catch (error) {
+              console.error("[NDOV_AUTOCOLLECT_WATCHDOG] Stale status kon niet worden opgeslagen.", {
+                stream,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+
+          // Replace an overdue alarm with a near-future retry. If an old alarm
+          // handler is still active, closing its socket should let it finish;
+          // the next alarm then starts a clean bounded collection session.
+          await this.ctx.storage.setAlarm(
+            window.active ? Date.now() + 1000 : window.nextAlarmAt
+          );
+          const nextAlarmAt = await this.ctx.storage.getAlarm();
+          console.warn("[NDOV_AUTOCOLLECT_WATCHDOG]", JSON.stringify({
+            stream,
+            action: wasRunning ? "close_stale_socket" : "schedule_stale_collector",
+            staleReason: health.reason,
+            staleAgeSeconds: health.ageSeconds,
+            running: wasRunning,
+            latestMessageAt: state.snapshot.latestMessageAt ?? null,
+            nextAlarmAt,
+          }));
+          return Response.json({
+            ok: true,
+            enabled: true,
+            recovering: true,
+            stream,
+            staleReason: health.reason,
+            staleAgeSeconds: health.ageSeconds,
+            running: wasRunning,
+            nextAlarmAt,
+            note: wasRunning
+              ? "Collector-stream was vastgelopen; verbinding gesloten en herstart ingepland."
+              : "Collector had geen recente berichten; nieuwe verzamelsessie ingepland.",
+          }, { headers: { 'cache-control': 'no-store' } });
+        }
+
         let alarmAt = await this.ctx.storage.getAlarm();
         if (alarmAt === null) {
           const targetAt = window.active ? Date.now() + 1000 : window.nextAlarmAt;
@@ -1041,7 +1113,7 @@ export class NdovFeedHub extends DurableObject {
       });
 
       let alarmAt = await this.ctx.storage.getAlarm();
-      if (alarmAt === null) {
+      if (alarmAt === null || alarmAt <= Date.now()) {
         const targetAt = window.active ? Date.now() + 1000 : window.nextAlarmAt;
         await this.ctx.storage.setAlarm(targetAt);
         alarmAt = await this.ctx.storage.getAlarm();
