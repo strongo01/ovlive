@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  continuousCollectorHealth,
   eventsForIdentities,
   flattenCurrentMutations,
   normalizeOperatingDate,
@@ -24,6 +25,35 @@ assert.deepEqual(normalizeTripLookupIdentity(identity), {
   owner: 'EBS', date: '20261012', line: '1314', journey: '1037', reinforcement: '0',
 });
 console.log('PASS: operating date normalizes and a three-day window covers overnight services');
+
+{
+  const nowMs = Date.parse('2026-10-19T18:25:00.000Z');
+  const recent = continuousCollectorHealth({
+    state: 'listening',
+    startedAt: '2026-10-19T18:20:00.000Z',
+    latestMessageAt: '2026-10-19T18:24:20.000Z',
+  }, nowMs, 150_000);
+  assert.deepEqual(recent, { stale: false, reason: null, ageSeconds: 40 });
+
+  const stuck = continuousCollectorHealth({
+    state: 'listening',
+    startedAt: '2026-10-19T08:47:22.000Z',
+    latestMessageAt: '2026-10-19T08:48:22.000Z',
+  }, nowMs, 150_000);
+  assert.deepEqual(stuck, {
+    stale: true,
+    reason: 'no_recent_messages',
+    ageSeconds: 34_598,
+  });
+
+  assert.equal(continuousCollectorHealth({ state: 'error' }, nowMs).reason, 'collector_error');
+  assert.equal(continuousCollectorHealth({ state: 'listening' }, nowMs).reason, 'missing_activity_timestamp');
+  assert.equal(continuousCollectorHealth({
+    state: 'listening',
+    latestMessageAt: '2026-10-19T18:26:00.000Z',
+  }, nowMs).reason, 'activity_timestamp_in_future');
+  console.log('PASS: collector watchdog distinguishes recent, stuck, errored, timestamp-less, and clock-skewed feeds');
+}
 
 {
   const states = new Map();
