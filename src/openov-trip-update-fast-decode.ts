@@ -55,7 +55,7 @@ interface Field {
 }
 
 interface VarintResult {
-  value: bigint;
+  value: number | bigint;
   nextOffset: number;
 }
 
