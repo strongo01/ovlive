@@ -565,7 +565,7 @@ assert.ok(html.includes('id="firstVehicleBuffer"') &&
 assert.ok((html.match(/selectedFirstVehicleBufferSeconds\(\), Number\(\$\('walkingSpeed'\)\.value\)/g) || []).length === 2 &&
   html.includes("const minutes = Number.isFinite(parsed) ? Math.min(30, Math.max(0, parsed)) : 5;"),
   "initial planning and realtime refresh must both apply the current buffer and walking speed");
-assert.ok(html.includes("leg.distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6)") &&
+assert.ok(html.includes("distance / (normalizeWalkingSpeedKmh(speedKmh) / 3.6)") &&
   html.includes("const estimatedWalkSeconds = walkingDurationSeconds(leg.distance)"),
   "walking duration and the generated wait segment must use the configured speed");
 
