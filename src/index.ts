@@ -625,11 +625,10 @@ type OpenovFeedCacheEntry = {
   fetchedAtMs: number;
 };
 
-// De kaart pollt elke 10 seconden. Een 12-sec cache voorkomt dat normale
-// opeenvolgende polls in hetzelfde Worker-isolate telkens opnieuw de volledige
-// feed moeten ophalen/decoderen; positie-timestamps blijven onafhankelijk strikt
-// op hun eigen leeftijd gevalideerd (max. 30 seconden in de kaart).
-const OPENOV_FEED_CACHE_TTL_MS = 12_000;
+// Houd deze per-isolate cache bewust korter dan de 10-sec frontendpoll.
+// Gelijktijdige aanvragen blijven via single-flight samengevoegd; de gerichte
+// voertuigdecoder vermindert de CPU-kosten bij een noodzakelijke nieuwe feed.
+const OPENOV_FEED_CACHE_TTL_MS = 8_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
 const openovFeedCache = new Map<string, OpenovFeedCacheEntry>();
