@@ -80,6 +80,7 @@ const kv78Snapshot = {
     ],
   },
 };
+let identityDiagnosticsRequests = 0;
 const manifest = { generatedAt: now, shards: ['382'] };
 const shard = {
   '382969674': 'EBS:1314:1037',
@@ -107,6 +108,7 @@ const env = {
           const url = new URL(input);
           const stream = url.searchParams.get('stream');
           if (url.pathname === '/status' && stream === 'bison' && url.searchParams.get('identityDiagnostics') === '1') {
+            identityDiagnosticsRequests += 1;
             return Response.json({ ...bisonSnapshot, bisonIdentityDiagnostics });
           }
           if (url.pathname === '/status' && stream === 'bison') return Response.json(bisonSnapshot);
@@ -138,6 +140,8 @@ const plan = {
   ] }],
 };
 await applyNdovCancellationsToPlan(plan, env);
+assert.equal(identityDiagnosticsRequests, 0,
+  'the frequent/default realtime path must not request the full stored-trip identity scan');
 const [cancelledLeg, kv78Leg, kv6Leg, staleLeg, observedLeg] = plan.itineraries[0].legs;
 assert.equal(plan.ndovRealtimeMeta.kv17MatchedLegCount, plan.ndovRealtimeMeta.matchedLegCount, 'KV17-teller moet expliciet beschikbaar zijn');
 assert.equal(plan.ndovRealtimeMeta.kv78DataLegCount, 1);
@@ -177,6 +181,8 @@ const partialMatchPlan = {
   }],
 };
 await applyNdovCancellationsToPlan(partialMatchPlan, env, { includeIdentityDiagnostics: true });
+assert.ok(identityDiagnosticsRequests >= 1,
+  'an explicit NDOV identity diagnostic request must still run the detailed scan');
 assert.equal(partialMatchPlan.ndovRealtimeMeta.kv6MatchedLegCount, 1, 'partial exact KV6 successes must not hide the unmatched trip');
 assert.equal(partialMatchPlan.ndovRealtimeMeta.kv78DataLegCount, 1, 'the partial test should retain its exact KV78 match');
 const partialKv6Audit = partialMatchPlan.ndovRealtimeMeta.kv6IdentityDiagnostics;
