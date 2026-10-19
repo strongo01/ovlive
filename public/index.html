@@ -84,7 +84,11 @@
     .results-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:18px 0 8px}
     .results-heading h3{margin:0;font-size:20px}
     .results-heading span{font-size:12px;color:var(--muted)}
-    .journey-card{border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(255,255,255,.035),rgba(255,255,255,.012));margin:10px 0;overflow:hidden;transition:border-color .15s,background .15s}
+    .results-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:8px 0 12px}
+    .results-sort-control{display:flex;align-items:center;gap:8px;margin:0;color:var(--muted);font-size:12px;white-space:nowrap}
+    #journeySort{width:auto;min-width:230px;max-width:100%;padding:9px 11px;margin:0;font-size:14px}
+    .journey-results-list{display:flex;flex-direction:column;gap:0}
+    @media(max-width:600px){.results-toolbar{align-items:stretch;flex-direction:column;gap:8px}.results-sort-control{align-items:stretch;justify-content:space-between;white-space:normal}#journeySort{width:100%;min-width:0}}    .journey-card{border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(255,255,255,.035),rgba(255,255,255,.012));margin:10px 0;overflow:hidden;transition:border-color .15s,background .15s}
     .journey-card:hover{border-color:#596575}
     .journey-card[open]{border-color:#7c5a3c;background:#191e24}
     .journey-card-summary{display:block;cursor:pointer;list-style:none;padding:15px;outline-offset:-4px}
@@ -2547,6 +2551,137 @@ function prepareJourneyLegsForDisplay(journey, sourceLegs, maxInitialWaitSeconds
   return { legs, adjustedJourneyStart };
 }
 
+function journeySortMetrics(journey, legs, adjustedJourneyStart = null) {
+  const items = Array.isArray(legs) ? legs : [];
+  const first = items[0];
+  const last = items[items.length - 1];
+  const departure = adjustedJourneyStart ||
+    journey?.startTime ||
+    first?.from?.departure ||
+    first?.startTime ||
+    null;
+  const arrival = journey?.endTime ||
+    last?.to?.arrival ||
+    last?.endTime ||
+    null;
+  const toMilliseconds = value => {
+    const parsed = Date.parse(value || '');
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const departureMs = toMilliseconds(departure);
+  const arrivalMs = toMilliseconds(arrival);
+  const durationMs = departureMs !== null && arrivalMs !== null && arrivalMs >= departureMs
+    ? arrivalMs - departureMs
+    : null;
+  const transitLegs = [];
+  items.forEach((leg, index) => {
+    if (String(leg?.mode ?? '').toUpperCase() !== 'WALK') {
+      transitLegs.push({ leg, index });
+    }
+  });
+
+  let transferWaitSeconds = 0;
+  for (let transferIndex = 1; transferIndex < transitLegs.length; transferIndex += 1) {
+    const previous = transitLegs[transferIndex - 1];
+    const next = transitLegs[transferIndex];
+    const previousArrivalMs = toMilliseconds(plannedEndpointTime(previous.leg, 'arrival'));
+    const nextDepartureMs = toMilliseconds(plannedEndpointTime(next.leg, 'departure'));
+    if (previousArrivalMs === null || nextDepartureMs === null || nextDepartureMs < previousArrivalMs) {
+      transferWaitSeconds = null;
+      break;
+    }
+
+    let walkingSeconds = 0;
+    let walkingDurationUnknown = false;
+    for (let legIndex = previous.index + 1; legIndex < next.index; legIndex += 1) {
+      const walk = items[legIndex];
+      if (String(walk?.mode ?? '').toUpperCase() !== 'WALK') continue;
+      const walkStartMs = toMilliseconds(plannedEndpointTime(walk, 'departure'));
+      const walkEndMs = toMilliseconds(plannedEndpointTime(walk, 'arrival'));
+      if (walkStartMs !== null && walkEndMs !== null && walkEndMs >= walkStartMs) {
+        walkingSeconds += (walkEndMs - walkStartMs) / 1000;
+      } else if (Number.isFinite(walk?.distance) && walk.distance >= 0) {
+        walkingSeconds += walk.distance / 1.5;
+      } else {
+        walkingDurationUnknown = true;
+        break;
+      }
+    }
+    if (walkingDurationUnknown) {
+      transferWaitSeconds = null;
+      break;
+    }
+    const connectionSeconds = (nextDepartureMs - previousArrivalMs) / 1000;
+    transferWaitSeconds += Math.max(0, connectionSeconds - walkingSeconds);
+  }
+
+  return {
+    departureMs,
+    arrivalMs,
+    durationMs,
+    transfers: Math.max(0, transitLegs.length - 1),
+    transferWaitSeconds
+  };
+}
+
+function compareJourneySortMetrics(left, right, sortBy = 'departure') {
+  const sortOrders = {
+    departure: ['departureMs', 'arrivalMs', 'durationMs', 'transfers'],
+    arrival: ['arrivalMs', 'departureMs', 'durationMs', 'transfers'],
+    duration: ['durationMs', 'departureMs', 'arrivalMs', 'transfers'],
+    transfers: ['transfers', 'departureMs', 'durationMs', 'arrivalMs'],
+    transferWait: ['transferWaitSeconds', 'departureMs', 'durationMs', 'transfers']
+  };
+  const fields = sortOrders[sortBy] || sortOrders.departure;
+  for (const field of fields) {
+    const leftValue = Number.isFinite(left?.[field]) ? left[field] : Number.POSITIVE_INFINITY;
+    const rightValue = Number.isFinite(right?.[field]) ? right[field] : Number.POSITIVE_INFINITY;
+    if (leftValue === rightValue) continue;
+    return leftValue < rightValue ? -1 : 1;
+  }
+  return 0;
+}
+
+function journeyCardSortMetrics(card) {
+  const readNumber = property => {
+    const raw = card?.dataset?.[property];
+    if (raw == null || raw === '') return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    departureMs: readNumber('sortDepartureMs'),
+    arrivalMs: readNumber('sortArrivalMs'),
+    durationMs: readNumber('sortDurationMs'),
+    transfers: readNumber('sortTransfers'),
+    transferWaitSeconds: readNumber('sortTransferWaitSeconds')
+  };
+}
+
+function sortJourneyCards(sortBy = 'departure') {
+  const container = document.querySelector('.journey-results-list');
+  if (!container) return;
+  const cards = Array.from(container.querySelectorAll('details.journey-card'));
+  cards.sort((left, right) =>
+    compareJourneySortMetrics(journeyCardSortMetrics(left), journeyCardSortMetrics(right), sortBy)
+  );
+  cards.forEach((card, index) => {
+    container.appendChild(card);
+    const number = card.querySelector('.journey-number');
+    if (number) number.textContent = 'REIS ' + String(index + 1);
+    const summary = card.querySelector('.journey-card-summary');
+    if (summary) summary.setAttribute('aria-label', 'Bekijk details van reis ' + String(index + 1));
+    // Keep data-tracking-index stable: it identifies matching realtime data and map state.
+    const trackingIndex = Number(card.dataset.trackingIndex);
+    const mapState = liveJourneyMapStates.get(trackingIndex);
+    if (mapState?.map) {
+      requestAnimationFrame(() => {
+        if (mapState.map && card.isConnected) mapState.map.invalidateSize();
+      });
+    }
+  });
+}
+
 function itineraryRealtimeKey(journey) {
   return journeySourceLegs(journey)
     .map(leg => [
@@ -3086,6 +3221,7 @@ q.set('pedestrianSpeed', '1.5');
         sourceLegs,
         Number($('initialWaitLimit').value) * 60
       );
+      const sortMetrics = journeySortMetrics(journey, legs, adjustedJourneyStart);
       const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
       const first = legs[0];
       const last = legs[legs.length - 1];
@@ -3162,7 +3298,7 @@ q.set('pedestrianSpeed', '1.5');
         }
       }
 
-      return `<details class="journey-card" data-tracking-index="${index}">
+      return `<details class="journey-card" data-tracking-index="${index}" data-sort-departure-ms="${sortMetrics.departureMs ?? ''}" data-sort-arrival-ms="${sortMetrics.arrivalMs ?? ''}" data-sort-duration-ms="${sortMetrics.durationMs ?? ''}" data-sort-transfers="${sortMetrics.transfers}" data-sort-transfer-wait-seconds="${sortMetrics.transferWaitSeconds ?? ''}">
         <summary class="journey-card-summary" aria-label="Bekijk details van reis ${index + 1}">
           <div class="journey-card-top">
             <span class="journey-number">REIS ${index + 1}</span>
@@ -3203,11 +3339,28 @@ q.set('pedestrianSpeed', '1.5');
 
     $('journeys').innerHTML =
       chronologyWarningHtml +
-      `<div class="results-heading"><h3>Reisopties</h3><span>Tik op een reis voor details</span><span class="muted" id="live-refresh-status" role="status">Automatische realtime-update start na zoeken.</span></div>` +
-      cards +
+      `<div class="results-heading"><h3>Reisopties</h3><span>Tik op een reis voor details</span></div>` +
+      `<div class="results-toolbar">
+        <label class="results-sort-control" for="journeySort"><span>Sorteren op</span>
+          <select id="journeySort" aria-label="Sorteer reisopties">
+            <option value="departure" selected>Eerstvolgend vertrek</option>
+            <option value="arrival">Vroegste aankomst</option>
+            <option value="duration">Kortste reistijd</option>
+            <option value="transfers">Minste overstappen</option>
+            <option value="transferWait">Kortste overstapwachttijd</option>
+          </select>
+        </label>
+        <span class="muted" id="live-refresh-status" role="status">Automatische realtime-update start na zoeken.</span>
+      </div>` +
+      `<div class="journey-results-list">${cards}</div>` +
       renderAlerts(data.openovAlerts || []) +
       `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted" id="realtime-plan-diagnostic-status">${esc(diagnosticPlanStatus)}</p><div id="realtime-feed-info">${feedInfo}</div>${renderRealtimeLegend()}</div></details>`;
     bindLiveJourneyCards();
+    const journeySort = document.getElementById('journeySort');
+    if (journeySort) {
+      journeySort.addEventListener('change', () => sortJourneyCards(journeySort.value));
+    }
+    sortJourneyCards(journeySort?.value || 'departure');
     startLivePlanRealtimeRefresh(data);
     $('journeys').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
