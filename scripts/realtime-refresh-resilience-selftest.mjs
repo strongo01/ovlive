@@ -132,6 +132,16 @@ assert.match(
   "Een vastlopende OpenOV-feed moet zichtbaar worden gelogd"
 );
 assert.match(
+  worker,
+  /const OPENOV_FEED_INFLIGHT_MAX_AGE_MS = 18_000;/,
+  "Vastgelopen single-flight beloften mogen niet permanent nieuwe polls blokkeren"
+);
+assert.match(
+  worker,
+  /stale_single_flight_evicted/,
+  "Een vastgelopen feeddownload moet uit de gedeelde inflight-cache kunnen worden verwijderd"
+);
+assert.match(
   refreshHandler,
   /\[OVLIVE_REALTIME_REFRESH_OPENOV_START\]/,
   "De start van de OpenOV-verversingsstap moet zichtbaar worden gelogd"
