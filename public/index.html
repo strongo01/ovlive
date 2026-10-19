@@ -2639,7 +2639,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const statusFromMessage = reason.match(/\\bHTTP\\s+(\\d{3})\\b/i);
+    const statusFromMessage = reason.match(/\bHTTP\s+(\d{3})\b/i);
     const statusCode = Number(error?.status ?? statusFromMessage?.[1] ?? 0);
     const retryableStatus = [429, 502, 503, 504].includes(statusCode);
     const retryableTransport = /timeout|timed out|networkerror|network request failed|fetch failed|aborterror/i.test(reason);
