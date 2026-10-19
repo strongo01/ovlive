@@ -2503,7 +2503,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
 
     try {
-      await applyNdovCancellationsToPlan(planData, env);
+      await applyNdovCancellationsToPlan(planData, env, {
+        // This route is polled frequently. Avoid expensive static route matching
+        // when the live BISON snapshot is already stale or unavailable.
+        preflightBisonBeforeCrosswalk: true,
+      });
       successfulSources++;
     } catch (error) {
       const message = errorText(error);

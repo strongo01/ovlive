@@ -221,6 +221,41 @@ const cancellation = {
   console.log('PASS: stale BISON feed cannot modify a journey');
 }
 
+// Frequent refreshes can skip static crosswalk reads when BISON is already stale.
+{
+  const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const nsTrainIdentities = [{ tripId: '20261014_11:20_nl-OpenOV_123456789', trainNumber: '661' }];
+  const plan = {
+    ndovRealtimeMeta: {
+      nsTrainIdentities,
+      nsTrainIdentityPreparation: { candidateLegCount: 1, identityCount: 1 },
+    },
+    itineraries: [{ legs: [{
+      mode: 'BUS',
+      routeId: 'nl-OpenOV_146888',
+      tripId: '20261014_11:20_nl-OpenOV_123456789',
+      from: { stopId: 'mid-from', scheduledDeparture: '11:30:00' },
+      to: { stopId: 'mid-to', scheduledArrival: '11:50:00' },
+    }] }],
+  };
+
+  await applyNdovCancellationsToPlan(
+    plan,
+    createEnv({ latestMessageAt: stale }),
+    { preflightBisonBeforeCrosswalk: true },
+  );
+
+  assert.equal(plan.ndovRealtimeMeta.status, 'stale');
+  assert.equal(plan.ndovRealtimeMeta.crosswalkSkipped, true);
+  assert.equal(plan.ndovRealtimeMeta.routeCrosswalkOutcomes, undefined,
+    'preflight must skip expensive route-crosswalk reads');
+  assert.deepEqual(plan.ndovRealtimeMeta.nsTrainIdentities, nsTrainIdentities,
+    'preflight must preserve previously resolved NS identities');
+  assert.equal(plan.itineraries[0].legs[0].cancelled, undefined,
+    'stale feed must not modify a journey');
+  console.log('PASS: realtime-refresh skips NDOV crosswalk when BISON is stale and preserves NS identities');
+}
+
 {
   const recovered = { ...cancellation, eventType: 'RECOVER', timestamp: new Date(Date.now() + 1000).toISOString() };
   const plan = { itineraries: [{ legs: [

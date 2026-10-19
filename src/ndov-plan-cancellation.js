@@ -1931,6 +1931,65 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     return plan;
   }
 
+  // Frequent background refreshes should check BISON freshness before reading
+  // large static crosswalk shards. If BISON is stale/unavailable, those reads
+  // cannot change the realtime result and may exhaust the Worker CPU budget.
+  let snapshot;
+  let snapshotCheckedEarly = false;
+  if (options?.preflightBisonBeforeCrosswalk === true) {
+    try {
+      snapshot = await getBisonSnapshot(env);
+      snapshotCheckedEarly = true;
+    } catch (error) {
+      const existingMeta = plan.ndovRealtimeMeta;
+      plan.ndovRealtimeMeta = {
+        ...baseMeta,
+        ...(Array.isArray(existingMeta?.nsTrainIdentities) ? { nsTrainIdentities: existingMeta.nsTrainIdentities } : {}),
+        ...(existingMeta?.nsTrainIdentityPreparation ? { nsTrainIdentityPreparation: existingMeta.nsTrainIdentityPreparation } : {}),
+        status: "unavailable",
+        message: error instanceof Error ? error.message : "BISON-status niet beschikbaar.",
+        crosswalkSkipped: true,
+      };
+      console.log("[OVLIVE_NDOV_PREFLIGHT]", JSON.stringify({
+        status: "unavailable",
+        crosswalkSkipped: true,
+        candidateLegCount: candidates.length,
+      }));
+      return plan;
+    }
+
+    const earlyLatestMessageAt = valueOf(snapshot, "latestMessageAt");
+    const earlyFeedTimeMs = timestampMs(earlyLatestMessageAt);
+    const earlyFeedAgeMs = earlyFeedTimeMs === null ? null : Date.now() - earlyFeedTimeMs;
+    const earlySnapshotStale =
+      snapshot.state === "error" ||
+      earlyFeedAgeMs === null ||
+      earlyFeedAgeMs < -30_000 ||
+      earlyFeedAgeMs > MAX_BISON_AGE_MS;
+
+    if (earlySnapshotStale) {
+      const existingMeta = plan.ndovRealtimeMeta;
+      const feedAgeSeconds = earlyFeedAgeMs === null ? null : Math.round(earlyFeedAgeMs / 1000);
+      plan.ndovRealtimeMeta = {
+        ...baseMeta,
+        ...(Array.isArray(existingMeta?.nsTrainIdentities) ? { nsTrainIdentities: existingMeta.nsTrainIdentities } : {}),
+        ...(existingMeta?.nsTrainIdentityPreparation ? { nsTrainIdentityPreparation: existingMeta.nsTrainIdentityPreparation } : {}),
+        status: "stale",
+        feedState: snapshot.state ?? "unknown",
+        feedAgeSeconds,
+        message: "BISON-feed is niet recent genoeg; de grote NDOV-routekoppeling is overgeslagen.",
+        crosswalkSkipped: true,
+      };
+      console.log("[OVLIVE_NDOV_PREFLIGHT]", JSON.stringify({
+        status: "stale",
+        crosswalkSkipped: true,
+        candidateLegCount: candidates.length,
+        feedAgeSeconds,
+      }));
+      return plan;
+    }
+  }
+
   let routeCrosswalkMatchedLegCount = 0;
   let tripIdCrosswalkFallbackMatchedLegCount = 0;
   let routeCrosswalkGeneratedAt = null;
@@ -2014,9 +2073,8 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     };
     return plan;
   }
-  let snapshot;
   try {
-    snapshot = await getBisonSnapshot(env);
+    if (!snapshotCheckedEarly) snapshot = await getBisonSnapshot(env);
   } catch (error) {
     plan.ndovRealtimeMeta = {
       ...baseMeta,
