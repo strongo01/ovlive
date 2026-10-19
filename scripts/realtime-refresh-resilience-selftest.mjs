@@ -92,7 +92,7 @@ assert.match(
   /openovRealtimeFeedIndexCache\.trainEntities === trainEntities/
 );
 assert.match(
-  refreshHandler,
+  worker,
   /getOpenovRealtimeFeedIndexCache\(tripFeed, trainFeed\)/,
   "De zware ritindex moet tussen realtimepolls worden hergebruikt"
 );
