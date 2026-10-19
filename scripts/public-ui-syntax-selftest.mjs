@@ -582,7 +582,7 @@ new vm.Script(
   "\nthis.walkingDurationSeconds = walkingDurationSeconds;"
 ).runInNewContext(walkingHelperContext);
 const prepareBufferContext = { plannedEndpointTime, walkingDurationSeconds: walkingHelperContext.walkingDurationSeconds };
-new vm.Script(
+prepareBufferContext.prepareJourneyLegsForDisplay = new vm.Script(
   "(" + html.slice(prepareForBufferStart, journeySortAfterPrepare).trim() + ")"
 ).runInNewContext(prepareBufferContext);
 const stationDeparture = "2026-10-20T06:09:00.000Z";
