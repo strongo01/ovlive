@@ -845,7 +845,8 @@ async function getOpenovFeed(
       );
     }
 
-    const lastGood = openovFeedCache.get(cacheKey) ?? openovFeedCache.get(url);
+    const lastGood = openovFeedCache.get(cacheKey) ??
+      (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
 
     if (lastGood) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
@@ -944,7 +945,7 @@ async function fetchOpenovFeedUncached(
           const separator = key.lastIndexOf("|");
           if (separator < 0) return key;
           const route = normalizeOpenovId(key.slice(0, separator));
-          const date = key.slice(separator + 1).replace(/\\D/g, "").slice(0, 8);
+          const date = key.slice(separator + 1).replace(/\D/g, "").slice(0, 8);
           return route + "|" + date;
         }))
       }
@@ -1668,7 +1669,7 @@ function buildOpenovTripUpdateFilters(openovLegs: any[]): OpenovFeedFilters | un
     const identity = rawTripId ? parseOpenovTripId(rawTripId) : { tripId: "", startDate: undefined };
 
     if (identity.tripId) tripIds.add(normalizeOpenovId(identity.tripId));
-    const startDate = String(identity.startDate ?? "").replace(/\\D/g, "").slice(0, 8);
+    const startDate = String(identity.startDate ?? "").replace(/\D/g, "").slice(0, 8);
     if (routeId && startDate) routeDateKeys.add(routeId + "|" + startDate);
     else if (routeId && !identity.tripId) routeIds.add(routeId);
   }
