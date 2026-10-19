@@ -45,10 +45,10 @@ assert.match(
   /Realtimegegevens zijn tijdelijk niet beschikbaar\. De bestaande tijden blijven staan; OVLive controleert automatisch opnieuw\./,
   "Tijdelijke storingen moeten de bestaande tijden behouden en automatisch opnieuw proberen"
 );
-const refreshStart = frontend.indexOf("async function refreshLivePlanRealtime(");
-const refreshEnd = frontend.indexOf("function startLivePlanRealtimeRefresh(", refreshStart);
-assert.ok(refreshStart >= 0 && refreshEnd > refreshStart, "De realtime-verversingsfunctie ontbreekt");
-const refreshFunction = frontend.slice(refreshStart, refreshEnd);
+const frontendRefreshStart = frontend.indexOf("async function refreshLivePlanRealtime(");
+const frontendRefreshEnd = frontend.indexOf("function startLivePlanRealtimeRefresh(", frontendRefreshStart);
+assert.ok(frontendRefreshStart >= 0 && frontendRefreshEnd > frontendRefreshStart, "De realtime-verversingsfunctie ontbreekt");
+const refreshFunction = frontend.slice(frontendRefreshStart, frontendRefreshEnd);
 const retryableBranchStart = refreshFunction.indexOf("if (retryable) {");
 const nonRetryableBranchStart = refreshFunction.indexOf("} else if (statusElement)", retryableBranchStart);
 assert.ok(retryableBranchStart >= 0 && nonRetryableBranchStart > retryableBranchStart,
