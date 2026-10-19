@@ -195,7 +195,8 @@ function tripScheduleRelationship(value: number): string | undefined {
   } as Record<number, string>)[value];
 }
 
-function stopScheduleRelationship(value: number): string | undefined {
+function stopScheduleRelationship(value: number | undefined): string | undefined {
+  if (value == null) return undefined;
   return ({
     0: "SCHEDULED",
     1: "SKIPPED",
