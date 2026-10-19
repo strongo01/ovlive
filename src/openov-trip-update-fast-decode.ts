@@ -285,9 +285,9 @@ function decodeStopTimeUpdate(bytes: Uint8Array, field: Field): DecodedOpenovTri
   for (let offset = field.contentStart; offset < field.contentEnd;) {
     const item = readField(bytes, offset, field.contentEnd);
     if (item.number === 1 && item.wireType === 0) stopSequence = numeric(item.value) ?? 0;
-    else if (item.number === 2 && item.wireType === 2) stopId = readString(bytes, item);
-    else if (item.number === 3 && item.wireType === 2) arrivalField = item;
-    else if (item.number === 4 && item.wireType === 2) departureField = item;
+    else if (item.number === 2 && item.wireType === 2) arrivalField = item;
+    else if (item.number === 3 && item.wireType === 2) departureField = item;
+    else if (item.number === 4 && item.wireType === 2) stopId = readString(bytes, item);
     else if (item.number === 5 && item.wireType === 0) scheduleRelationship = numeric(item.value) ?? 0;
     offset = item.nextOffset;
   }
