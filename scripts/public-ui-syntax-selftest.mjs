@@ -425,4 +425,27 @@ assert.ok(html.includes("met bevestigde PSA/CHB-station (StopPlace)") &&
 
 console.log("PASS: planner summary exposes bounded KV6 lookup diagnostics");
 console.log("PASS: KV78 summary labels StopPlace confirmation accurately");
+
+// Full-line geometry is loaded separately from the selected journey segment.
+// Keep the upstream fixed to Transitous, cached, and limited to a known trip ID.
+assert.ok(workerSource.includes('if (url.pathname === "/api/trip-shape")') &&
+  workerSource.includes('${TRANSITOUS}/trip') &&
+  workerSource.includes('cf: { cacheTtl: 1800, cacheEverything: true }'),
+  "full trip shapes must use the fixed, cached Transitous trip endpoint");
+assert.ok(workerSource.includes("String(url.searchParams.get(\"tripId\") ?? \"\").trim()") &&
+  workerSource.includes("tripId.length > 256"),
+  "the full-trip-shape endpoint must validate the requested trip identity");
+assert.ok(html.includes("function fetchLiveFullTripGeometry(leg)") &&
+  html.includes("function loadLiveFullTripRouteOverlays(index)") &&
+  html.includes('fetch("/api/trip-shape?"'),
+  "the live map must fetch full-trip geometry separately from live vehicle locations");
+assert.ok(html.includes('color: "#f59e0b"') &&
+  html.includes('color: "#22c55e"') &&
+  html.includes("Volledige lijnroute") &&
+  html.includes("Jouw traject"),
+  "the map must draw the complete vehicle trip in orange and the selected segment in green");
+assert.ok(html.includes("candidateRouteId === expectedRouteId") &&
+  html.includes("candidateTripId === expectedTripId"),
+  "full-trip overlays must match the selected leg's exact route and trip identity");
+console.log("PASS: map overlays use exact full-trip geometry, with orange route and green selected segment");
 console.log("All public UI JavaScript checks passed.");

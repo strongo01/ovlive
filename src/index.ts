@@ -3288,6 +3288,86 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  if (url.pathname === "/api/trip-shape") {
+    const tripId = String(url.searchParams.get("tripId") ?? "").trim();
+    if (!tripId || tripId.length > 256) {
+      return json({ error: "Geef een geldige Transitous-rit-ID op." }, 400, headers);
+    }
+
+    // Fixed upstream endpoint, never a user-supplied URL. MOTIS returns the
+    // complete scheduled trip geometry; this request only runs when a user
+    // opens a live map and is edge-cached to avoid repeated shape lookups.
+    const upstream = new URL(`${TRANSITOUS}/trip`);
+    upstream.searchParams.set("tripId", tripId);
+    upstream.searchParams.set("detailedLegs", "true");
+    upstream.searchParams.set("joinInterlinedLegs", "false");
+    upstream.searchParams.set("withScheduledSkippedStops", "true");
+
+    try {
+      const response = await fetch(upstream, {
+        headers: {
+          "accept": "application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(9000),
+        cf: { cacheTtl: 1800, cacheEverything: true }
+      });
+
+      if (!response.ok) {
+        console.warn("[OVLIVE_TRIP_SHAPE_UPSTREAM]", JSON.stringify({
+          status: response.status,
+          tripIdLength: tripId.length
+        }));
+        return json({
+          ok: false,
+          error: "De volledige lijnroute is tijdelijk niet beschikbaar."
+        }, response.status === 404 ? 404 : 502, {
+          ...headers,
+          "cache-control": "no-store",
+          "x-upstream": "Transitous MOTIS v6 /trip"
+        });
+      }
+
+      const itinerary: any = await response.json();
+      const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
+      const shapes = legs
+        .filter((leg: any) =>
+          String(leg?.mode ?? "").toUpperCase() !== "WALK" &&
+          String(leg?.mode ?? "").toUpperCase() !== "FOOT" &&
+          leg?.legGeometry &&
+          (typeof leg.legGeometry === "string" ||
+           typeof leg.legGeometry?.points === "string" ||
+           (Array.isArray(leg.legGeometry) && leg.legGeometry.length > 1))
+        )
+        .slice(0, 12)
+        .map((leg: any) => ({
+          tripId: String(leg?.tripId ?? ""),
+          routeId: String(leg?.routeId ?? ""),
+          mode: String(leg?.mode ?? ""),
+          legGeometry: leg.legGeometry
+        }));
+
+      return json({
+        ok: true,
+        requestedTripId: tripId,
+        legs: shapes
+      }, 200, {
+        ...headers,
+        "cache-control": "public, max-age=1800",
+        "x-upstream": "Transitous MOTIS v6 /trip"
+      });
+    } catch (error) {
+      console.warn("[OVLIVE_TRIP_SHAPE_ERROR]", JSON.stringify({
+        tripIdLength: tripId.length,
+        error: error instanceof Error ? error.message : String(error)
+      }));
+      return json({
+        ok: false,
+        error: "De volledige lijnroute kon niet worden opgehaald."
+      }, 502, headers);
+    }
+  }
+
   if (url.pathname === "/api/plan") {
     const fromPlace = url.searchParams.get("fromPlace");
     const toPlace = url.searchParams.get("toPlace");
