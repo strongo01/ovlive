@@ -44,7 +44,7 @@ function normalizeGeneratedFeed(feed) {
       arrivalDelaySeconds: s.arrival?.delay,
       departureTime: numeric(s.departure?.time),
       departureDelaySeconds: s.departure?.delay,
-      scheduleRelationship: enumName(rt.StopTimeUpdate?.ScheduleRelationship, s.scheduleRelationship)
+      scheduleRelationship: enumName(rt.TripUpdate?.StopTimeUpdate?.ScheduleRelationship, s.scheduleRelationship)
     }));
     let propagatedDelaySeconds =
       typeof tu.delay === "number" && Number.isFinite(tu.delay)
