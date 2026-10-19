@@ -322,6 +322,9 @@ function decodeTripUpdate(
     const field = readField(bytes, offset, end);
     if (field.number === 1 && field.wireType === 2) {
       trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
+      // TripDescriptor is normally first on the wire. When this route/date is
+      // irrelevant, skip all remaining stop-time messages without visiting them.
+      if (!matchesFilters(trip, filters)) return null;
     } else if (field.number === 2 && field.wireType === 2) {
       stopFields.push(field);
     } else if (field.number === 3 && field.wireType === 2) {
