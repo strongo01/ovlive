@@ -246,7 +246,7 @@ function decodeVehiclePosition(
       else if (field.number === 8) vehicle = decodeVehicleDescriptor(bytes, field.contentStart, field.contentEnd);
     } else if (field.number === 5 && field.wireType === 0) {
       // VehiclePosition.timestamp = field 5, uint64 epoch seconds.
-      timestamp = field.value;
+      timestamp = field.value ?? 0;
     }
     offset = field.nextOffset;
   }
