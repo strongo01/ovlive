@@ -3290,7 +3290,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (url.pathname === "/api/trip-shape") {
     const tripId = String(url.searchParams.get("tripId") ?? "").trim();
-    if (!tripId || tripId.length > 256 || /[\\u0000-\\u001f\\u007f]/.test(tripId)) {
+    if (!tripId || tripId.length > 256) {
       return json({ error: "Geef een geldige Transitous-rit-ID op." }, 400, headers);
     }
 
