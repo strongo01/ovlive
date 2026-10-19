@@ -459,7 +459,7 @@ assert.ok(html.includes('id="journeySort"') &&
 assert.ok(html.includes('data-sort-departure-ms=') &&
   html.includes('data-sort-transfer-wait-seconds=') &&
   html.includes("sortJourneyCards(journeySort.value)") &&
-  html.includes("data-tracking-index remains stable") === false,
+  html.includes('data-tracking-index="${index}"'),
   "journey cards must expose calculated sorting metrics and a live sort control");
 const sortPlannedStart = html.indexOf("function plannedEndpointTime(leg, kind) {");
 const sortChronologyStart = html.indexOf("function journeyChronologyIssue(legs, toleranceSeconds = 60) {", sortPlannedStart);
