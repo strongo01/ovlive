@@ -279,7 +279,7 @@ function decodeStopTimeEvent(bytes: Uint8Array, start: number, end: number): {
 function decodeStopTimeUpdate(bytes: Uint8Array, field: Field): DecodedOpenovTripUpdateStop {
   let stopId = "";
   let stopSequence = 0;
-  let scheduleRelationship: number | undefined;
+  let scheduleRelationship = 0;
   let arrivalField: Field | undefined;
   let departureField: Field | undefined;
   for (let offset = field.contentStart; offset < field.contentEnd;) {
