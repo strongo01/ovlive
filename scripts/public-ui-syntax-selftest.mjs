@@ -558,10 +558,13 @@ console.log("PASS: journey sorting compares absolute dates, duration, transfer c
 // The first-vehicle buffer and walking speed must determine when to leave the origin.
 assert.ok(html.includes('id="firstVehicleBuffer"') &&
   html.includes('type="number" min="0" max="30" step="1" value="5"') &&
-  html.includes('id="walkingSpeed"') &&
-  html.includes('value="5" selected>Normaal · 5 km/u') &&
-  !html.includes('id="initialWaitLimit"'),
-  "the planner must expose a five-minute first-vehicle arrival buffer and selectable walking speeds");
+  html.includes('<input id="walkingSpeed" type="range" min="2" max="15" step="0.5" value="5"') &&
+  html.includes('id="walkingSpeedValue"') &&
+  html.includes('addEventListener(\'input\', updateWalkingSpeedReadout)') &&
+  html.includes("speed.toLocaleString('nl-NL', { maximumFractionDigits: 1 }) + ' km/u'") &&
+  !html.includes('id="initialWaitLimit"') &&
+  !html.includes('<select id="walkingSpeed">'),
+  "the planner must expose a 2–15 km/h slider, visible live value and five-minute arrival buffer");
 assert.ok(html.includes("firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds()") &&
   html.includes("walkingSpeedKmh: selectedWalkingSpeedKmh()") &&
   html.includes("activeWalkSettings.firstArrivalBufferSeconds") &&
@@ -584,6 +587,49 @@ new vm.Script(
   html.slice(walkingHelpersStart, renderLegAfterWalkingHelpers).trim() +
   "\nthis.walkingDurationSeconds = walkingDurationSeconds;"
 ).runInNewContext(walkingHelperContext);
+
+assert.equal(walkingHelperContext.normalizeWalkingSpeedKmh(2), 2,
+  "the walking speed normalizer must allow the slider's minimum of 2 km/h");
+assert.equal(walkingHelperContext.normalizeWalkingSpeedKmh(15), 15,
+  "the walking speed normalizer must allow the slider's maximum of 15 km/h");
+assert.equal(walkingHelperContext.normalizeWalkingSpeedKmh(1.5), 5,
+  "values below the slider minimum must safely fall back to 5 km/h");
+assert.equal(walkingHelperContext.normalizeWalkingSpeedKmh(15.5), 5,
+  "values above the slider maximum must safely fall back to 5 km/h");
+
+const speedBindingStart = html.indexOf("const walkingSpeedInput = document.getElementById('walkingSpeed');");
+const speedBindingEnd = html.indexOf("$('planBtn').onclick = async () => {", speedBindingStart);
+assert.ok(speedBindingStart >= 0 && speedBindingEnd > speedBindingStart,
+  "the slider readout must be bound separately from the travel search handler");
+const slider = {
+  value: "5",
+  listeners: {},
+  addEventListener(type, callback) { this.listeners[type] = callback; }
+};
+const speedOutput = { textContent: "" };
+const fakeSpeedDocument = {
+  getElementById(id) {
+    if (id === "walkingSpeed") return slider;
+    if (id === "walkingSpeedValue") return speedOutput;
+    return null;
+  }
+};
+new vm.Script(html.slice(speedBindingStart, speedBindingEnd).trim())
+  .runInNewContext({
+    document: fakeSpeedDocument,
+    normalizeWalkingSpeedKmh: walkingHelperContext.normalizeWalkingSpeedKmh
+  });
+assert.equal(speedOutput.textContent, "5 km/u",
+  "the slider value must be displayed when the planner loads");
+slider.value = "12.5";
+slider.listeners.input();
+assert.equal(speedOutput.textContent, "12,5 km/u",
+  "the displayed speed must update immediately when the slider moves");
+slider.value = "15";
+slider.listeners.input();
+assert.equal(speedOutput.textContent, "15 km/u",
+  "the readout must display the slider maximum accurately");
+console.log("PASS: walking speed slider displays its live value and enforces the 2–15 km/h range");
 const prepareBufferContext = { plannedEndpointTime, walkingDurationSeconds: walkingHelperContext.walkingDurationSeconds };
 prepareBufferContext.prepareJourneyLegsForDisplay = new vm.Script(
   "(" + html.slice(prepareForBufferStart, journeySortAfterPrepare).trim() + ")"
