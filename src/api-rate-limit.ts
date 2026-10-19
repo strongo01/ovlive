@@ -53,6 +53,10 @@ export async function enforcePublicApiRateLimit(
 
   const clientIp = request.headers.get("cf-connecting-ip")?.trim();
   if (!clientIp) {
+    console.warn("[OVLIVE_API_RATE_LIMIT]", JSON.stringify({
+      path: url.pathname,
+      outcome: "missing_client_ip"
+    }));
     return errorResponse(
       "De clientidentiteit ontbreekt; de publieke API-aanvraag is niet verwerkt.",
       503,
@@ -67,6 +71,13 @@ export async function enforcePublicApiRateLimit(
 
   if (!env.API_RATE_LIMITER ||
       (isJourneyPlanRequest && !env.PLAN_RATE_LIMITER)) {
+    console.error("[OVLIVE_API_RATE_LIMIT]", JSON.stringify({
+      path: url.pathname,
+      outcome: "missing_binding",
+      apiLimiterConfigured: Boolean(env.API_RATE_LIMITER),
+      planLimiterRequired: isJourneyPlanRequest,
+      planLimiterConfigured: Boolean(env.PLAN_RATE_LIMITER)
+    }));
     return errorResponse(
       "De API-beveiliging is niet volledig geconfigureerd.",
       503,
@@ -100,8 +111,13 @@ export async function enforcePublicApiRateLimit(
         );
       }
     }
-  } catch {
+  } catch (error) {
     // Fail closed: upstream-aanvragen niet uitvoeren als de limiter faalt.
+    console.error("[OVLIVE_API_RATE_LIMIT]", JSON.stringify({
+      path: url.pathname,
+      outcome: "limiter_exception",
+      message: error instanceof Error ? error.message.slice(0, 180) : "onbekende fout"
+    }));
     return errorResponse(
       "De tijdelijke API-beveiligingscontrole is niet beschikbaar.",
       503,
