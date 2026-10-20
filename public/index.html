@@ -3901,6 +3901,14 @@ function resolveTransitStop(inputId = 'boardStop', choiceId = 'boardStopChoice')
     }
     return choice.value;
   }
+  // A pasted stop ID is fine; a free-typed place name or coordinate is not.
+  if (/^[A-Za-z0-9_.:-]{3,200}$/.test(raw) && /[_:.-]/.test(raw)) {
+    return raw;
+  }
+  throw new Error('Zoek de halte en selecteer een OV-halte uit de gevonden resultaten.');
+}
+    return choice.value;
+  }
   if (/^[A-Za-z0-9_.:-]{3,200}$/.test(raw) &&
       !/\\s/.test(raw) &&
       !/^-?\\d+(?:\\.\\d+)?\\s*,\\s*-?\\d+(?:\\.\\d+)?$/.test(raw)) {
@@ -3938,7 +3946,8 @@ function stopTimeMatchesLine(row, query) {
   const candidates = [
     row?.displayName, row?.routeLongName, row?.tripShortName, row?.headsign
   ].map(value => String(value ?? ''));
-  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\\\function renderJourneyCard(journey, index, walkSettings) {');
+  const tokens = candidates.flatMap(value => String(value ?? '').toLocaleLowerCase('nl-NL').split(/[^a-z0-9]+/i));
+  return tokens.includes(target);
   const boundary = new RegExp('(^|[^\\p{L}\\p{N}])' + escaped + '(?=$|[^\\p{L}\\p{N}])', 'iu');
   return candidates.some(value => boundary.test(value));
 }
