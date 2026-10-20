@@ -4013,7 +4013,6 @@ async function requestStopTimes({ direction = 'departures', n = 20 } = {}) {
     stopId,
     n: String(Math.min(50, Math.max(1, Number(n) || 20))),
     arriveBy: String(direction === 'arrivals'),
-    direction: 'true',
     fetchStop: 'true',
     withScheduledSkippedStops: 'true',
     language: 'nl'
@@ -4024,9 +4023,40 @@ async function requestStopTimes({ direction = 'departures', n = 20 } = {}) {
     if (!Number.isFinite(timestamp.getTime())) throw new Error('Kies een geldige datum en tijd.');
     query.set('time', timestamp.toISOString());
   }
-  return api('/api/stoptimes?' + query.toString(), {
+  const data = await api('/api/stoptimes?' + query.toString(), {
     signal: AbortSignal.timeout(20000)
   });
+  return data && typeof data === 'object'
+    ? { ...data, ovliveSelectedStopId: stopId }
+    : data;
+}
+
+function renderStopBoardMetadata(data) {
+  const container = $('boardStopMeta');
+  if (!container) return;
+  const place = data?.place ?? {};
+  const name = String(place?.name ?? $('boardStop').value.trim() ?? '').trim();
+  const stopId = String(data?.ovliveSelectedStopId ?? place?.stopId ?? place?.stop_id ?? place?.id ?? '').trim();
+  const rawAccess = place?.wheelchairAccessible ?? place?.wheelchairBoarding ??
+    place?.wheelchairAccess ?? place?.accessibility?.wheelchair;
+  const accessValue = String(rawAccess ?? '').trim().toUpperCase();
+  const accessible = rawAccess === true || rawAccess === 1 ||
+    ['1', 'YES', 'TRUE', 'ACCESSIBLE', 'AVAILABLE', 'BOARDING_AREA'].includes(accessValue);
+  const inaccessible = rawAccess === false || rawAccess === 2 ||
+    ['2', 'NO', 'FALSE', 'INACCESSIBLE', 'NOT_ACCESSIBLE', 'NOT_POSSIBLE'].includes(accessValue);
+  const permalinkValue = place?.permalink ?? place?.url ?? data?.permalink ?? '';
+  let permalink = '';
+  try {
+    const candidate = new URL(String(permalinkValue));
+    if (candidate.protocol === 'https:') permalink = candidate.href;
+  } catch {}
+  const parts = [];
+  if (name) parts.push('<strong>' + esc(name) + '</strong>');
+  if (accessible) parts.push('♿ toegankelijk');
+  else if (inaccessible) parts.push('Niet toegankelijk');
+  if (stopId) parts.push('Halte-ID: ' + esc(stopId));
+  if (permalink) parts.push('<a href="' + esc(permalink) + '" target="_blank" rel="noreferrer">Permalink</a>');
+  container.innerHTML = parts.join(' · ');
 }
 
 function displayStopTimes(containerId, rows, direction, emptyText) {
@@ -4036,9 +4066,74 @@ function displayStopTimes(containerId, rows, direction, emptyText) {
     container.innerHTML = '<div class="stop-time-empty">' + esc(emptyText) + '</div>';
     return;
   }
-  container.innerHTML = '<div class="stop-time-list">' +
-    rows.map((row, index) => renderStopTimeCard(row, direction, index)).join('') +
-    '</div>';
+  const timeHeading = direction === 'arrivals'
+    ? 'Verwachte aankomsttijd'
+    : 'Verwachte vertrektijd';
+  const body = rows.map((row) => {
+    const event = stopTimeEvent(row, direction);
+    const place = row?.place ?? {};
+    const routeName = String(row?.routeShortName ?? row?.displayName ??
+      [modeName(row?.mode), row?.routeShortName].filter(Boolean).join(' ') ?? 'OV-rit').trim();
+    const destination = stopTimeDestination(row);
+    const cancelled = row?.cancelled === true || row?.tripCancelled === true;
+    const platform = place?.track ?? place?.scheduledTrack ?? '';
+    const status = cancelled ? 'RIJDT NIET' : event.live ? 'REALTIME' : 'DIENSTREGELING';
+    const statusClass = cancelled ? ' is-cancelled' : event.live ? ' is-live' : '';
+    const scheduled = event.live && event.scheduled && clock(event.scheduled) !== clock(event.time)
+      ? '<small>Dienstregeling: ' + esc(clock(event.scheduled)) + '</small>'
+      : '';
+    const details = '<details class="stop-time-details"><summary>Ritdetails en volgende haltes</summary>' +
+      '<div class="stop-time-meta">Rit-ID: ' + esc(row?.tripId ?? 'niet beschikbaar') +
+      (row?.agencyName ? ' · ' + esc(row.agencyName) : '') + '</div>' +
+      renderStopSequence(row, direction) + '</details>';
+    return '<tr' + (cancelled ? ' class="is-cancelled"' : '') + '>' +
+      '<td>' + esc(routeName) + '<small>' + esc(modeName(row?.mode)) + '</small></td>' +
+      '<td>' + esc(destination) + (platform ? '<small>perron ' + esc(platform) + '</small>' : '') +
+      '<span class="stop-time-status' + statusClass + '">' + esc(status) + '</span>' + details + '</td>' +
+      '<td><time>' + esc(clock(event.time)) + '</time>' + scheduled + '</td>' +
+      '</tr>';
+  }).join('');
+  container.innerHTML = '<div class="stop-time-table-wrap"><table class="stop-time-table">' +
+    '<thead><tr><th>Lijn</th><th>Richting</th><th>' + timeHeading + '</th></tr></thead>' +
+    '<tbody>' + body + '</tbody></table></div>';
+}
+
+function lineSearchMatchesRecord(row, query) {
+  const needle = String(query ?? '').trim().toLocaleLowerCase('nl-NL');
+  if (!needle) return false;
+  return [row?.line, row?.vehicleNumber, row?.tripNumber, row?.vehicleLabel]
+    .some(value => String(value ?? '').toLocaleLowerCase('nl-NL').includes(needle));
+}
+
+function renderLineSearchCard(row) {
+  const line = String(row?.line ?? 'OV-voertuig').trim();
+  const destination = String(row?.destination ?? 'Bestemming onbekend').trim();
+  const vehicleLabel = String(row?.vehicleLabel ?? 'Voertuig').trim();
+  const meta = [];
+  if (row?.stop) meta.push('Waargenomen bij ' + String(row.stop));
+  if (row?.status) meta.push(String(row.status).replaceAll('_', ' ').toLocaleLowerCase('nl-NL'));
+  if (typeof row?.updateAgeSeconds === 'number') {
+    meta.push(row.updateAgeSeconds < 60
+      ? 'Laatst bijgewerkt ' + row.updateAgeSeconds + ' sec geleden'
+      : 'Laatst bijgewerkt ' + Math.round(row.updateAgeSeconds / 60) + ' min geleden');
+  }
+  if (row?.source) meta.push('Bron: ' + String(row.source));
+  return '<article class="line-search-card">' +
+    '<div class="line-search-primary">' + esc(line) + ' richting ' + esc(destination) + '</div>' +
+    '<div class="line-search-secondary">' + esc(vehicleLabel) + '</div>' +
+    (meta.length ? '<div class="line-search-meta">' + esc(meta.join(' · ')) + '</div>' : '') +
+    '</article>';
+}
+
+function displayLineSearchResults(containerId, rows, emptyText) {
+  const container = $(containerId);
+  if (!container) return;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    container.innerHTML = '<div class="stop-time-empty">' + esc(emptyText) + '</div>';
+    return;
+  }
+  container.innerHTML = '<div class="line-search-list">' +
+    rows.map(renderLineSearchCard).join('') + '</div>';
 }
 
 function renderJourneyCard(journey, index, walkSettings) {
@@ -4842,6 +4937,7 @@ $('boardSearch').onclick = async () => {
   const button = $('boardSearch');
   button.disabled = true;
   $('boardResults').innerHTML = '';
+  $('boardStopMeta').innerHTML = '';
   $('boardStatus').textContent = 'Vertrek- en aankomsttijden ophalen…';
   try {
     const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
@@ -4851,6 +4947,7 @@ $('boardSearch').onclick = async () => {
     });
     const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
       : Array.isArray(data?.stop_times) ? data.stop_times : [];
+    renderStopBoardMetadata(data);
     const placeName = data?.place?.name ?? $('boardStop').value.trim();
     $('boardStatus').textContent = rows.length
       ? placeName + ' · ' + rows.length + ' ' +
@@ -4869,32 +4966,36 @@ $('lineSearch').onclick = async () => {
   const button = $('lineSearch');
   const requestedLine = $('lineNumber').value.trim();
   if (!requestedLine) {
-    $('lineStatus').textContent = 'Vul eerst een lijnnummer in, bijvoorbeeld 5 of 28.';
+    $('lineStatus').textContent = 'Vul eerst een lijnnummer, voertuignummer of ritnummer in, bijvoorbeeld 73.';
     return;
   }
   button.disabled = true;
   $('lineResults').innerHTML = '';
-  $('lineStatus').textContent = 'Ritten en routehaltes ophalen…';
+  $('lineStatus').textContent = 'Actuele voertuigen en ritten zoeken…';
   try {
-    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
-    const data = await requestStopTimes({ direction, n: $('lineLimit').value });
-    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
-      : Array.isArray(data?.stop_times) ? data.stop_times : [];
-    const matchingRows = rows.filter(row => stopTimeMatchesLine(row, requestedLine));
-    $('lineStatus').textContent = matchingRows.length
-      ? 'Lijn ' + requestedLine + ' · ' + matchingRows.length +
-        ' passende rit(ten) gevonden bij ' + (data?.place?.name ?? $('boardStop').value.trim()) +
-        '. De route toont de haltes die de dienstregelingbron heeft meegeleverd.'
-      : 'Geen rit voor lijn ' + requestedLine +
-        ' gevonden in deze lijst. Probeer een andere tijd of verhoog het aantal ritten dat wordt doorzocht.';
-    displayStopTimes('lineResults', matchingRows, direction,
-      'Geen passende ritten gevonden. Controleer het lijnnummer en de geselecteerde halte.');
+    const query = new URLSearchParams({
+      q: requestedLine,
+      limit: String(Math.min(50, Math.max(1, Number($('lineLimit').value) || 30)))
+    });
+    const data = await api('/api/line-search?' + query.toString(), {
+      signal: AbortSignal.timeout(20000)
+    });
+    const rows = Array.isArray(data?.results) ? data.results : [];
+    $('lineStatus').textContent = rows.length
+      ? requestedLine + ' · ' + rows.length + ' voertuig(en)/ritten gevonden.' +
+        (data?.partial ? ' Een realtimebron was tijdelijk niet beschikbaar.' : '')
+      : 'Geen actieve voertuigen of ritten gevonden die bij ' + requestedLine + ' passen.';
+    displayLineSearchResults('lineResults', rows,
+      'Geen actieve voertuigen of ritten gevonden. Probeer een ander nummer.');
   } catch (error) {
-    $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn kon niet worden opgezocht.';
+    $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn- of voertuigzoekopdracht is mislukt.';
   } finally {
     button.disabled = false;
   }
 };
+$('lineNumber').addEventListener('keydown', event => {
+  if (event.key === 'Enter') $('lineSearch').click();
+});
 
 $('healthBtn').onclick=async()=>{
  $('healthBtn').disabled=true;$('healthStatus').textContent='Feeds controleren…';$('healthDetails').innerHTML='';
