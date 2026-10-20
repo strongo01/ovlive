@@ -1132,6 +1132,10 @@ assert.ok(workerSource.includes('fetch("http://v0.ovapi.nl/journey/" + journeyKe
   workerSource.includes("actual.BlockCode") &&
   workerSource.includes('https://ovzoeker.nl/voertuig/'),
   "line search must load official OVAPI journey stops and retain vehicle, block and coach metadata");
+assert.ok(workerSource.includes("function normalizeTransitousLineSearchStops(") &&
+  workerSource.includes("stops: normalizeTransitousLineSearchStops(leg)") &&
+  workerSource.includes('stopDataSource: "Transitous-dienstregeling"'),
+  "OpenOV fallback search results must include timetable stops without falsely labelling them as confirmed realtime predictions");
 
 const lineCardStart = html.indexOf("function lineSearchTimestampMs(value) {");
 const lineCardEnd = html.indexOf("\nfunction displayLineSearchResults(", lineCardStart);
@@ -1151,13 +1155,27 @@ new vm.Script(
 ).runInNewContext(lineCardContext);
 const fallbackCard = lineCardContext.renderLineSearchCard({
   line: "Lijn onbekend", destination: "Bestemming onbekend",
-  vehicleNumber: "7305", tripId: "rt-trip-73", routeId: "rt-route-7",
-  vehicleLabel: "Voertuig met nummer 7305", source: "OpenOV GTFS-Realtime"
+  vehicleNumber: null, tripId: "rt-trip-73", routeId: "rt-route-7",
+  vehicleLabel: "Rit-ID 73", source: "OpenOV GTFS-Realtime",
+  position: { latitude: 52.1153, longitude: 5.1122 },
+  stops: [
+    { name: "Station Overvecht", userStopCode: "12345", expectedDeparture: "2026-10-20T16:41:00" },
+    { name: "Utrecht Centraal", userStopCode: "67890", expectedArrival: "2026-10-20T16:48:00" }
+  ],
+  stopDataSource: "Transitous-dienstregeling"
 });
-assert.ok(fallbackCard.includes("Voertuig-ID: 7305") &&
-  fallbackCard.includes("Rit-ID: rt-trip-73") &&
+assert.ok(fallbackCard.includes("Rit-ID: rt-trip-73") &&
   fallbackCard.includes("Route-ID: rt-route-7"),
-  "fallback line-search cards must show exact vehicle, trip and route IDs");
+  "fallback line-search cards must show exact trip and route IDs when no vehicle number exists");
+assert.ok(fallbackCard.includes('<details class="line-search-card line-search-card-expandable">') &&
+  fallbackCard.includes('<summary class="line-search-card-summary">') &&
+  fallbackCard.includes("Bekijk ritdetails en volgende haltes") &&
+  fallbackCard.includes('href="https://www.openstreetmap.org/?mlat=52.1153&mlon=5.1122#map=17/52.1153/5.1122"') &&
+  fallbackCard.includes("Station Overvecht") &&
+  fallbackCard.includes("Utrecht Centraal") &&
+  fallbackCard.includes("Haltes uit Transitous-dienstregeling"),
+  "fallback search cards must be tappable and reveal the trip, schedule stop list and reported vehicle position");
+
 
 const detailedCard = lineCardContext.renderLineSearchCard({
   line: "73", operatorName: "U-OV", destination: "Zeist",
