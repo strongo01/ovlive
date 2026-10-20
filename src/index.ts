@@ -445,6 +445,7 @@ const MAX_ROUTE_PARAMS = new Set([
   "maxTransfers", "maxTravelTime", "timetableView", "numItineraries",
   "maxItineraries", "searchWindow", "preTransitModes", "postTransitModes",
   "maxPreTransitTime", "maxPostTransitTime", "pedestrianSpeed",
+  "minTransferTime", "additionalTransferTime", "transferTimeFactor",
   "language", "wheelchair"
 ]);
 
