@@ -1701,8 +1701,8 @@ function bindNsTrainDetailsButtons(root = document) {
         output.hidden = !output.hidden;
         button.setAttribute('aria-expanded', String(!output.hidden));
         button.textContent = output.hidden
-          ? '🚆 Drukte & treininformatie bekijken'
-          : 'Verberg treininformatie';
+          ? '🚆 Treinsamenstelling & drukte'
+          : 'Treininformatie sluiten';
         return;
       }
       if (button.dataset.loading === 'true') return;
@@ -1736,7 +1736,7 @@ function bindNsTrainDetailsButtons(root = document) {
         output.hidden = false;
         button.dataset.loaded = 'true';
         button.setAttribute('aria-expanded', 'true');
-        button.textContent = 'Verberg treininformatie';
+        button.textContent = 'Treininformatie sluiten';
       } catch (error) {
         const message = error instanceof Error
           ? error.message
