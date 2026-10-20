@@ -70,6 +70,33 @@ assert.equal(itemBased.facilities.find(item => item.key === "stopcontact")?.avai
 assert.equal(itemBased.facilities.length, 4);
 console.log("PASS: voorzieningen uit NS-platformitems worden getoond en treindelen heten 'delen'");
 
+// Een enkel deel kan zelf een aantalveld met waarde 1 bevatten. De volledige
+// treinlijst moet dan winnen, anders wordt een trein van zes delen fout getoond.
+const sixPartTrain = normalizeNsTrainDetails(
+  {
+    payload: {
+      materieel: {
+        aantalDelen: 1,
+        lengteMeters: 100
+      },
+      materieelDelen: [
+        { volgnummer: 1 },
+        { volgnummer: 2 },
+        { volgnummer: 3 },
+        { volgnummer: 4 },
+        { volgnummer: 5 },
+        { volgnummer: 6 }
+      ]
+    }
+  },
+  null,
+  "3525"
+);
+assert.equal(sixPartTrain.unitCount, 6, "the full six-part list must override a nested count of one");
+assert.equal(sixPartTrain.unitLabel, "delen");
+assert.equal(sixPartTrain.lengthMeters, 100);
+console.log("PASS: a six-part train list overrides a nested one-part count");
+
 const calm = normalizeNsTrainDetails(
   { payload: { crowdForecast: "LOW", length: 160 } },
   null,
