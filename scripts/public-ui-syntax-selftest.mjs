@@ -905,13 +905,13 @@ assert.ok(workerSource.includes('const booleanParams = ["arriveBy", "direction",
   workerSource.includes('upstream.searchParams.set("time", requestedTime)'),
   "the Worker must safely forward time, direction, route-stop and paging parameters to Transitous");
 
-const stopEventStart = html.indexOf("function stopTimeEvent(row, direction) {");
-const stopEventEnd = html.indexOf("\nfunction stopTimeDestination(", stopEventStart);
-assert.ok(stopEventStart >= 0 && stopEventEnd > stopEventStart,
+const boardTimeFormatterStart = html.indexOf("function stopTimeEvent(row, direction) {");
+const boardTimeFormatterEnd = html.indexOf("\nfunction stopTimeDestination(", boardTimeFormatterStart);
+assert.ok(boardTimeFormatterStart >= 0 && boardTimeFormatterEnd > boardTimeFormatterStart,
   "the stop-time event formatter must remain independently testable");
 const stopEventContext = {};
 new vm.Script(
-  html.slice(stopEventStart, stopEventEnd).trim() +
+  html.slice(boardTimeFormatterStart, boardTimeFormatterEnd).trim() +
   "\nthis.stopTimeEvent = stopTimeEvent;"
 ).runInNewContext(stopEventContext);
 assert.deepEqual(
