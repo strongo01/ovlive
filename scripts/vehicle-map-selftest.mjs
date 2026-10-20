@@ -45,6 +45,14 @@ const selectExactLiveVehiclePosition = new vm.Script(
   LIVE_VEHICLE_MAX_AGE_SECONDS: 30
 });
 
+const isRailVehicleLeg = new vm.Script(
+  "(" + extractFunction("isRailVehicleLeg") + ")"
+).runInNewContext();
+
+const selectExactLiveNsVehiclePosition = new vm.Script(
+  "(" + extractFunction("selectExactLiveNsVehiclePosition") + ")"
+).runInNewContext({ LIVE_NDOV_VEHICLE_MAX_AGE_SECONDS: 30 });
+
 const decodeLivePolyline = new vm.Script(
   "(" + extractFunction("decodeLivePolyline") + ")"
 ).runInNewContext();
@@ -98,6 +106,78 @@ assert.equal(selectExactLiveVehiclePosition(expectedLeg, [
 ], nowMs), null, "a position without a date or trip start time must be rejected");
 console.log("PASS: wrong trips, wrong dates, wrong routes, stale points and invalid coordinates are rejected");
 
+// A train leg's start time in a Transitous ID can describe this segment, not
+// the original GTFS trip start. Keep an exact route/trip/date match despite that.
+const QBUZZ_STYLE_LONG_TRIP_POSITION = {
+  ...freshPosition,
+  startTime: "07:45:00",
+  vehicleId: "Qbuzz-8003"
+};
+const legStartingMidRoute = {
+  ...expectedLeg,
+  tripId: "20261019_09:20:00_nl-OpenOV_390123",
+  scheduledStartTime: "2026-10-19T09:20:00.000Z",
+  from: { scheduledDeparture: "2026-10-19T09:20:00.000Z" }
+};
+const longTripMatch = selectExactLiveVehiclePosition(
+  legStartingMidRoute, [QBUZZ_STYLE_LONG_TRIP_POSITION], nowMs
+);
+assert.ok(longTripMatch,
+  "an exact trip/route/service-date match must not be rejected only because the segment's departure differs from GTFS trip start_time");
+assert.equal(longTripMatch.vehicleId, "Qbuzz-8003");
+assert.equal(selectExactLiveVehiclePosition(legStartingMidRoute, [
+  { ...QBUZZ_STYLE_LONG_TRIP_POSITION, startDate: "20261018" }
+], nowMs), null, "the same trip from another service date must still be rejected");
+console.log("PASS: trip-segment start time can differ without weakening exact route/trip/date checks");
+
+// NS train positions come from the NS Virtual Train API, not OpenOV vehiclePositions.
+assert.equal(isRailVehicleLeg({ mode: "RAIL" }), true);
+assert.equal(isRailVehicleLeg({ mode: "TRAIN" }), true);
+assert.equal(isRailVehicleLeg({ mode: "BUS" }), false);
+const nsNow = Date.parse("2026-10-20T07:20:00.000Z");
+const nsTrainLeg = { mode: "RAIL", nsRealtime: { trainNumber: "6919" } };
+const nsTrainPosition = selectExactLiveNsVehiclePosition(nsTrainLeg, [{
+  trainNumber: "6919",
+  ritId: "6919",
+  latitude: 52.0177,
+  longitude: 5.1051,
+  source: "NS Virtual Train API",
+  sourceTimestampKnown: false,
+  observedAt: "2026-10-20T07:19:56.000Z",
+  fetchedAt: "2026-10-20T07:19:56.000Z"
+}], nsNow);
+assert.ok(nsTrainPosition, "a fresh exact NS train number and valid position should match");
+assert.equal(nsTrainPosition.trainNumber, "6919");
+assert.equal(nsTrainPosition.ageSeconds, 4);
+assert.equal(selectExactLiveNsVehiclePosition(nsTrainLeg, [{
+  trainNumber: "6920",
+  latitude: 52.0177,
+  longitude: 5.1051,
+  observedAt: "2026-10-20T07:19:56.000Z",
+  fetchedAt: "2026-10-20T07:19:56.000Z"
+}], nsNow), null, "a different NS train number must not match");
+assert.equal(selectExactLiveNsVehiclePosition(nsTrainLeg, [{
+  trainNumber: "6919",
+  latitude: 95,
+  longitude: 5.1051,
+  observedAt: "2026-10-20T07:19:56.000Z",
+  fetchedAt: "2026-10-20T07:19:56.000Z"
+}], nsNow), null, "invalid train coordinates must be rejected");
+assert.equal(selectExactLiveNsVehiclePosition(nsTrainLeg, [{
+  trainNumber: "6919",
+  latitude: 52.0177,
+  longitude: 5.1051,
+  observedAt: "2026-10-20T07:19:20.000Z",
+  fetchedAt: "2026-10-20T07:19:20.000Z"
+}], nsNow), null, "an NS position older than 30 seconds must be rejected");
+assert.ok(uiHasNsVehicleEndpointForTest(), "a dedicated NS vehicle endpoint must exist");
+console.log("PASS: exact fresh NS train position matching and Qbuzz-safe segment matching");
+
+// This simple local helper keeps the test independent of DOM globals.
+function uiHasNsVehicleEndpointForTest() {
+  return html.includes('/api/ns/vehicle-positions?') &&
+    html.includes('sourceTimestampKnown === false');
+}
 
 const rdOrigin = rdNewToWgs84(155000, 463000);
 assert.ok(rdOrigin);
@@ -165,6 +245,9 @@ assert.ok(html.includes('data-tracking-index="' + dollar + '{index}"'),
   "each expandable journey card must be wired to its tracking state");
 assert.ok(html.includes('kind: "vehiclePositions"'),
   "the live map must keep OpenOV vehicle positions as a fallback");
+assert.ok(html.includes('/api/ns/vehicle-positions?') &&
+  html.includes('features=trein') === false,
+  "the live map must call a separate backend endpoint for NS train positions");
 assert.ok(html.includes('selectExactLiveNdovVehiclePosition(leg, now)'),
   "the live map must first use fresh exact-matched NDOV KV6 positions");
 assert.ok(html.includes("LIVE_VEHICLE_MAX_AGE_SECONDS = 30"),
