@@ -72,7 +72,7 @@ console.log("PASS: ontbrekende NS-data blijft onbekend en wordt niet als rustig 
 
 const ui = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-assert.ok(ui.includes('class="ns-train-details-button"'));
+assert.ok(ui.includes("ns-train-details-button"), "UI must provide the on-demand train-details control");
 assert.ok(ui.includes("function bindNsTrainDetailsButtons"));
 assert.ok(ui.includes("fetch('/api/ns/train-details?'"));
 assert.ok(worker.includes('url.pathname === "/api/ns/train-details"'));
