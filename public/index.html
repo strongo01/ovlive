@@ -733,6 +733,54 @@ function parseLiveVehicleTripIdentity(leg) {
   };
 }
 
+function isRailVehicleLeg(leg) {
+  return new Set([
+    "RAIL", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL",
+    "HIGHSPEED_RAIL", "NIGHT_RAIL", "REGIONAL_FAST_RAIL", "SUBURBAN", "TRAIN"
+  ]).has(String(leg?.mode ?? "").toUpperCase());
+}
+
+function selectExactLiveNsVehiclePosition(leg, positions, nowMs = Date.now()) {
+  const expectedTrainNumber = String(leg?.nsRealtime?.trainNumber ?? "").trim();
+  if (!/^\d{1,6}$/.test(expectedTrainNumber)) return null;
+  const matches = [];
+
+  for (const position of positions ?? []) {
+    if (String(position?.trainNumber ?? position?.treinNummer ?? "").trim() !== expectedTrainNumber) {
+      continue;
+    }
+
+    // NS's current vehicle snapshot does not always supply a GPS-fix timestamp.
+    // Use the source timestamp when present; otherwise age the result from when
+    // the API feed was fetched and explicitly disclose that limitation in the popup.
+    const timestampValue = position?.sourceTimestampKnown === true
+      ? position?.observedAt
+      : (position?.fetchedAt || position?.observedAt);
+    const timestampMs = Date.parse(String(timestampValue ?? ""));
+    const latitude = Number(position?.latitude ?? position?.lat);
+    const longitude = Number(position?.longitude ?? position?.lng ?? position?.lon);
+    if (!Number.isFinite(timestampMs) ||
+        !Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+        latitude < 49 || latitude > 56 || longitude < 2 || longitude > 9.5) continue;
+
+    const rawAgeSeconds = (nowMs - timestampMs) / 1000;
+    if (rawAgeSeconds < -30 || rawAgeSeconds > LIVE_NDOV_VEHICLE_MAX_AGE_SECONDS) continue;
+    matches.push({
+      ...position,
+      source: position?.source || "NS Virtual Train API",
+      trainNumber: expectedTrainNumber,
+      vehicleId: position?.ritId || position?.vehicleId || expectedTrainNumber,
+      latitude,
+      longitude,
+      observedAt: new Date(timestampMs).toISOString(),
+      ageSeconds: Math.max(0, Math.round(rawAgeSeconds))
+    });
+  }
+
+  matches.sort((a, b) => a.ageSeconds - b.ageSeconds);
+  return matches[0] ?? null;
+}
+
 // Alleen een verse positie van exact dezelfde ritinstantie accepteren.
 // Een gelijk lijnnummer alleen is nooit voldoende.
 function selectExactLiveVehiclePosition(leg, positions, nowMs = Date.now()) {
@@ -767,7 +815,10 @@ function selectExactLiveVehiclePosition(leg, positions, nowMs = Date.now()) {
     const positionStartTime = normalizeLiveVehicleClock(position?.startTime);
     if (!positionDate && !positionStartTime) continue;
     if (positionDate && positionDate !== expected.startDate) continue;
-    if (positionStartTime && positionStartTime !== expected.startTime) continue;
+    // Transitous IDs may encode the departure time of this leg, while GTFS-RT
+    // start_time describes the original trip start. Exact trip + route + service
+    // date is stronger identity; compare start_time only when the source omits date.
+    if (!positionDate && positionStartTime && positionStartTime !== expected.startTime) continue;
     if (Number.isFinite(plannedMs) &&
         Math.abs(timestamp * 1000 - plannedMs) > 4 * 60 * 60 * 1000) continue;
 
@@ -872,7 +923,10 @@ function liveVehiclePopupContent(leg, position, confirmed, nowMs = Date.now()) {
     "<br>" + esc(String(ageSeconds)) + " sec oud" +
     (confirmed ? "" : " · niet opnieuw bevestigd") +
     (position?.eventType ? "<br>Voertuigstatus: " + esc(position.eventType) : "") +
-    (position?.vehicleId ? "<br>Voertuig: " + esc(position.vehicleId) : "");
+    (position?.vehicleId ? "<br>Voertuig: " + esc(position.vehicleId) : "") +
+    (position?.sourceTimestampKnown === false
+      ? "<br>Let op: NS levert geen GPS-brontijdstip; de ouderdom is gebaseerd op het ophaaltijdstip van de feed."
+      : "");
 }
 
 function decodeLivePolyline(points, precision = 6) {
@@ -1320,9 +1374,47 @@ async function refreshLiveJourneyPositions(index) {
       if (position) positionsByLegIndex.set(legIndex, { leg, position });
     }
 
-    // OpenOV is a fallback for legs without a fresh coordinate observation.
+    // NS train positions are a separate source from OpenOV's bus/tram/metro feed.
+    // Start the NS request before OpenOV to keep mixed-mode map refreshes concurrent.
+    const railNeeded = trackable.filter(leg =>
+      isRailVehicleLeg(leg) &&
+      /^\d{1,6}$/.test(String(leg?.nsRealtime?.trainNumber ?? "").trim()) &&
+      !positionsByLegIndex.has(data.legs.indexOf(leg))
+    );
+    let nsVehicleError = null;
+    const nsVehicleTask = (async () => {
+      if (!railNeeded.length) return;
+      const params = new URLSearchParams({
+        trainNumbers: [...new Set(railNeeded.map(leg =>
+          String(leg.nsRealtime.trainNumber).trim()
+        ))].join(",")
+      });
+      try {
+        const response = await fetch("/api/ns/vehicle-positions?" + params.toString(), {
+          cache: "no-store",
+          signal: AbortSignal.timeout(8000)
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload?.ok !== true || !Array.isArray(payload.positions)) {
+          throw new Error(payload?.error || ("HTTP " + response.status));
+        }
+        const checkedAt = Date.now();
+        for (const leg of railNeeded) {
+          const position = selectExactLiveNsVehiclePosition(leg, payload.positions, checkedAt);
+          const legIndex = data.legs.indexOf(leg);
+          if (position && legIndex >= 0) {
+            positionsByLegIndex.set(legIndex, { leg, position });
+          }
+        }
+      } catch (error) {
+        nsVehicleError = error instanceof Error ? error.message : String(error);
+      }
+    })();
+
+    // OpenOV supplies positions for buses, trams and metros, not NS trains.
     // Do not wait on it for legs that already have a verified current KV6 point.
     const openovNeeded = trackable.filter(leg =>
+      !isRailVehicleLeg(leg) &&
       parseLiveVehicleTripIdentity(leg) &&
       !positionsByLegIndex.has(data.legs.indexOf(leg))
     );
@@ -1361,6 +1453,8 @@ async function refreshLiveJourneyPositions(index) {
         openovError = error instanceof Error ? error.message : String(error);
       }
     }
+
+    await nsVehicleTask;
 
     const found = [...positionsByLegIndex.values()];
     const currentLegIndexes = new Set([...positionsByLegIndex.keys()]);
@@ -1413,11 +1507,16 @@ async function refreshLiveJourneyPositions(index) {
         sources.join(" + ") + " · " + newest.position.ageSeconds + " sec oud. Controle elke 10 sec.";
       if (openovStale) message += " De OpenOV-reservefeed is verouderd; oude punten zijn niet als live bevestigd.";
       if (openovError) message += " OpenOV-reservefeed tijdelijk onbereikbaar.";
+      if (nsVehicleError) message += " NS-treinposities: " + nsVehicleError;
+      if (found.some(item => item.position?.sourceTimestampKnown === false)) {
+        message += " De NS-feed levert geen GPS-tijdstempel; bij die positie is de ouderdom gebaseerd op het ophaaltijdstip.";
+      }
       setLiveJourneyStatus(index, message, "live");
     } else {
       let message = "Geen exact gematchte voertuigpositie jonger dan 30 sec. Laatst bekende locaties zijn vervaagd en niet als live bevestigd.";
       if (openovStale) message += " De OpenOV-reservefeed is verouderd.";
       if (openovError) message += " OpenOV: " + openovError;
+      if (nsVehicleError) message += " NS-treinposities: " + nsVehicleError;
       setLiveJourneyStatus(index, message, "warning");
     }
   } catch (error) {
