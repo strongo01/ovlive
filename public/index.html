@@ -242,6 +242,8 @@
     .live-map{height:285px;min-height:220px;width:100%;border-radius:11px;overflow:hidden;background:#20262e;border:1px solid var(--line)}
     .live-map-attribution{font-size:10px;color:var(--muted);text-align:right;margin:4px 0 12px}
     .live-map-attribution a{color:inherit}
+    .live-location-status{font-size:12px;color:var(--muted);margin:6px 0;min-height:1.2em}
+    .live-fleet-route-status{font-size:12px;color:var(--muted);margin-top:7px;line-height:1.45}
 
     .live-fleet-controls{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
     .live-fleet-mode{display:flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.025);font-size:12px;font-weight:700;cursor:pointer}
@@ -348,7 +350,7 @@
 
   <section class="panel" id="liveFleetMapPanel">
     <h2>Live kaart · voertuigen in Nederland</h2>
-    <p class="muted">Bekijk beschikbare liveposities van treinen, bussen, trams en metro's. Tik op een voertuig voor de beschikbare lijn-, rit- en brongegevens. Eerst maken we de voertuigpunten en verversing stabiel; de volledige gereden route tekenen we daarna.</p>
+    <p class="muted">Bekijk beschikbare liveposities van treinen, bussen, trams en metro's. Tik op een voertuig om de ritgegevens te zien en, als de bron een exacte rit-ID levert, de route als rode lijn te tonen. Met ‘Mijn locatie’ centreer je de kaart op jouw positie.</p>
     <div class="live-fleet-controls" role="group" aria-label="Vervoersmiddelen op de live kaart">
       <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="train" checked><span>🚆 Treinen</span></label>
       <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="bus" checked><span>🚌 Bussen</span></label>
@@ -359,10 +361,12 @@
     </div>
     <div class="live-fleet-actions">
       <button type="button" class="secondary" id="liveFleetRefresh">↻ Ververs nu</button>
+      <button type="button" class="secondary" id="liveFleetLocate">📍 Mijn locatie</button>
       <span class="muted">Automatisch verversen zolang deze tab actief is.</span>
     </div>
     <div id="liveFleetStatus" class="live-fleet-status" role="status" aria-live="polite">Live kaart wordt gestart…</div>
     <div id="liveFleetMap" class="live-map" role="application" aria-label="Live kaart met OV-voertuigen"></div>
+    <div id="liveFleetLocationStatus" class="live-location-status" role="status" aria-live="polite"></div>
     <div class="live-map-attribution">Kaart: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a></div>
   </section>
 
@@ -1307,6 +1311,53 @@ function trackingPositionIcon(L, mode) {
   });
 }
 
+function attachLiveMapMyLocation(map, mapState, button, statusElement) {
+  if (!map || !button || !statusElement) return;
+  button.addEventListener("click", () => {
+    if (!navigator.geolocation) {
+      statusElement.textContent = "Je browser biedt geen locatietoegang.";
+      return;
+    }
+    if (button.disabled) return;
+    button.disabled = true;
+    const originalText = button.textContent || "📍 Mijn locatie";
+    button.textContent = "📍 Locatie zoeken…";
+    statusElement.textContent = "Je locatie wordt opgevraagd. Je browser kan om toestemming vragen.";
+
+    navigator.geolocation.getCurrentPosition(position => {
+      const point = [Number(position.coords.latitude), Number(position.coords.longitude)];
+      if (!point.every(Number.isFinite) || Math.abs(point[0]) > 90 || Math.abs(point[1]) > 180) {
+        statusElement.textContent = "De browser gaf geen geldige locatie terug.";
+      } else {
+        if (mapState.locationMarker) {
+          mapState.locationMarker.setLatLng(point);
+        } else {
+          mapState.locationMarker = window.L.circleMarker(point, {
+            radius: 8,
+            color: "#ffffff",
+            weight: 3,
+            fillColor: "#2563eb",
+            fillOpacity: 1
+          }).addTo(map);
+          mapState.locationMarker.bindPopup("📍 Mijn locatie");
+        }
+        map.setView(point, 15, { animate: true });
+        statusElement.textContent = "📍 Locatie gevonden; de kaart is naar jouw locatie verplaatst.";
+      }
+      button.disabled = false;
+      button.textContent = originalText;
+    }, error => {
+      statusElement.textContent = error?.code === 1
+        ? "Locatietoegang geweigerd. Geef OVLive toestemming in je browserinstellingen."
+        : error?.code === 2
+          ? "Je locatie kon niet worden bepaald. Controleer je locatievoorzieningen."
+          : "Locatie ophalen duurde te lang. Probeer het opnieuw.";
+      button.disabled = false;
+      button.textContent = originalText;
+    }, { enableHighAccuracy: true, timeout: 12_000, maximumAge: 15_000 });
+  });
+}
+
 async function createLiveJourneyMap(index) {
   const data = window.__ovliveTrackingJourneys?.[index];
   const container = document.getElementById("journey-live-map-" + index);
@@ -1385,6 +1436,7 @@ async function createLiveJourneyMap(index) {
   const state = {
     index,
     map,
+    locationMarker: null,
     vehicleMarkers: new Map(),
     lastPositions: new Map(),
     interval: null,
@@ -1399,6 +1451,12 @@ async function createLiveJourneyMap(index) {
     didInitialFit: bounds.length > 0
   };
   liveJourneyMapStates.set(index, state);
+  attachLiveMapMyLocation(
+    map,
+    state,
+    document.getElementById("journey-live-locate-" + index),
+    document.getElementById("journey-live-location-status-" + index)
+  );
   // If the user has already started panning/zooming, a late shape response
   // must never yank the map away from them.
   map.on("mousedown touchstart wheel", () => { state.userInteracted = true; });
@@ -4498,6 +4556,10 @@ function renderJourneyCard(journey, index, walkSettings) {
         <div class="live-follow-heading"><h4>Live voertuig volgen</h4><span class="live-follow-caption">Echte voertuigposities · automatische controle elke 10 sec</span></div>
         <div id="journey-live-status-${index}" class="live-follow-status" role="status" aria-live="polite">Open deze reis om de livekaart te laden.</div>
         <div id="journey-live-map-${index}" class="live-map" aria-label="Kaart met route, haltes en laatst gemelde voertuigposities"></div>
+        <div class="live-fleet-actions">
+          <button type="button" class="secondary" id="journey-live-locate-${index}">📍 Mijn locatie</button>
+          <span id="journey-live-location-status-${index}" class="live-location-status" role="status" aria-live="polite"></span>
+        </div>
         <div class="live-map-attribution">Kaartgegevens © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a> · kaartweergave door Leaflet</div>
         <div class="live-follow-legend"><span><i class="live-legend-line"></i>Volledige lijnroute</span><span><i class="live-legend-segment"></i>Jouw traject</span><span><i class="live-legend-dot"></i>Live voertuigpositie</span></div>
         <h5 class="live-stop-heading">Haltes en verwachte tijden</h5>
