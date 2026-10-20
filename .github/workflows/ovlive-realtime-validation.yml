@@ -83,6 +83,9 @@ jobs:
       - name: NS realtime regression tests
         run: npm run ns:realtime-selftest
 
+      - name: NS train crowding and composition data tests
+        run: npm run ns:train-details-selftest
+
       - name: API rate-limit regression tests
         run: npm run api:rate-limit-selftest
 

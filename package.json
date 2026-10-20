@@ -26,7 +26,8 @@
     "ndov:autocollect-safety-selftest": "node scripts/ndov-autocollect-safety-selftest.mjs",
     "ndov:validate-assets": "node scripts/validate-realtime-assets.mjs",
     "ndov:prediction-selftest": "node scripts/ndov-prediction-selftest.mjs",
-    "ndov:metro-kv78-fallback-selftest": "node scripts/ndov-metro-kv78-fallback-selftest.mjs"
+    "ndov:metro-kv78-fallback-selftest": "node scripts/ndov-metro-kv78-fallback-selftest.mjs",
+    "ns:train-details-selftest": "node scripts/ns-train-details-selftest.mjs"
   },
   "dependencies": {
     "gtfs-realtime-bindings": "^1.1.1"

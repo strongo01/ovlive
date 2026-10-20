@@ -12,7 +12,7 @@
     h1{font-size:clamp(28px,5vw,42px);line-height:1.1;margin:0}p{color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px;margin:16px 0}
     label{display:block;font-size:13px;color:var(--muted);margin:0 0 6px}input,select,button{font:inherit;border-radius:10px;border:1px solid var(--line);padding:12px;background:#11161b;color:var(--text);width:100%}
     button{background:var(--accent);color:#241405;border:0;font-weight:750;cursor:pointer;margin-top:12px}
-    button.secondary{background:#303842;color:var(--text);margin:6px 0 8px}button.secondary[aria-pressed="true"]{background:rgba(251,146,60,.13);color:#fdba74;border:1px solid rgba(251,146,60,.45)}#tightTransferHelp{margin-top:0}.journey-tight-transfer-tag{display:inline-block;border-radius:7px;padding:3px 8px;font-size:11px;font-weight:750;color:#fcd34d;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3)}button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:var(--muted);font-size:13px}.status{padding:10px 12px;border-radius:10px;background:#222a32;margin:8px 0}.ok{color:var(--green)}.bad{color:var(--red)}
+    button.secondary{background:#303842;color:var(--text);margin:6px 0 8px}button.secondary[aria-pressed="true"]{background:rgba(251,146,60,.13);color:#fdba74;border:1px solid rgba(251,146,60,.45)}#tightTransferHelp{margin-top:0}.ns-train-details-button{margin:8px 0 0}.ns-train-details{margin-top:8px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.ns-train-details-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px;margin-bottom:8px}.ns-train-details-tile{padding:9px;border-radius:9px;background:rgba(127,127,127,.08);min-width:0}.ns-train-details-label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.ns-train-details-value{font-weight:750;overflow-wrap:anywhere}.ns-train-crowd-low{color:var(--green)}.ns-train-crowd-medium{color:var(--warning,#d97706)}.ns-train-crowd-high{color:var(--red)}.ns-train-facilities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.ns-train-facility{border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:12px}.ns-train-details-foot{font-size:11px;color:var(--muted);margin-top:8px}#tightTransferHelp{margin-top:0}.journey-tight-transfer-tag{display:inline-block;border-radius:7px;padding:3px 8px;font-size:11px;font-weight:750;color:#fcd34d;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3)}button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:var(--muted);font-size:13px}.status{padding:10px 12px;border-radius:10px;background:#222a32;margin:8px 0}.ok{color:var(--green)}.bad{color:var(--red)}
     .journey{border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}.leg{padding:10px 0;border-bottom:1px solid var(--line)}.leg:last-child{border-bottom:0}.pill{font-size:12px;border-radius:999px;background:#2a3038;padding:3px 8px;display:inline-block;margin-right:6px}.source{font-size:12px;color:var(--muted);overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#dbe4ee;font-size:12px}
 
     .journey-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:10px 0;color:var(--muted);font-size:14px}
@@ -1589,6 +1589,127 @@ function stopAllLiveJourneyTracking() {
   liveJourneyMapStates.clear();
 }
 
+function renderNsTrainDetails(data) {
+  if (!data || data.ok !== true) {
+    return '<div class="status rt-unknown">NS-treininformatie is momenteel niet beschikbaar.</div>';
+  }
+
+  const tiles = [];
+  const crowd = data.crowdForecast;
+  if (crowd && crowd.label) {
+    const crowdClass = crowd.level === 'high'
+      ? 'ns-train-crowd-high'
+      : crowd.level === 'medium'
+        ? 'ns-train-crowd-medium'
+        : crowd.level === 'low'
+          ? 'ns-train-crowd-low'
+          : '';
+    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Verwachte drukte</span><span class="ns-train-details-value ' + crowdClass + '">' + esc(crowd.label) + '</span></div>');
+  }
+  if (data.trainType) {
+    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Materieeltype</span><span class="ns-train-details-value">' + esc(data.trainType) + '</span></div>');
+  }
+  if (Number.isFinite(data.unitCount)) {
+    const unitLabel = data.unitLabel || 'treindelen';
+    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Samenstelling</span><span class="ns-train-details-value">' + esc(String(data.unitCount) + ' ' + unitLabel) + '</span></div>');
+  }
+  if (data.composition) {
+    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Treinsamenstelling</span><span class="ns-train-details-value">' + esc(data.composition) + '</span></div>');
+  }
+  if (Number.isFinite(data.lengthMeters)) {
+    const length = Number(data.lengthMeters).toLocaleString('nl-NL', { maximumFractionDigits: 1 });
+    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Treinlengte</span><span class="ns-train-details-value">' + esc(length + ' m') + '</span></div>');
+  }
+
+  let facilitiesHtml = '';
+  if (Array.isArray(data.facilities) && data.facilities.length) {
+    facilitiesHtml = '<div><strong>Voorzieningen die NS expliciet meldt</strong><div class="ns-train-facilities">' +
+      data.facilities.map(item => '<span class="ns-train-facility">' + (item.available ? '✓ ' : '✕ ') + esc(item.label) + (item.available ? '' : ' · niet aanwezig') + '</span>').join('') +
+      '</div></div>';
+  } else {
+    facilitiesHtml = '<div class="muted">De ontvangen ritgegevens bevestigen op dit moment geen specifieke voorzieningen.</div>';
+  }
+
+  const errorsHtml = Array.isArray(data.errors) && data.errors.length
+    ? '<div class="status rt-unknown"><strong>Niet alle informatie is beschikbaar.</strong><div class="rt-details">' + data.errors.map(esc).join(' · ') + '</div></div>'
+    : '';
+  const emptyHtml = !tiles.length
+    ? '<div class="status rt-unknown">' + esc(data.message || 'Voor deze rit zijn momenteel geen aanvullende samenstellingsgegevens beschikbaar.') + '</div>'
+    : '';
+  const checkedAt = data.checkedAt && Number.isFinite(Date.parse(data.checkedAt))
+    ? new Date(data.checkedAt).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : 'onbekend';
+
+  return '<div class="ns-train-details">' +
+    '<div class="ns-train-details-grid">' + tiles.join('') + '</div>' +
+    facilitiesHtml + errorsHtml + emptyHtml +
+    '<div class="ns-train-details-foot">Bron: NS Virtual Train API · opgehaald om ' + esc(checkedAt) +
+    '. Drukte is een prognose; ontbrekende gegevens betekenen niet dat een trein leeg of zonder voorzieningen is.</div></div>';
+}
+
+function bindNsTrainDetailsButtons(root = document) {
+  const buttons = root.querySelectorAll('.ns-train-details-button');
+  buttons.forEach(button => {
+    if (button.dataset.nsTrainDetailsBound === 'true') return;
+    button.dataset.nsTrainDetailsBound = 'true';
+    button.addEventListener('click', async () => {
+      const output = button.nextElementSibling;
+      if (!output) return;
+
+      if (button.dataset.loaded === 'true') {
+        output.hidden = !output.hidden;
+        button.setAttribute('aria-expanded', String(!output.hidden));
+        button.textContent = output.hidden
+          ? '🚆 Drukte & treininformatie bekijken'
+          : 'Verberg treininformatie';
+        return;
+      }
+      if (button.dataset.loading === 'true') return;
+
+      const trainNumber = String(button.dataset.trainNumber || '').trim();
+      const dateTime = String(button.dataset.dateTime || '').trim();
+      if (!/^\d{1,6}$/.test(trainNumber)) {
+        output.innerHTML = '<div class="status rt-unknown">Het treinnummer is niet betrouwbaar vastgesteld.</div>';
+        output.hidden = false;
+        return;
+      }
+
+      button.dataset.loading = 'true';
+      button.disabled = true;
+      button.textContent = 'Treininformatie ophalen…';
+      try {
+        const query = new URLSearchParams({ trainNumber });
+        if (dateTime && Number.isFinite(Date.parse(dateTime))) query.set('dateTime', dateTime);
+        const response = await fetch('/api/ns/train-details?' + query.toString(), {
+          method: 'GET',
+          cache: 'no-store',
+          signal: AbortSignal.timeout(12000)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data?.ok !== true) {
+          throw new Error(data?.error || ('HTTP ' + response.status));
+        }
+        output.innerHTML = renderNsTrainDetails(data);
+        output.hidden = false;
+        button.dataset.loaded = 'true';
+        button.setAttribute('aria-expanded', 'true');
+        button.textContent = 'Verberg treininformatie';
+      } catch (error) {
+        const message = error instanceof Error
+          ? error.message
+          : 'Onbekende fout bij het ophalen van NS-treininformatie.';
+        output.innerHTML = '<div class="status rt-unknown"><strong>Treininformatie niet beschikbaar.</strong><div class="rt-details">' + esc(message) + '</div><div class="rt-details">De gewone reis- en realtime-informatie blijft behouden.</div></div>';
+        output.hidden = false;
+        button.textContent = '↻ Opnieuw proberen';
+        button.setAttribute('aria-expanded', 'true');
+      } finally {
+        button.disabled = false;
+        delete button.dataset.loading;
+      }
+    });
+  });
+}
+
 function bindLiveJourneyCards() {
   document.querySelectorAll("details.journey-card[data-tracking-index]").forEach(card => {
     const index = Number(card.dataset.trackingIndex);
@@ -2710,6 +2831,20 @@ function renderLeg(leg, index = 0, journeyLegs = null) {
   const toPlatform = toTrack
     ? `<div class="muted">Aankomstperron/spoor: ${esc(toTrack)}</div>`
     : '';
+  const normalizedLegMode = String(leg?.mode ?? '').toUpperCase();
+  const isRailLeg = ['RAIL', 'REGIONAL_RAIL', 'LONG_DISTANCE', 'HIGH_SPEED_RAIL',
+    'HIGHSPEED_RAIL', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL', 'SUBURBAN', 'TRAIN']
+    .includes(normalizedLegMode);
+  const nsTrainNumber = String(leg?.nsRealtime?.trainNumber ?? '').trim();
+  const nsTrainDetailsHtml = isRailLeg && /^\\d{1,6}$/.test(nsTrainNumber)
+    ? `<div class="ns-train-details-wrap">
+        <button type="button" class="secondary ns-train-details-button"
+          data-train-number="${esc(nsTrainNumber)}"
+          data-date-time="${esc(fromSchedule || '')}"
+          aria-expanded="false">🚆 Drukte &amp; treininformatie bekijken</button>
+        <div class="ns-train-details-output" hidden aria-live="polite"></div>
+      </div>`
+    : '';
 
   return `<div class="leg" data-leg-index="${index}">
     <div class="leg-head">
@@ -2726,6 +2861,7 @@ function renderLeg(leg, index = 0, journeyLegs = null) {
       ${toPlatform}
     </div>
     ${realtimeHtml(displayLeg)}
+    ${nsTrainDetailsHtml}
     ${initialWalkWaitHtml}
   </div>`;
 }
@@ -3189,6 +3325,7 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       if (legContainer) {
         legContainer.innerHTML = legs.map((leg, legIndex) => renderLeg(leg, legIndex, legs)).join('') ||
           '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>';
+        bindNsTrainDetailsButtons(legContainer);
       }
 
       const trackingData = window.__ovliveTrackingJourneys?.[index];
@@ -3798,6 +3935,7 @@ q.set('pedestrianSpeed', '1.5');
       renderAlerts(data.openovAlerts || []) +
       `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted" id="realtime-plan-diagnostic-status">${esc(diagnosticPlanStatus)}</p><div id="realtime-feed-info">${feedInfo}</div>${renderRealtimeLegend()}</div></details>`;
     bindLiveJourneyCards();
+    bindNsTrainDetailsButtons();
     const journeySort = document.getElementById('journeySort');
     if (journeySort) {
       journeySort.addEventListener('change', () => sortJourneyCards(journeySort.value));

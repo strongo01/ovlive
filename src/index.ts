@@ -14,6 +14,7 @@ import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 import { applyNdovCancellationsToPlan, prepareNsTrainIdentities } from "./ndov-plan-cancellation.js";
 import { enrichNsTrainPlan } from "./ns-train-realtime";
 import { fetchNsLiveVehiclePositions } from "./ns-live-vehicle-positions";
+import { fetchNsTrainDetails } from "./ns-train-details";
 import { mergeTransitousAndMapFeatureCollections, transitousMatchesToFeatureCollection } from "./transitous-geocode.js";
 import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
@@ -2687,6 +2688,73 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   const rateLimitResponse = await enforcePublicApiRateLimit(request, env, headers);
   if (rateLimitResponse) return rateLimitResponse;
+
+  if (url.pathname === "/api/ns/train-details") {
+    const trainNumber = String(url.searchParams.get("trainNumber") ?? "").trim();
+    if (!/^\d{1,6}$/.test(trainNumber)) {
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        error: "Geef één exact NS-treinnummer op."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
+    const dateTime = String(url.searchParams.get("dateTime") ?? "").trim();
+    if (dateTime && (dateTime.length > 50 || !Number.isFinite(Date.parse(dateTime)))) {
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        error: "De geplande treintijd is ongeldig."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
+    if (!String(env.NS_API_SUBSCRIPTION_KEY ?? "").trim()) {
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        error: "De NS API-sleutel is niet ingesteld in de Worker."
+      }, 503, { ...headers, "cache-control": "no-store" });
+    }
+
+    try {
+      const info = await fetchNsTrainDetails(trainNumber, dateTime || null, env);
+      return json(info, 200, {
+        ...headers,
+        "cache-control": "private, max-age=15"
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const statusMatch = detail.match(/NS_TRAIN_DETAILS_HTTP_(\d{3})/);
+      const upstreamStatus = statusMatch ? Number(statusMatch[1]) : null;
+      const status = upstreamStatus === 429 ? 429 : 502;
+      const message =
+        detail === "NS_TRAIN_DETAILS_KEY_MISSING"
+          ? "De NS API-sleutel ontbreekt."
+          : detail === "NS_TRAIN_DETAILS_INVALID_TRAIN_NUMBER"
+            ? "Het NS-treinnummer is ongeldig."
+            : upstreamStatus === 401 || upstreamStatus === 403
+              ? "NS heeft deze treininfo-aanvraag geweigerd. Controleer of de bestaande sleutel toegang heeft tot de Virtual Train-detail-API."
+              : upstreamStatus === 429
+                ? "De NS Virtual Train API heeft de aanvraaglimiet bereikt."
+                : /timeout|timed out|abort/i.test(detail)
+                  ? "De NS Virtual Train API reageert niet op tijd."
+                  : "De aanvullende NS-treininformatie is tijdelijk niet beschikbaar.";
+
+      console.warn("[OVLIVE_NS_TRAIN_DETAILS]", JSON.stringify({
+        trainNumber,
+        upstreamStatus,
+        errorCode: detail.match(/NS_TRAIN_DETAILS_[A-Z_]+/)?.[0] ?? "unexpected_error"
+      }));
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        trainNumber,
+        error: message,
+        upstreamStatus,
+        checkedAt: new Date().toISOString()
+      }, status, { ...headers, "cache-control": "no-store" });
+    }
+  }
 
   if (url.pathname === "/api/ns/vehicle-positions") {
     const rawTrainNumbers = String(url.searchParams.get("trainNumbers") ?? "");
