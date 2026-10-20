@@ -287,16 +287,77 @@ def build_service_calendar(zf):
     }
 
 
+def build_route_metadata(archive: Path, out_dir: Path) -> dict:
+    """Build a small route_id -> public route name map without rebuilding trip shards."""
+    with zipfile.ZipFile(archive) as zf:
+        routes_member = find_member(zf, "routes.txt")
+        agency_rows = _optional_gtfs_rows(zf, "agency.txt")
+        agencies = {
+            str(row.get("agency_id") or "").strip(): str(row.get("agency_name") or "").strip()
+            for row in agency_rows
+            if str(row.get("agency_name") or "").strip()
+        }
+        single_agency_name = next(iter(agencies.values())) if len(agencies) == 1 else ""
+
+        routes = {}
+        with zf.open(routes_member) as raw:
+            reader = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig", newline=""))
+            required = {"route_id", "route_short_name", "route_long_name", "route_type"}
+            missing = required - set(reader.fieldnames or [])
+            if missing:
+                raise ValueError("routes.txt mist verplichte kolommen: " + ", ".join(sorted(missing)))
+            for row in reader:
+                route_id = str(row.get("route_id") or "").strip()
+                if not route_id:
+                    continue
+                agency_id = str(row.get("agency_id") or "").strip()
+                routes[route_id] = {
+                    "routeShortName": str(row.get("route_short_name") or "").strip(),
+                    "routeLongName": str(row.get("route_long_name") or "").strip(),
+                    "routeType": str(row.get("route_type") or "").strip(),
+                    "agencyId": agency_id,
+                    "agencyName": agencies.get(agency_id) or (single_agency_name if not agency_id else ""),
+                }
+
+    if not routes:
+        raise ValueError("routes.txt bevat geen bruikbare route-ID's.")
+
+    payload = {
+        "format": 1,
+        "source": archive.name,
+        "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "routeCount": len(routes),
+        "routes": routes,
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output = out_dir / "route-metadata.json"
+    output.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    return {"ok": True, "output": str(output), "routeCount": len(routes), "source": archive.name}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gtfs", type=Path, default=DEFAULT_GTFS, help="Pad naar gtfs-openov-nl.zip")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT, help="Outputmap binnen public/")
+    parser.add_argument(
+        "--route-metadata-only",
+        action="store_true",
+        help="Schrijf alleen route-metadata.json; laat bestaande grote route-shards ongemoeid",
+    )
     args = parser.parse_args()
     archive = args.gtfs.expanduser().resolve()
     out_dir = args.out_dir.expanduser().resolve()
     build_dir = out_dir.parent / ("." + out_dir.name + ".build")
     if not archive.is_file():
         print(f"FOUT: GTFS niet gevonden: {archive}", file=sys.stderr); return 2
+    if args.route_metadata_only:
+        try:
+            result = build_route_metadata(archive, out_dir)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        except Exception as exc:
+            print(f"FOUT: route-metadata niet opgebouwd: {exc}", file=sys.stderr)
+            return 3
     try:
         with zipfile.ZipFile(archive) as zf:
             trips_member = find_member(zf, "trips.txt")

@@ -43,7 +43,102 @@ const TRANSITOUS = "https://api.transitous.org/api/v6";
 function normalizeLineSearchTripId(value: unknown): string {
   // Transitous/OpenOV composite IDs can start with the service date and trip start time.
   // Those timestamp digits must not be mistaken for a requested line/trip number.
-  return String(value ?? "").trim().replace(/^\d{8}_\d{2}:\d{2}_/, "");
+  return String(value ?? "").trim().replace(/^\d{8}_\d{2}:\d{2}(?::\d{2})?_/, "");
+}
+
+interface OpenovRouteMetadataEntry {
+  routeShortName?: string;
+  routeLongName?: string;
+  routeType?: string | number;
+  agencyId?: string;
+  agencyName?: string;
+}
+
+let openovLineSearchRouteMetadataPromise: Promise<Record<string, OpenovRouteMetadataEntry>> | null = null;
+
+async function getOpenovLineSearchRouteMetadata(
+  env: Env
+): Promise<Record<string, OpenovRouteMetadataEntry>> {
+  if (!openovLineSearchRouteMetadataPromise) {
+    openovLineSearchRouteMetadataPromise = (async () => {
+      const response = await env.ASSETS.fetch(new Request(
+        "https://ovlive-assets.local/ndov-openov-route-crosswalk/route-metadata.json",
+        { method: "GET", headers: { accept: "application/json" } }
+      ));
+      if (!response.ok) {
+        throw new Error("OpenOV route-metadata gaf HTTP " + response.status + " terug.");
+      }
+      const payload = await response.json() as {
+        format?: number;
+        routes?: Record<string, OpenovRouteMetadataEntry>;
+      };
+      if (payload?.format !== 1 || !payload.routes ||
+          typeof payload.routes !== "object" || Array.isArray(payload.routes)) {
+        throw new Error("OpenOV route-metadata heeft een ongeldig formaat.");
+      }
+      return payload.routes;
+    })().catch((error) => {
+      openovLineSearchRouteMetadataPromise = null;
+      throw error;
+    });
+  }
+  return openovLineSearchRouteMetadataPromise;
+}
+
+function openovRouteMetadataForId(
+  routeMetadata: Record<string, OpenovRouteMetadataEntry>,
+  routeId: unknown
+): OpenovRouteMetadataEntry | null {
+  const key = String(routeId ?? "").trim().replace(/^nl-OpenOV_/i, "");
+  if (!key) return null;
+  return routeMetadata[key] ?? null;
+}
+
+function openovRouteMatchesLine(
+  routeMetadata: Record<string, OpenovRouteMetadataEntry>,
+  routeId: unknown,
+  query: unknown
+): boolean {
+  const wanted = String(query ?? "").trim().toLocaleLowerCase("nl-NL");
+  if (!wanted) return false;
+  const shortName = String(openovRouteMetadataForId(routeMetadata, routeId)?.routeShortName ?? "")
+    .trim().toLocaleLowerCase("nl-NL");
+  return shortName !== "" && shortName === wanted;
+}
+
+function lineSearchTripIdMatches(value: unknown, query: unknown): boolean {
+  const wanted = String(query ?? "").trim().toLocaleLowerCase("nl-NL");
+  if (!wanted) return false;
+  const normalized = normalizeLineSearchTripId(value).toLocaleLowerCase("nl-NL");
+  if (normalized === wanted) return true;
+  const openovSuffix = normalized.match(/^nl-openov_(.+)$/i)?.[1];
+  // A GTFS trip ID is opaque: only match its complete suffix, never an arbitrary
+  // substring that happens to contain digits from an unrelated trip identity.
+  return Boolean(openovSuffix && openovSuffix === wanted);
+}
+
+function transitousTripIdForVehiclePosition(
+  tripIdValue: unknown,
+  startDateValue: unknown,
+  startTimeValue: unknown
+): string {
+  const raw = String(tripIdValue ?? "").trim();
+  if (!raw) return "";
+  if (/^\d{8}_\d{2}:\d{2}(?::\d{2})?_nl-OpenOV_.+$/i.test(raw)) return raw;
+
+  const date = String(startDateValue ?? "").replace(/\D/g, "").slice(0, 8);
+  const time = String(startTimeValue ?? "").trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  const idSuffix = raw.match(/(?:^|_)nl-OpenOV_(.+)$/i)?.[1] ??
+    (/^\d+$/.test(raw) ? raw : "");
+  if (!/^\d{8}$/.test(date) || !time || !idSuffix) return raw;
+
+  const hours = Number(time[1]);
+  const minutes = Number(time[2]);
+  const seconds = Number(time[3] ?? "0");
+  if (hours > 99 || minutes > 59 || seconds > 59) return raw;
+  const clock = String(hours).padStart(2, "0") + ":" + time[2] +
+    (seconds > 0 ? ":" + String(seconds).padStart(2, "0") : "");
+  return date + "_" + clock + "_nl-OpenOV_" + idSuffix;
 }
 
 // NOMINATIM_LOCAL_GEOCODER_V1
@@ -3585,6 +3680,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // Search OpenOV's current vehicle feed for matching vehicle IDs and trip IDs,
     // so a search like "73" can also find vehicle 7305 or trip 7346 on another line.
     try {
+      let routeMetadata: Record<string, OpenovRouteMetadataEntry> = {};
+      try {
+        routeMetadata = await getOpenovLineSearchRouteMetadata(env);
+      } catch (error) {
+        warnings.push("OpenOV openbare lijnnamen niet beschikbaar: " +
+          (error instanceof Error ? error.message : "onbekende fout"));
+      }
+
       const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions");
       if (!feed || feed.ok !== true || !Array.isArray(feed.entities)) {
         throw new Error("De OpenOV-voertuigposities zijn momenteel niet beschikbaar.");
@@ -3593,11 +3696,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const matchedVehicles = (feed.entities as any[])
         .filter((entity: any) => {
           const vehicleId = String(entity?.vehicleId ?? "");
-          const tripIdForSearch = normalizeLineSearchTripId(entity?.tripId);
+          const lineMatches = openovRouteMatchesLine(routeMetadata, entity?.routeId, query);
+          const tripMatches = lineSearchTripIdMatches(entity?.tripId, query);
           return vehicleId.toLocaleLowerCase("nl-NL").includes(needle) ||
-            tripIdForSearch.toLocaleLowerCase("nl-NL").includes(needle);
+            lineMatches || tripMatches;
         })
-        .sort((a: any, b: any) => Number(b?.timestamp ?? 0) - Number(a?.timestamp ?? 0))
+        .sort((a: any, b: any) => {
+          const aLine = openovRouteMatchesLine(routeMetadata, a?.routeId, query) ? 0 : 1;
+          const bLine = openovRouteMatchesLine(routeMetadata, b?.routeId, query) ? 0 : 1;
+          return aLine - bLine || Number(b?.timestamp ?? 0) - Number(a?.timestamp ?? 0);
+        })
         .slice(0, Math.min(20, limit));
 
       // Keep upstream detail calls bounded; unknown IDs remain visible as unknown
@@ -3611,7 +3719,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           if (tripId) {
             try {
               const upstream = new URL(TRANSITOUS + "/trip");
-              upstream.searchParams.set("tripId", tripId);
+              upstream.searchParams.set("tripId", transitousTripIdForVehiclePosition(
+                tripId,
+                entity?.startDate,
+                entity?.startTime
+              ));
               upstream.searchParams.set("detailedLegs", "true");
               upstream.searchParams.set("joinInterlinedLegs", "false");
               upstream.searchParams.set("withScheduledSkippedStops", "true");
@@ -3637,7 +3749,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             leg?.routeShortName ?? leg?.tripShortName ?? leg?.displayName ?? ""
           ).trim();
           const routeId = String(entity?.routeId ?? "").trim();
-          const line = displayLine || (String(leg?.mode ?? "").toUpperCase() === "TRAIN" ? "Trein" : "Lijn onbekend");
+          const routeMetadataEntry = openovRouteMetadataForId(routeMetadata, routeId);
+          const publicRouteName = String(routeMetadataEntry?.routeShortName ?? "").trim();
+          const routeMatchesQuery = publicRouteName.toLocaleLowerCase("nl-NL") === needle ||
+            displayLine.toLocaleLowerCase("nl-NL") === needle;
+          const line = displayLine || publicRouteName ||
+            (String(leg?.mode ?? "").toUpperCase() === "TRAIN" ? "Trein" : "Lijn onbekend");
           const destination = String(
             leg?.headsign ?? leg?.tripTo?.name ?? leg?.tripTo?.displayName ??
             leg?.to?.name ?? leg?.destination?.name ?? itinerary?.to?.name ?? ""
@@ -3645,18 +3762,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           const suffixMatch = tripId.match(/_nl-OpenOV_(.+)$/i);
           const tripNumber = suffixMatch?.[1] ?? "";
           const vehicleMatched = vehicleId.toLocaleLowerCase("nl-NL").includes(needle);
-          const tripMatched = normalizeLineSearchTripId(tripId).toLocaleLowerCase("nl-NL").includes(needle);
-          const vehicleLabel = vehicleMatched
-            ? "Voertuig met nummer " + vehicleId
-            : tripMatched
-              ? "Rit-ID " + (tripNumber || tripId)
-              : vehicleId
-                ? "Voertuig met nummer " + vehicleId
-                : tripNumber
-                  ? "Voertuig met ritnummer " + tripNumber
-                  : tripId
-                    ? "Rit-ID " + tripId
-                    : "Identificatie niet beschikbaar";
+          const tripMatched = lineSearchTripIdMatches(tripId, query);
+          const vehicleLabel = vehicleId
+            ? (vehicleMatched ? "Voertuig met nummer " : "Voertuig-ID ") + vehicleId
+            : tripNumber
+              ? "Rit-ID " + tripNumber
+              : tripId
+                ? "Rit-ID " + tripId
+                : "Identificatie niet beschikbaar";
           const timestamp = Number(entity?.timestamp ?? 0);
           return {
             id: "openov|" + (tripId || "no-trip") + "|" + (vehicleId || "no-vehicle"),
@@ -3675,7 +3788,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             timestamp,
             source: "OpenOV GTFS-Realtime",
             tripId: tripId || null,
-            matchKind: vehicleMatched ? "vehicle" : "trip",
+            matchKind: routeMatchesQuery ? "line" : vehicleMatched ? "vehicle" : tripMatched ? "trip" : "vehicle",
             position: {
               latitude: typeof entity?.latitude === "number" ? entity.latitude : null,
               longitude: typeof entity?.longitude === "number" ? entity.longitude : null

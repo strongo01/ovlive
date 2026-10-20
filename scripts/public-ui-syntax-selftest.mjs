@@ -919,30 +919,91 @@ assert.ok(workerSource.includes('url.pathname === "/api/line-search"') &&
 assert.ok(workerSource.includes('const routeId = String(entity?.routeId ?? "").trim();') &&
   workerSource.includes("routeId: routeId || null") &&
   workerSource.includes('"Lijn onbekend"') &&
-  workerSource.includes('Rit-ID " + (tripNumber || tripId)'),
-  "OpenOV results must retain exact route/trip identifiers when schedule enrichment is unavailable");
+  workerSource.includes("openovRouteMetadataForId(routeMetadata, routeId)") &&
+  workerSource.includes("transitousTripIdForVehiclePosition("),
+  "OpenOV results must retain route IDs and use route metadata plus complete trip identity for enrichment");
 
 const normalizeTripIdStart = workerSource.indexOf("function normalizeLineSearchTripId(value: unknown): string {");
 const normalizeTripIdEnd = workerSource.indexOf("\n}", normalizeTripIdStart) + 2;
 assert.ok(normalizeTripIdStart >= 0 && normalizeTripIdEnd > normalizeTripIdStart,
   "the line-search trip-ID normalizer must remain independently testable");
-const normalizeTripIdContext = {};
 const normalizeTripIdSource = workerSource.slice(normalizeTripIdStart, normalizeTripIdEnd)
   .replace("function normalizeLineSearchTripId(value: unknown): string", "function normalizeLineSearchTripId(value)");
+const normalizedTripIdContext = {};
 new vm.Script(normalizeTripIdSource + "\nthis.normalizeLineSearchTripId = normalizeLineSearchTripId;")
-  .runInNewContext(normalizeTripIdContext);
-const timestampPrefixedTripId = normalizeTripIdContext.normalizeLineSearchTripId(
-  "20261020_15:11_nl-OpenOV_392830208"
+  .runInNewContext(normalizedTripIdContext);
+const timestampPrefixedTripId = normalizedTripIdContext.normalizeLineSearchTripId(
+  "20261020_15:11:00_nl-OpenOV_392830208"
 );
 assert.equal(timestampPrefixedTripId, "nl-OpenOV_392830208");
 assert.equal(timestampPrefixedTripId.toLocaleLowerCase("nl-NL").includes("11"), false,
   "searching for line 11 must not match the :11 in a date/time prefix");
-assert.equal(timestampPrefixedTripId.includes("392830208"), true,
-  "searching by the actual trip-number suffix must still match");
-assert.equal(normalizeTripIdContext.normalizeLineSearchTripId("nl-OpenOV_392830208"), "nl-OpenOV_392830208");
-assert.ok(workerSource.includes("const tripIdForSearch = normalizeLineSearchTripId(entity?.tripId);") &&
-  workerSource.includes('tripIdForSearch.toLocaleLowerCase("nl-NL").includes(needle)'),
-  "the actual OpenOV search filter must use the normalized trip ID");
+
+const routeHelperStart = workerSource.indexOf("function openovRouteMetadataForId(");
+const routeHelperEnd = workerSource.indexOf("\nfunction lineSearchTripIdMatches(", routeHelperStart);
+assert.ok(routeHelperStart >= 0 && routeHelperEnd > routeHelperStart,
+  "OpenOV public route metadata resolution must remain independently testable");
+const routeHelperSource = workerSource.slice(routeHelperStart, routeHelperEnd)
+  .replaceAll(": Record<string, OpenovRouteMetadataEntry>", "")
+  .replaceAll(": unknown", "")
+  .replaceAll(": OpenovRouteMetadataEntry | null", "")
+  .replaceAll(": boolean", "");
+const routeHelperContext = {};
+new vm.Script(routeHelperSource +
+  "\nthis.openovRouteMetadataForId = openovRouteMetadataForId;" +
+  "\nthis.openovRouteMatchesLine = openovRouteMatchesLine;")
+  .runInNewContext(routeHelperContext);
+const routeFixture = {
+  "160439": { routeShortName: "73", routeLongName: "Voorbeeldroute" },
+  "152327": { routeShortName: "11", routeLongName: "Andere route" }
+};
+assert.equal(routeHelperContext.openovRouteMetadataForId(routeFixture, "nl-OpenOV_160439").routeShortName, "73");
+assert.equal(routeHelperContext.openovRouteMatchesLine(routeFixture, "160439", "73"), true);
+assert.equal(routeHelperContext.openovRouteMatchesLine(routeFixture, "160439", "11"), false,
+  "a public line search must use the route's exact route_short_name rather than digits in a trip ID");
+
+const tripMatchStart = workerSource.indexOf("function lineSearchTripIdMatches(");
+const tripMatchEnd = workerSource.indexOf("\nfunction transitousTripIdForVehiclePosition(", tripMatchStart);
+assert.ok(tripMatchStart >= 0 && tripMatchEnd > tripMatchStart,
+  "OpenOV trip-ID matching must remain independently testable");
+const tripMatchSource = workerSource.slice(tripMatchStart, tripMatchEnd)
+  .replace("function lineSearchTripIdMatches(value: unknown, query: unknown): boolean",
+    "function lineSearchTripIdMatches(value, query)");
+const tripMatchContext = {};
+new vm.Script(normalizeTripIdSource + "\n" + tripMatchSource +
+  "\nthis.lineSearchTripIdMatches = lineSearchTripIdMatches;")
+  .runInNewContext(tripMatchContext);
+assert.equal(tripMatchContext.lineSearchTripIdMatches("nl-OpenOV_393018734", "73"), false,
+  "an arbitrary substring of an opaque OpenOV trip ID must not count as line 73");
+assert.equal(tripMatchContext.lineSearchTripIdMatches("nl-OpenOV_393018734", "393018734"), true,
+  "the complete trip-ID suffix must still be searchable");
+assert.equal(tripMatchContext.lineSearchTripIdMatches("20261020_15:11:00_nl-OpenOV_392830208", "11"), false);
+
+const transitousTripStart = workerSource.indexOf("function transitousTripIdForVehiclePosition(");
+const transitousTripEnd = workerSource.indexOf("\n\n// NOMINATIM_LOCAL_GEOCODER_V1", transitousTripStart);
+assert.ok(transitousTripStart >= 0 && transitousTripEnd > transitousTripStart,
+  "the Transitous trip-ID constructor must remain independently testable");
+const transitousTripSource = workerSource.slice(transitousTripStart, transitousTripEnd)
+  .replace("tripIdValue: unknown", "tripIdValue")
+  .replace("startDateValue: unknown", "startDateValue")
+  .replace("startTimeValue: unknown", "startTimeValue")
+  .replace("): string {", ") {");
+const transitousTripContext = {};
+new vm.Script(transitousTripSource +
+  "\nthis.transitousTripIdForVehiclePosition = transitousTripIdForVehiclePosition;")
+  .runInNewContext(transitousTripContext);
+assert.equal(
+  transitousTripContext.transitousTripIdForVehiclePosition("nl-OpenOV_393018734", "20261020", "15:01:00"),
+  "20261020_15:01_nl-OpenOV_393018734",
+  "Transitous trip detail lookup must include the vehicle position's start date and start time"
+);
+assert.equal(
+  transitousTripContext.transitousTripIdForVehiclePosition("20261020_15:01_nl-OpenOV_393018734", "20261020", "15:01:00"),
+  "20261020_15:01_nl-OpenOV_393018734"
+);
+assert.ok(workerSource.includes("const lineMatches = openovRouteMatchesLine(routeMetadata, entity?.routeId, query);") &&
+  workerSource.includes("const tripMatches = lineSearchTripIdMatches(entity?.tripId, query);"),
+  "the live OpenOV search filter must include exact public line matches and exact trip-ID matches");
 assert.ok(html.includes("function renderStopBoardMetadata(data)") &&
   html.includes("Halte-ID: ") &&
   html.includes("<th>Lijn</th><th>Richting</th><th>") &&

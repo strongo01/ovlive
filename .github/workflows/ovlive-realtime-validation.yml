@@ -92,6 +92,9 @@ jobs:
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
 
+      - name: OpenOV public route metadata builder regression tests
+        run: npm run ndov:openov-route-metadata-selftest
+
       - name: Transitous stop geocoding regression tests
         run: node scripts/transitous-geocode-selftest.mjs
 
