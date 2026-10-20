@@ -3090,7 +3090,8 @@ function loadCancelledTripSupplement(baseQuery, generation) {
   const cancellationQuery = new URLSearchParams(baseQuery);
   cancellationQuery.delete('deferRealtime');
   cancellationQuery.set('realtimeMode', 'OFF');
-  cancellationQuery.set('numItineraries', '12');
+  cancellationQuery.set('numItineraries', '16');
+  cancellationQuery.set('maxItineraries', '16');
   cancellationQuery.set('maxItineraries', '12');
 
   void (async () => {
@@ -3556,7 +3557,11 @@ function stopLivePlanRealtimeRefresh() {
   // Laat het in-flight slot bezet totdat de lopende aanvraag echt klaar is.
   // Zo kan een nieuw zoekresultaat nooit een tweede refresh naast de eerste starten.
   window.__ovliveRealtimeRefreshBaseline = null;
+  window.__ovliveRealtimeRefreshPlan = null;
+  window.__ovliveRealtimeRefreshBatches = [];
+  window.__ovliveRealtimeRefreshBatchIndex = 0;
   window.__ovliveDisplayedItineraryKeys = [];
+  window.__ovliveDisplayedItineraryEntries = [];
   window.__ovliveDeferredRealtimePlan = false;
 }
 
@@ -3597,8 +3602,11 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
         : [];
     const byKey = new Map(itineraries.map(journey => [itineraryRealtimeKey(journey), journey]));
     const displayedKeys = window.__ovliveDisplayedItineraryKeys ?? [];
-    for (let index = 0; index < displayedKeys.length; index += 1) {
-      const freshJourney = byKey.get(displayedKeys[index]);
+    const displayedEntries = window.__ovliveDisplayedItineraryEntries ??
+      displayedKeys.map((key, index) => ({ key, trackingIndex: index }));
+    for (const entry of displayedEntries) {
+      const index = entry.trackingIndex;
+      const freshJourney = byKey.get(entry.key);
       if (!freshJourney) continue;
       const sourceLegs = journeySourceLegs(freshJourney);
       const activeWalkSettings = window.__ovliveActiveWalkSettings ?? {
@@ -3639,9 +3647,16 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       .map(item => `${item.source}: ${item.error}`)
       .join(' · ');
     if (statusElement) {
+      const batches = window.__ovliveRealtimeRefreshBatches ?? [];
+      const batchCount = batches.length;
+      const fullCycleSeconds = Math.round(
+        batchCount * LIVE_PLAN_REALTIME_POLL_MS / 1000
+      );
       statusElement.textContent = refreshErrors.length
         ? `Livegegevens gedeeltelijk gecontroleerd om ${checkedAt} · ${refreshErrorSummary}`
-        : `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 10 sec.`;
+        : batchCount > 1
+          ? `Livegegevens gecontroleerd om ${checkedAt} · alle reizen in groepen gecontroleerd, volledige ronde circa ${fullCycleSeconds} sec.`
+          : `Livegegevens gecontroleerd om ${checkedAt} · automatisch elke 10 sec.`;
     }
     if (window.__ovliveDeferredRealtimePlan === true &&
         generation === livePlanRealtimeGeneration) {
@@ -3704,8 +3719,45 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       }
     }
   } finally {
+    const batches = window.__ovliveRealtimeRefreshBatches ?? [];
+    if (generation === livePlanRealtimeGeneration && batches.length > 1) {
+      const nextBatchIndex =
+        ((Number(window.__ovliveRealtimeRefreshBatchIndex) || 0) + 1) % batches.length;
+      setLivePlanRealtimeRefreshBatch(
+        window.__ovliveRealtimeRefreshPlan,
+        batches,
+        nextBatchIndex
+      );
+    }
     livePlanRealtimeInFlight = false;
   }
+}
+
+function chunkLivePlanRealtimeEntries(entries, maxPerBatch = 8) {
+  if (!Array.isArray(entries) || !Number.isInteger(maxPerBatch) || maxPerBatch < 1) {
+    return [];
+  }
+  const batches = [];
+  for (let index = 0; index < entries.length; index += maxPerBatch) {
+    batches.push(entries.slice(index, index + maxPerBatch));
+  }
+  return batches;
+}
+
+function setLivePlanRealtimeRefreshBatch(plan, batches, batchIndex) {
+  const batch = batches[batchIndex] ?? [];
+  window.__ovliveRealtimeRefreshBatchIndex = batchIndex;
+  window.__ovliveDisplayedItineraryEntries = batch.map(entry => ({
+    key: entry.key,
+    trackingIndex: entry.trackingIndex
+  }));
+  window.__ovliveDisplayedItineraryKeys = batch.map(entry => entry.key);
+  window.__ovliveRealtimeRefreshBaseline = batch.length
+    ? buildRealtimeRefreshBaseline({
+        ...plan,
+        itineraries: batch.map(entry => entry.journey)
+      })
+    : null;
 }
 
 function startLivePlanRealtimeRefresh(plan) {
@@ -3714,15 +3766,34 @@ function startLivePlanRealtimeRefresh(plan) {
   livePlanRealtimeRetryAfterMs = 0;
   window.__ovliveDeferredRealtimePlan = plan?.openovRealtimeMeta?.status === 'deferred';
   try {
-    window.__ovliveRealtimeRefreshBaseline = buildRealtimeRefreshBaseline(plan);
-    window.__ovliveDisplayedItineraryKeys = (Array.isArray(plan.itineraries)
+    const planItineraries = Array.isArray(plan.itineraries)
       ? plan.itineraries
       : Array.isArray(plan.journeys)
         ? plan.journeys
-        : [])
-      .filter(journey => !journeyChronologyIssue(journeySourceLegs(journey)))
-      .slice(0, 8)
-      .map(itineraryRealtimeKey);
+        : [];
+    const itineraryByKey = new Map(
+      planItineraries.map(journey => [itineraryRealtimeKey(journey), journey])
+    );
+    const entries = Array.from(document.querySelectorAll(
+      '.journey-card[data-itinerary-key][data-tracking-index]'
+    )).map(card => {
+      const key = String(card.getAttribute('data-itinerary-key') || '');
+      const trackingIndex = Number(card.getAttribute('data-tracking-index'));
+      return {
+        key,
+        trackingIndex,
+        journey: itineraryByKey.get(key)
+      };
+    }).filter(entry =>
+      entry.key &&
+      Number.isInteger(entry.trackingIndex) &&
+      entry.journey &&
+      !journeyChronologyIssue(journeySourceLegs(entry.journey))
+    );
+    const batches = chunkLivePlanRealtimeEntries(entries, 8);
+    window.__ovliveRealtimeRefreshPlan = plan;
+    window.__ovliveRealtimeRefreshBatches = batches;
+    setLivePlanRealtimeRefreshBatch(plan, batches, 0);
     const generation = livePlanRealtimeGeneration;
     if (livePlanRealtimeTimer) window.clearInterval(livePlanRealtimeTimer);
     livePlanRealtimeTimer = window.setInterval(() => {
@@ -3826,9 +3897,12 @@ $('planBtn').onclick = async () => {
     q.set('maxPostTransitTime', walkingLimit);
 q.set('pedestrianSpeed', '1.5');
 
-    // Vraag extra opties op zodat we onhaalbare loop-overstappen kunnen wegfilteren
-    // en een latere bus/tram kunnen tonen in plaats van de snelste onhaalbare route.
-    q.set('numItineraries', '10');
+    // Zoek een bredere dienstregelingperiode en vraag meer opties op. Zo worden
+    // ritten niet door een kleine standaardlijst gemist. De resultaten blijven
+    // begrensd; realtimecontrole wordt in kleine groepen uitgevoerd.
+    q.set('searchWindow', '7200');
+    q.set('numItineraries', '24');
+    q.set('maxItineraries', '24');
     q.set('deferRealtime', '1');
 
     let data = await api('/api/plan?' + q, {
@@ -3864,6 +3938,7 @@ q.set('pedestrianSpeed', '1.5');
         const railQuery = new URLSearchParams(q);
         railQuery.set('transitModes', modeEnumByChoice.train.join(','));
         railQuery.set('numItineraries', '3');
+        railQuery.set('maxItineraries', '3');
         const railData = await api('/api/plan?' + railQuery, {
           // Train-only results are supplementary; do not hold the main results for too long.
           signal: AbortSignal.timeout(12000)
@@ -3914,6 +3989,7 @@ q.set('pedestrianSpeed', '1.5');
       tightQuery.set('additionalTransferTime', '0');
       tightQuery.set('transferTimeFactor', '1');
       tightQuery.set('numItineraries', '8');
+      tightQuery.set('maxItineraries', '8');
 
       try {
         const tightData = await api('/api/plan?' + tightQuery, {
@@ -4055,8 +4131,8 @@ q.set('pedestrianSpeed', '1.5');
       .filter(item => !item.chronologyIssue && !item.walkingTransferIssue);
 
     // Alleen routes waarvan de haltes in de beschikbare tijd bereikbaar zijn
-    // worden getoond. Transitous is gevraagd om extra opties (10 i.p.v. 5);
-    // daardoor kan een latere tram de plaats innemen van een onhaalbare aansluiting.
+    // worden getoond. Transitous is gevraagd om meer opties over een periode
+    // van twee uur, zodat onhaalbare routes niet de hele lijst verdringen.
     const itineraryStatus = `${validItineraryCandidates.length} haalbare reisopties gevonden` +
       (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
       (invalidWalkingTransferCount ? ` · ${invalidWalkingTransferCount} onhaalbare loop-overstap(pen) verborgen` : '') +
@@ -4102,7 +4178,7 @@ q.set('pedestrianSpeed', '1.5');
       : '';
 
     window.__ovliveTrackingJourneys = [];
-    const cards = validItineraryCandidates.slice(0, 8).map(({ journey, sourceLegs }, index) => {
+    const cards = validItineraryCandidates.map(({ journey, sourceLegs }, index) => {
 
       const { legs, adjustedJourneyStart } = prepareJourneyLegsForDisplay(
         journey,
