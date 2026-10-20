@@ -136,6 +136,19 @@
     .stop-time-stops li:last-child{border-bottom:0}
     .stop-time-stops time{font-variant-numeric:tabular-nums;color:var(--muted)}
     .stop-time-empty{border:1px dashed var(--line);border-radius:10px;padding:14px;color:var(--muted)}
+    .stop-time-table-wrap{overflow-x:auto;margin-top:10px}
+    .stop-time-table{width:100%;border-collapse:collapse;min-width:430px}
+    .stop-time-table th,.stop-time-table td{text-align:left;vertical-align:top;padding:11px 9px;border-bottom:1px solid var(--line)}
+    .stop-time-table th{font-size:12px;font-weight:750;color:var(--muted)}
+    .stop-time-table td:first-child{font-weight:800;white-space:nowrap}
+    .stop-time-table td:last-child{font-variant-numeric:tabular-nums;white-space:nowrap}
+    .stop-time-table small{display:block;color:var(--muted);font-size:11px;font-weight:400;white-space:normal;margin-top:3px}
+    .stop-time-table .stop-time-status{margin-top:4px}
+    .line-search-list{display:flex;flex-direction:column;gap:9px;margin-top:12px}
+    .line-search-card{border:1px solid var(--line);border-radius:12px;padding:13px;background:rgba(255,255,255,.02)}
+    .line-search-primary{font-weight:850;font-size:16px}
+    .line-search-secondary{margin-top:4px;color:var(--accent);font-weight:750;font-size:13px}
+    .line-search-meta{margin-top:5px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
     .divider{height:1px;background:var(--line);margin:18px 0}
     @media(max-width:600px){.stop-time-card{padding:10px}.stop-time-time{font-size:20px}}
 
@@ -328,21 +341,24 @@
     </div>
     <button type="button" id="boardSearch">Toon haltevertrektijden</button>
     <div id="boardStatus" class="muted" role="status" aria-live="polite"></div>
+    <div id="boardStopMeta" class="muted"></div>
     <div id="boardResults"></div>
-    <div class="divider"></div>
-    <h3>Zoek een lijn en bekijk waar die naartoe gaat</h3>
-    <p class="muted">Kies hierboven een halte en vul hieronder een lijnnummer in, bijvoorbeeld 5 of 28. OVLive zoekt de komende ritten van die lijn bij die halte en toont de bestemming en alle volgende haltes die de dienstregeling beschikbaar stelt. Zo voorkom je verwarring tussen gelijk genummerde lijnen in verschillende steden.</p>
+  </section>
+
+  <section class="panel" id="lineSearchPanel">
+    <h2>Zoek een lijn of voertuig</h2>
+    <p class="muted">Deze zoekfunctie staat los van een halte. Vul bijvoorbeeld 73 in om voertuigen op lijn 73 te vinden én voertuigen waarbij 73 voorkomt in het voertuignummer of ritnummer. Per resultaat zie je de lijn, bestemming en het beschikbare voertuig- of ritnummer.</p>
     <div class="grid">
       <div>
-        <label for="lineNumber">Lijnnummer</label>
-        <input id="lineNumber" autocomplete="off" maxlength="30" placeholder="Bijvoorbeeld 5">
+        <label for="lineNumber">Lijnnummer, voertuignummer of ritnummer</label>
+        <input id="lineNumber" autocomplete="off" maxlength="24" placeholder="Bijvoorbeeld 73">
       </div>
       <div>
-        <label for="lineLimit">Aantal ritten doorzoeken</label>
-        <select id="lineLimit"><option value="20">20 ritten</option><option value="50" selected>50 ritten</option></select>
+        <label for="lineLimit">Maximaal aantal resultaten</label>
+        <select id="lineLimit"><option value="10">10 resultaten</option><option value="20">20 resultaten</option><option value="30" selected>30 resultaten</option><option value="50">50 resultaten</option></select>
       </div>
     </div>
-    <button type="button" id="lineSearch">Zoek lijn en bekijk route</button>
+    <button type="button" id="lineSearch">Zoek voertuigen</button>
     <div id="lineStatus" class="muted" role="status" aria-live="polite"></div>
     <div id="lineResults"></div>
   </section>
