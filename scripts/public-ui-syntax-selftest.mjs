@@ -906,13 +906,13 @@ assert.ok(workerSource.includes('const booleanParams = ["arriveBy", "direction",
   "the Worker must safely forward time, direction, route-stop and paging parameters to Transitous");
 
 const stopEventStart = html.indexOf("function stopTimeEvent(row, direction) {");
-const stopEventEnd = html.indexOf("\\nfunction stopTimeDestination(", stopEventStart);
+const stopEventEnd = html.indexOf("\nfunction stopTimeDestination(", stopEventStart);
 assert.ok(stopEventStart >= 0 && stopEventEnd > stopEventStart,
   "the stop-time event formatter must remain independently testable");
 const stopEventContext = {};
 new vm.Script(
   html.slice(stopEventStart, stopEventEnd).trim() +
-  "\\nthis.stopTimeEvent = stopTimeEvent;"
+  "\nthis.stopTimeEvent = stopTimeEvent;"
 ).runInNewContext(stopEventContext);
 assert.deepEqual(
   JSON.parse(JSON.stringify(stopEventContext.stopTimeEvent({
@@ -932,13 +932,13 @@ assert.deepEqual(
 );
 
 const lineMatchStart = html.indexOf("function stopTimeMatchesLine(row, query) {");
-const lineMatchEnd = html.indexOf("\\nfunction renderStopSequence(", lineMatchStart);
+const lineMatchEnd = html.indexOf("\nfunction renderStopSequence(", lineMatchStart);
 assert.ok(lineMatchStart >= 0 && lineMatchEnd > lineMatchStart,
   "line matching must remain independently testable");
 const lineMatchContext = {};
 new vm.Script(
   html.slice(lineMatchStart, lineMatchEnd).trim() +
-  "\\nthis.stopTimeMatchesLine = stopTimeMatchesLine;"
+  "\nthis.stopTimeMatchesLine = stopTimeMatchesLine;"
 ).runInNewContext(lineMatchContext);
 assert.equal(lineMatchContext.stopTimeMatchesLine({ routeShortName: "5", displayName: "Bus 5" }, "5"), true);
 assert.equal(lineMatchContext.stopTimeMatchesLine({ routeShortName: "11", displayName: "Bus 11" }, "5"), false);
