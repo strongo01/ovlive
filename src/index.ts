@@ -129,13 +129,6 @@ function openovAgencyNameForLine(
   return uniqueNames.length === 1 ? uniqueNames[0] : "";
 }
 
-function lineSearchDelaySeconds(expectedValue: unknown, targetValue: unknown): number | null {
-  const expected = Date.parse(String(expectedValue ?? ""));
-  const target = Date.parse(String(targetValue ?? ""));
-  if (!Number.isFinite(expected) || !Number.isFinite(target)) return null;
-  return Math.round((expected - target) / 1000);
-}
-
 function normalizeTransitousLineSearchStops(legValue: unknown): Array<Record<string, any>> {
   if (!legValue || typeof legValue !== "object" || Array.isArray(legValue)) return [];
   const leg = legValue as Record<string, any>;
@@ -197,6 +190,13 @@ function normalizeTransitousLineSearchStops(legValue: unknown): Array<Record<str
       isAtStop: false
     };
   }).filter((stop) => stop.name);
+}
+
+function lineSearchDelaySeconds(expectedValue: unknown, targetValue: unknown): number | null {
+  const expected = Date.parse(String(expectedValue ?? ""));
+  const target = Date.parse(String(targetValue ?? ""));
+  if (!Number.isFinite(expected) || !Number.isFinite(target)) return null;
+  return Math.round((expected - target) / 1000);
 }
 
 function normalizeOvapiJourneyStops(
