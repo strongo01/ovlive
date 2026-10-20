@@ -1146,7 +1146,8 @@ new vm.Script(
   html.slice(lineCardStart, lineCardEnd).trim() +
   "\nthis.renderLineSearchCard = renderLineSearchCard;" +
   "\nthis.lineSearchStopEta = lineSearchStopEta;" +
-  "\nthis.lineSearchClock = lineSearchClock;"
+  "\nthis.lineSearchClock = lineSearchClock;" +
+  "\nthis.lineSearchDelayText = lineSearchDelayText;"
 ).runInNewContext(lineCardContext);
 const fallbackCard = lineCardContext.renderLineSearchCard({
   line: "Lijn onbekend", destination: "Bestemming onbekend",
@@ -1194,6 +1195,8 @@ assert.equal(
   "15:58:31",
   "vehicle timestamps must be displayed in the Netherlands time zone"
 );
+assert.equal(lineCardContext.lineSearchDelayText(null), "",
+  "missing expected-vs-target delay data must stay unknown instead of showing Op tijd");
 assert.equal(
   lineCardContext.lineSearchStopEta({ expectedArrival: "2026-10-20T16:01:00" }),
   "2:26 min",
