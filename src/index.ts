@@ -106,6 +106,36 @@ function openovRouteMatchesLine(
   return shortName !== "" && shortName === wanted;
 }
 
+function openovAgencyNameForLine(
+  routeMetadata: Record<string, OpenovRouteMetadataEntry>,
+  line: unknown,
+  operatorCode: unknown
+): string {
+  const wantedLine = String(line ?? "").trim().toLocaleLowerCase("nl-NL");
+  if (!wantedLine) return "";
+  const wantedOperator = String(operatorCode ?? "").trim().toLocaleLowerCase("nl-NL");
+  const matches = Object.values(routeMetadata).filter((route) =>
+    String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL") === wantedLine
+  );
+  const operatorMatches = wantedOperator
+    ? matches.filter((route) =>
+        String(route?.agencyId ?? "").trim().toLocaleLowerCase("nl-NL") === wantedOperator
+      )
+    : [];
+  const named = (operatorMatches.length ? operatorMatches : matches)
+    .map((route) => String(route?.agencyName ?? "").trim())
+    .filter(Boolean);
+  const uniqueNames = [...new Set(named)];
+  return uniqueNames.length === 1 ? uniqueNames[0] : "";
+}
+
+function lineSearchDelaySeconds(expectedValue: unknown, targetValue: unknown): number | null {
+  const expected = Date.parse(String(expectedValue ?? ""));
+  const target = Date.parse(String(targetValue ?? ""));
+  if (!Number.isFinite(expected) || !Number.isFinite(target)) return null;
+  return Math.round((expected - target) / 1000);
+}
+
 function lineSearchTripIdMatches(value: unknown, query: unknown): boolean {
   const wanted = String(query ?? "").trim().toLocaleLowerCase("nl-NL");
   if (!wanted) return false;
@@ -3564,6 +3594,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const warnings: string[] = [];
     let ovapiAvailable = false;
     let openovAvailable = false;
+    let ovapiLineResultsFound = false;
+    let routeMetadata: Record<string, OpenovRouteMetadataEntry> = {};
+    try {
+      routeMetadata = await getOpenovLineSearchRouteMetadata(env);
+    } catch (error) {
+      warnings.push("OpenOV openbare lijnnamen niet beschikbaar: " +
+        (error instanceof Error ? error.message : "onbekende fout"));
+    }
 
     const addResult = (row: Record<string, any>) => {
       const line = String(row.line ?? "").trim();
@@ -3582,6 +3620,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         results.set(key, row);
       }
     };
+
+    const ovapiCandidates: Array<{
+      unique: string;
+      journeyKey: string;
+      row: Record<string, any>;
+    }> = [];
 
     // OVAPI provides public line names/destinations and live journey passes.
     // Ask the API for details only for the exact public line number entered.
@@ -3636,28 +3680,54 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               const vehicleNumber = String(
                 actual.VehicleNumber ?? actual.VehicleNumberOnTrip ?? actual.VehicleCode ?? actual.VehicleId ?? ""
               ).trim();
+              const operatorCode = String(actual.OperatorCode ?? meta.OperatorCode ?? actual.DataOwnerCode ?? meta.DataOwnerCode ?? "").trim();
+              const operatorName = openovAgencyNameForLine(routeMetadata, line, operatorCode) ||
+                String(actual.OperatorName ?? meta.OperatorName ?? operatorCode ?? "").trim();
+              const mode = String(actual.TransportType ?? meta.TransportType ?? "").trim();
+              const expectedTime = String(
+                actual.ExpectedDepartureTime ?? actual.ExpectedArrivalTime ??
+                actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
+              ).trim();
+              const targetTime = String(
+                actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
+              ).trim();
               const tripId = String(actualId ?? "");
+              const currentStopCode = String(actual.UserStopCode ?? actual.TimingPointCode ?? "").trim();
+              const permalink = operatorCode && vehicleNumber &&
+                /^[A-Za-z0-9_-]+$/.test(operatorCode) && /^[A-Za-z0-9_-]+$/.test(vehicleNumber)
+                  ? "https://ovzoeker.nl/voertuig/" + operatorCode + ":" + vehicleNumber
+                  : null;
               const row: Record<string, any> = {
                 id: "ovapi|" + routeKey + "|" + (actual.OperationDate ?? "") + "|" + (journeyNumber || actualId),
                 line,
+                lineName: String(actual.LineName ?? meta.LineName ?? "").trim() || null,
                 destination: destination || "Bestemming onbekend",
-                mode: String(actual.TransportType ?? meta.TransportType ?? ""),
+                operatorCode: operatorCode || null,
+                operatorName: operatorName || null,
+                mode,
                 vehicleNumber: vehicleNumber || null,
                 tripNumber: journeyNumber || null,
+                blockCode: String(actual.BlockCode ?? "").trim() || null,
+                numberOfCoaches: actual.NumberOfCoaches ?? null,
                 vehicleLabel: vehicleNumber
-                  ? "Voertuig met nummer " + vehicleNumber
+                  ? (mode === "BUS" ? "Bus " : mode === "TRAM" ? "Tram " : mode === "METRO" ? "Metro " : mode === "TRAIN" ? "Trein " : "Voertuig ") + vehicleNumber
                   : journeyNumber
                     ? "Voertuig met ritnummer " + journeyNumber
                     : "Voertuig",
                 stop: String(actual.TimingPointName ?? ""),
                 stopTown: String(actual.TimingPointTown ?? ""),
+                currentStopCode,
                 status: String(actual.TripStopStatus ?? ""),
-                expectedTime: String(actual.ExpectedDepartureTime ?? actual.ExpectedArrivalTime ?? actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""),
+                expectedTime,
+                targetTime,
+                delaySeconds: lineSearchDelaySeconds(expectedTime, targetTime),
                 updatedAt: updatedAt || null,
                 updateAgeSeconds: ageSeconds,
                 timestamp: Number.isFinite(updatedAtMs) ? Math.floor(updatedAtMs / 1000) : 0,
                 source: "OVAPI",
                 tripId,
+                permalink,
+                stops: [],
                 matchKind: "line"
               };
               const unique = [
@@ -3667,12 +3737,92 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 actual.DataOwnerCode ?? meta.DataOwnerCode ?? "",
                 journeyNumber || actualId
               ].join("|");
-              const existing = results.get(unique);
-              if (!existing || row.timestamp > Number(existing.timestamp ?? 0)) results.set(unique, row);
+              ovapiCandidates.push({ unique, journeyKey: tripId, row });
             }
           }
         }
       }
+
+      // OVAPI's journey endpoint returns the remaining stop sequence. Fetch all
+      // selected journeys in one comma-separated request instead of one request per bus.
+      const deduplicatedCandidates = new Map<string, typeof ovapiCandidates[number]>();
+      for (const candidate of ovapiCandidates) {
+        const existing = deduplicatedCandidates.get(candidate.unique);
+        if (!existing || Number(candidate.row.timestamp ?? 0) > Number(existing.row.timestamp ?? 0)) {
+          deduplicatedCandidates.set(candidate.unique, candidate);
+        }
+      }
+      const selectedCandidates = [...deduplicatedCandidates.values()]
+        .sort((a, b) => Number(b.row.timestamp ?? 0) - Number(a.row.timestamp ?? 0))
+        .slice(0, limit);
+      const journeyKeys = [...new Set(selectedCandidates
+        .map((candidate) => candidate.journeyKey)
+        .filter((key) => /^[A-Za-z0-9_-]+$/.test(key)))];
+      const journeysByKey: Record<string, any> = {};
+      if (journeyKeys.length) {
+        try {
+          const journeysResponse = await fetch("http://v0.ovapi.nl/journey/" + journeyKeys.join(","), {
+            headers: {
+              "accept": "application/json",
+              "user-agent": \`\${env.APP_NAME}/\${env.APP_VERSION} (\${env.APP_CONTACT})\`
+            },
+            signal: AbortSignal.timeout(8000),
+            cf: { cacheEverything: true, cacheTtl: 10 }
+          });
+          if (!journeysResponse.ok) {
+            throw new Error("OVAPI gaf HTTP " + journeysResponse.status + " terug voor ritdetails.");
+          }
+          Object.assign(journeysByKey, await journeysResponse.json() as Record<string, any>);
+        } catch (error) {
+          warnings.push("OVAPI-ritdetails tijdelijk niet beschikbaar: " +
+            (error instanceof Error ? error.message : "onbekende fout"));
+        }
+      }
+
+      for (const candidate of selectedCandidates) {
+        const journey = journeysByKey[candidate.journeyKey];
+        const rawStops = journey?.Stops && typeof journey.Stops === "object" ? journey.Stops : {};
+        const orderedStops = Object.entries(rawStops)
+          .filter(([, stop]) => stop && typeof stop === "object" && !Array.isArray(stop))
+          .map(([key, stop]) => ({ key, ...(stop as Record<string, any>) }))
+          .sort((a, b) =>
+            Number(a.UserStopOrderNumber ?? a.StopSequence ?? a.key) -
+            Number(b.UserStopOrderNumber ?? b.StopSequence ?? b.key)
+          );
+        const currentStopCode = String(candidate.row.currentStopCode ?? "").trim().toLocaleLowerCase("nl-NL");
+        let currentIndex = currentStopCode
+          ? orderedStops.findIndex((stop) => [
+              stop.TimingPointCode, stop.UserStopCode, stop.StopId
+            ].some((value) => String(value ?? "").trim().toLocaleLowerCase("nl-NL") === currentStopCode))
+          : -1;
+        const remainingStops = currentIndex >= 0
+          ? orderedStops.slice(currentIndex)
+          : orderedStops.filter((stop) => !["PASSED", "CANCEL", "CANCELLED"].includes(
+              String(stop.TripStopStatus ?? "").trim().toUpperCase()
+            ));
+        candidate.row.stops = remainingStops.map((stop, index) => ({
+          name: String(stop.TimingPointName ?? stop.StopName ?? stop.Name ?? "").trim(),
+          userStopCode: String(stop.UserStopCode ?? stop.TimingPointCode ?? stop.StopId ?? "").trim(),
+          timingPointCode: String(stop.TimingPointCode ?? "").trim(),
+          expectedArrival: String(stop.ExpectedArrivalTime ?? "").trim() || null,
+          targetArrival: String(stop.TargetArrivalTime ?? "").trim() || null,
+          expectedDeparture: String(stop.ExpectedDepartureTime ?? "").trim() || null,
+          targetDeparture: String(stop.TargetDepartureTime ?? "").trim() || null,
+          status: String(stop.TripStopStatus ?? "").trim(),
+          stopOrder: Number(stop.UserStopOrderNumber ?? stop.StopSequence ?? index + 1),
+          isCurrent: currentIndex >= 0 && index === 0
+        })).filter((stop) => stop.name);
+        if (candidate.row.numberOfCoaches == null) {
+          const coachStop = orderedStops.find((stop) => stop.NumberOfCoaches != null);
+          if (coachStop) candidate.row.numberOfCoaches = coachStop.NumberOfCoaches;
+        }
+        candidate.row.stopCount = candidate.row.stops.length;
+        const existing = results.get(candidate.unique);
+        if (!existing || Number(candidate.row.timestamp ?? 0) > Number(existing.timestamp ?? 0)) {
+          results.set(candidate.unique, candidate.row);
+        }
+      }
+      ovapiLineResultsFound = selectedCandidates.length > 0;
     } catch (error) {
       warnings.push("OVAPI-lijngegevens niet beschikbaar: " + (error instanceof Error ? error.message : "onbekende fout"));
     }
@@ -3680,14 +3830,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // Search OpenOV's current vehicle feed for matching vehicle IDs and trip IDs,
     // so a search like "73" can also find vehicle 7305 or trip 7346 on another line.
     try {
-      let routeMetadata: Record<string, OpenovRouteMetadataEntry> = {};
-      try {
-        routeMetadata = await getOpenovLineSearchRouteMetadata(env);
-      } catch (error) {
-        warnings.push("OpenOV openbare lijnnamen niet beschikbaar: " +
-          (error instanceof Error ? error.message : "onbekende fout"));
-      }
-
+      // When OVAPI returned authoritative live journeys for the exact public line,
+      // those rows already have better stop-by-stop data. Avoid duplicate Transitous
+      // enrichment calls; keep OpenOV as a fallback if OVAPI had no live rows.
+      if (ovapiLineResultsFound) {
+        openovAvailable = false;
+      } else {
       const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions");
       if (!feed || feed.ok !== true || !Array.isArray(feed.entities)) {
         throw new Error("De OpenOV-voertuigposities zijn momenteel niet beschikbaar.");
@@ -3796,6 +3944,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           } as Record<string, any>;
         }));
         for (const row of enriched) addResult(row);
+      }
       }
     } catch (error) {
       warnings.push("OpenOV-voertuiggegevens niet beschikbaar: " + (error instanceof Error ? error.message : "onbekende fout"));
