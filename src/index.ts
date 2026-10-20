@@ -129,6 +129,69 @@ function openovAgencyNameForLine(
   return uniqueNames.length === 1 ? uniqueNames[0] : "";
 }
 
+function normalizeTransitousLineSearchStops(legValue: unknown): Array<Record<string, any>> {
+  if (!legValue || typeof legValue !== "object" || Array.isArray(legValue)) return [];
+  const leg = legValue as Record<string, any>;
+  const entries: Array<{ place: Record<string, any>; kind: "departure" | "intermediate" | "arrival" }> = [];
+  const asPlace = (value: unknown): Record<string, any> | null =>
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : null;
+  const from = asPlace(leg.from);
+  if (from) entries.push({ place: from, kind: "departure" });
+  if (Array.isArray(leg.intermediateStops)) {
+    for (const value of leg.intermediateStops) {
+      const stop = asPlace(value);
+      if (stop) entries.push({ place: stop, kind: "intermediate" });
+    }
+  }
+  const to = asPlace(leg.to);
+  if (to) entries.push({ place: to, kind: "arrival" });
+  const firstText = (...values: unknown[]): string | null => {
+    for (const value of values) {
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return null;
+  };
+  return entries.map(({ place, kind }, index) => {
+    const scheduledArrival = firstText(
+      place.scheduledArrival, place.scheduledArrivalTime,
+      kind === "arrival" ? leg.scheduledEndTime : null
+    );
+    const scheduledDeparture = firstText(
+      place.scheduledDeparture, place.scheduledDepartureTime,
+      kind === "departure" ? leg.scheduledStartTime : null
+    );
+    const arrival = firstText(
+      place.arrival, place.arrivalTime,
+      kind === "arrival" ? leg.arrivalTime : null,
+      scheduledArrival
+    );
+    const departure = firstText(
+      place.departure, place.departureTime,
+      kind === "departure" ? (leg.departureTime ?? leg.startTime) : null,
+      scheduledDeparture
+    );
+    const rawId = firstText(place.id, place.stopId, place.stop_id);
+    const openovId = rawId?.match(/^nl-OpenOV_(.+)$/i)?.[1] ?? null;
+    const stopCode = firstText(
+      place.userStopCode, place.UserStopCode, place.stopCode, place.stop_code,
+      place.code, place.stop?.code
+    ) ?? openovId ?? (/^\d+$/.test(rawId ?? "") ? rawId : null);
+    return {
+      name: firstText(place.name, place.stopName, place.displayName, place.label) ?? "",
+      userStopCode: stopCode,
+      timingPointCode: stopCode,
+      expectedArrival: arrival,
+      targetArrival: scheduledArrival,
+      expectedDeparture: departure,
+      targetDeparture: scheduledDeparture,
+      status: place.cancelled === true ? "CANCELLED" : firstText(place.status) ?? "",
+      stopOrder: index + 1,
+      isCurrent: false,
+      isAtStop: false
+    };
+  }).filter((stop) => stop.name);
+}
+
 function lineSearchDelaySeconds(expectedValue: unknown, targetValue: unknown): number | null {
   const expected = Date.parse(String(expectedValue ?? ""));
   const target = Date.parse(String(targetValue ?? ""));
@@ -4010,6 +4073,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             source: "OpenOV GTFS-Realtime",
             tripId: tripId || null,
             matchKind: routeMatchesQuery ? "line" : vehicleMatched ? "vehicle" : tripMatched ? "trip" : "vehicle",
+            stops: normalizeTransitousLineSearchStops(leg),
+            stopDataSource: "Transitous-dienstregeling",
             position: {
               latitude: typeof entity?.latitude === "number" ? entity.latitude : null,
               longitude: typeof entity?.longitude === "number" ? entity.longitude : null

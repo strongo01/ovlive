@@ -146,7 +146,16 @@
     .stop-time-table .stop-time-status{margin-top:4px}
     .line-search-list{display:flex;flex-direction:column;gap:9px;margin-top:12px}
     .line-search-card{border:1px solid var(--line);border-radius:12px;padding:13px;background:rgba(255,255,255,.02)}
-    .line-search-primary{font-weight:850;font-size:16px}
+    .line-search-card-expandable>summary{list-style:none;cursor:pointer;outline-offset:5px}
+    .line-search-card-expandable>summary::-webkit-details-marker{display:none}
+    .line-search-card-summary{display:block}
+    .line-search-expand-hint{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;padding-top:9px;border-top:1px solid var(--line);color:var(--accent);font-size:12px;font-weight:800}
+    .line-search-expand-chevron{font-size:16px;transition:transform .15s ease}
+    .line-search-card-expandable[open] .line-search-expand-chevron{transform:rotate(180deg)}
+    .line-search-expanded{padding-top:10px}
+    .line-search-no-stops,.line-search-stop-provenance{font-size:12px;color:var(--muted);margin:8px 0 0}
+    .line-search-map-link{display:inline-block;margin-top:8px;font-size:12px;font-weight:750}
+    .line-search-primary{display:block;font-weight:850;font-size:16px}
     .line-search-secondary{margin-top:4px;color:var(--accent);font-weight:750;font-size:13px}
     .line-search-meta{margin-top:5px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
     .line-search-facts{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
@@ -4250,8 +4259,8 @@ function renderLineSearchCard(row) {
   if (updateTime) facts.push({ label: updateTime, kind: '' });
 
   const meta = [];
-  if (row?.stop && (!Array.isArray(row?.stops) || row.stops.length === 0)) meta.push('Waargenomen bij ' + String(row.stop));
-  if (row?.status && (!Array.isArray(row?.stops) || row.stops.length === 0)) meta.push(String(row.status).replaceAll('_', ' ').toLocaleLowerCase('nl-NL'));
+  if (row?.stop) meta.push('Waargenomen bij ' + String(row.stop));
+  if (row?.status) meta.push(String(row.status).replaceAll('_', ' ').toLocaleLowerCase('nl-NL'));
   if (typeof row?.updateAgeSeconds === 'number' && !updateTime) {
     meta.push(row.updateAgeSeconds < 60
       ? 'Laatst bijgewerkt ' + row.updateAgeSeconds + ' sec geleden'
@@ -4266,17 +4275,43 @@ function renderLineSearchCard(row) {
     ? '<a class="line-search-permalink" href="' + esc(row.permalink) +
       '" target="_blank" rel="noopener noreferrer">Permalink · volg voertuig</a>'
     : '';
-  return '<article class="line-search-card">' +
-    '<div class="line-search-primary">' + esc(heading) + '</div>' +
-    '<div class="line-search-secondary">' + esc(vehicleLabel) + '</div>' +
-    (facts.length ? '<div class="line-search-facts">' + facts.map(item =>
-      '<span class="line-search-fact ' + item.kind + '">' + esc(item.label) + '</span>'
-    ).join('') + '</div>' : '') +
-    permalink +
-    (meta.length ? '<div class="line-search-meta">' + esc(meta.join(' · ')) + '</div>' : '') +
-    renderLineSearchStops(row) +
-    '</article>';
+  const latitude = Number(row?.position?.latitude);
+  const longitude = Number(row?.position?.longitude);
+  const validPosition = Number.isFinite(latitude) && Number.isFinite(longitude) &&
+    latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
+  const mapUrl = validPosition
+    ? 'https://www.openstreetmap.org/?mlat=' + latitude + '&mlon=' + longitude +
+      '#map=17/' + latitude + '/' + longitude
+    : '';
+  const mapLink = mapUrl
+    ? '<a class="line-search-map-link" href="' + esc(mapUrl) +
+      '" target="_blank" rel="noopener noreferrer">Bekijk gemelde voertuigpositie op kaart</a>'
+    : '';
+  const stops = Array.isArray(row?.stops) ? row.stops : [];
+  const stopsHtml = stops.length
+    ? renderLineSearchStops(row)
+    : '<p class="line-search-no-stops">Voor deze rit zijn geen haltegegevens ontvangen.</p>';
+  const provenance = row?.stopDataSource
+    ? '<p class="line-search-stop-provenance">Haltes uit ' + esc(row.stopDataSource) +
+      '; de bron bevestigt hiermee niet automatisch een realtime-aankomst per halte.</p>'
+    : '';
+  return '<details class="line-search-card line-search-card-expandable">' +
+    '<summary class="line-search-card-summary">' +
+      '<span class="line-search-primary">' + esc(heading) + '</span>' +
+      '<span class="line-search-secondary">' + esc(vehicleLabel) + '</span>' +
+      (facts.length ? '<span class="line-search-facts">' + facts.map(item =>
+        '<span class="line-search-fact ' + item.kind + '">' + esc(item.label) + '</span>'
+      ).join('') + '</span>' : '') +
+      '<span class="line-search-expand-hint"><span>Bekijk ritdetails en volgende haltes</span>' +
+        '<span class="line-search-expand-chevron" aria-hidden="true">⌄</span></span>' +
+    '</summary>' +
+    '<div class="line-search-expanded">' +
+      (meta.length ? '<div class="line-search-meta">' + esc(meta.join(' · ')) + '</div>' : '') +
+      permalink + mapLink + provenance + stopsHtml +
+    '</div>' +
+    '</details>';
 }
+
 function displayLineSearchResults(containerId, rows, emptyText) {
   const container = $(containerId);
   if (!container) return;
