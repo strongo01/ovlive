@@ -3955,6 +3955,208 @@ function renderJourneyCard(journey, index, walkSettings) {
 
 }
 
+
+const JOURNEY_INITIAL_PAGE_SIZE = 10;
+const JOURNEY_PAGE_BATCH_SIZE = 3;
+
+function createJourneyPageState(query, basePlan, displayedJourneys, cursors = {}, pendingNext = []) {
+  const displayed = Array.isArray(displayedJourneys) ? displayedJourneys.slice() : [];
+  const queuedNext = Array.isArray(pendingNext) ? pendingNext.slice() : [];
+  return {
+    query: query instanceof URLSearchParams ? query.toString() : String(query ?? ''),
+    basePlan,
+    cursors: {
+      previous: String(cursors?.previous ?? ''),
+      next: String(cursors?.next ?? '')
+    },
+    pendingPrevious: [],
+    pendingNext: queuedNext,
+    displayedKeys: new Set(displayed.map(itineraryRealtimeKey).filter(Boolean)),
+    displayedJourneys: displayed,
+    nextTrackingIndex: displayed.length,
+    inFlight: false,
+    loadingDirection: '',
+    controller: null,
+    message: ''
+  };
+}
+
+function takeJourneyPageBatch(state, direction, batchSize = JOURNEY_PAGE_BATCH_SIZE) {
+  if (!state || !Number.isInteger(batchSize) || batchSize < 1) return [];
+  const queue = direction === 'previous'
+    ? state.pendingPrevious
+    : direction === 'next'
+      ? state.pendingNext
+      : null;
+  if (!Array.isArray(queue) || queue.length === 0) return [];
+  if (direction === 'previous') {
+    return queue.splice(Math.max(0, queue.length - batchSize), Math.min(batchSize, queue.length));
+  }
+  return queue.splice(0, batchSize);
+}
+
+function filterNewPageJourneys(state, candidates, walkingSpeedKmh) {
+  if (!state || !Array.isArray(candidates)) return [];
+  const seen = new Set([
+    ...(state.displayedKeys instanceof Set ? state.displayedKeys : []),
+    ...(state.pendingPrevious || []).map(itineraryRealtimeKey),
+    ...(state.pendingNext || []).map(itineraryRealtimeKey)
+  ]);
+  const result = [];
+  for (const journey of candidates) {
+    const key = itineraryRealtimeKey(journey);
+    if (!key || seen.has(key)) continue;
+    const legs = journeySourceLegs(journey);
+    if (journeyChronologyIssue(legs) ||
+        journeyWalkingTransferIssue(legs, walkingSpeedKmh)) continue;
+    seen.add(key);
+    result.push(journey);
+  }
+  return result;
+}
+
+function updateJourneyPageControls(message = '') {
+  const state = window.__ovliveJourneyPageState;
+  const status = document.getElementById('journey-page-status');
+  const hasState = Boolean(state);
+  document.querySelectorAll('.journey-page-button').forEach(button => {
+    const direction = String(button.dataset.pageDirection || '');
+    const queue = direction === 'previous'
+      ? state?.pendingPrevious
+      : state?.pendingNext;
+    const cursor = direction === 'previous'
+      ? state?.cursors?.previous
+      : state?.cursors?.next;
+    button.disabled = !hasState || Boolean(state.inFlight) ||
+      (!(Array.isArray(queue) && queue.length > 0) && !cursor);
+    if (state?.inFlight && state.loadingDirection === direction) {
+      button.textContent = 'Reizen laden…';
+    } else {
+      button.textContent = direction === 'previous'
+        ? '↑ Laad 3 eerdere reizen'
+        : 'Laad 3 latere reizen ↓';
+    }
+  });
+  if (status) {
+    const baseMessage = hasState
+      ? `${state.displayedJourneys.length} reizen weergegeven. Per klik worden maximaal 3 reizen toegevoegd.`
+      : '';
+    status.textContent = message || state?.message || baseMessage;
+  }
+}
+
+function initializeJourneyPagination(query, basePlan, displayedJourneys, cursors, pendingNext = []) {
+  if (window.__ovliveJourneyPageState?.controller) {
+    window.__ovliveJourneyPageState.controller.abort();
+  }
+  window.__ovliveJourneyPageState = createJourneyPageState(
+    query, basePlan, displayedJourneys, cursors, pendingNext
+  );
+  document.querySelectorAll('.journey-page-button').forEach(button => {
+    button.addEventListener('click', () => {
+      void loadMoreJourneys(String(button.dataset.pageDirection || ''));
+    });
+  });
+  updateJourneyPageControls();
+}
+
+async function loadMoreJourneys(direction) {
+  const state = window.__ovliveJourneyPageState;
+  if (!state || state.inFlight ||
+      (direction !== 'previous' && direction !== 'next')) return;
+
+  state.inFlight = true;
+  state.loadingDirection = direction;
+  state.message = direction === 'previous'
+    ? 'Eerdere reizen ophalen…'
+    : 'Latere reizen ophalen…';
+  updateJourneyPageControls();
+
+  const controller = new AbortController();
+  state.controller = controller;
+  try {
+    const queue = direction === 'previous' ? state.pendingPrevious : state.pendingNext;
+    let pageAttempts = 0;
+    while (queue.length === 0 && state.cursors[direction] && pageAttempts < 2) {
+      const pageQuery = new URLSearchParams(state.query);
+      // Keep the original routing parameters unchanged; Transitous' cursor
+      // moves the timetable window backward or forward from the last page.
+      pageQuery.set('pageCursor', state.cursors[direction]);
+      const pageData = await api('/api/plan?' + pageQuery.toString(), {
+        signal: controller.signal
+      });
+      if (window.__ovliveJourneyPageState !== state) return;
+
+      state.cursors.previous = String(pageData?.previousPageCursor ?? '');
+      state.cursors.next = String(pageData?.nextPageCursor ?? '');
+      const pageJourneys = Array.isArray(pageData?.itineraries)
+        ? pageData.itineraries
+        : Array.isArray(pageData?.journeys)
+          ? pageData.journeys
+          : [];
+      const walkingSpeed = window.__ovliveActiveWalkSettings?.walkingSpeedKmh ??
+        selectedWalkingSpeedKmh();
+      const validPageJourneys = filterNewPageJourneys(state, pageJourneys, walkingSpeed);
+      if (direction === 'previous') state.pendingPrevious.push(...validPageJourneys);
+      else state.pendingNext.push(...validPageJourneys);
+      pageAttempts += 1;
+    }
+
+    if (window.__ovliveJourneyPageState !== state) return;
+    const batch = takeJourneyPageBatch(state, direction);
+    if (batch.length === 0) {
+      state.message = state.cursors[direction]
+        ? 'Op deze pagina zijn geen extra haalbare reizen gevonden. Tik nogmaals om verder te zoeken.'
+        : direction === 'previous'
+          ? 'Er zijn geen eerdere reizen meer gevonden.'
+          : 'Er zijn geen latere reizen meer gevonden.';
+      return;
+    }
+
+    for (const journey of batch) {
+      const key = itineraryRealtimeKey(journey);
+      if (key) state.displayedKeys.add(key);
+    }
+    state.displayedJourneys = direction === 'previous'
+      ? [...batch, ...state.displayedJourneys]
+      : [...state.displayedJourneys, ...batch];
+
+    const walkingSettings = window.__ovliveActiveWalkSettings ?? {
+      firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds(),
+      walkingSpeedKmh: selectedWalkingSpeedKmh()
+    };
+    const cardsHtml = batch.map(journey =>
+      renderJourneyCard(journey, state.nextTrackingIndex++, walkingSettings)
+    ).join('');
+    const list = document.querySelector('.journey-results-list');
+    if (!list) return;
+    list.insertAdjacentHTML(direction === 'previous' ? 'afterbegin' : 'beforeend', cardsHtml);
+    bindLiveJourneyCards();
+    bindNsTrainDetailsButtons(list);
+
+    const sortControl = document.getElementById('journeySort');
+    sortJourneyCards(sortControl?.value || 'departure');
+
+    // Rebuild the realtime baseline with all currently visible itineraries.
+    // The refresher still processes at most eight per request in rotating batches.
+    state.basePlan = { ...state.basePlan, itineraries: state.displayedJourneys };
+    startLivePlanRealtimeRefresh(state.basePlan);
+    state.message = `${batch.length} extra ${batch.length === 1 ? 'reis' : 'reizen'} geladen.`;
+  } catch (error) {
+    if (window.__ovliveJourneyPageState !== state ||
+        (error instanceof Error && error.name === 'AbortError')) return;
+    state.message = 'Extra reizen laden is mislukt: ' +
+      (error instanceof Error ? error.message : 'Onbekende fout');
+  } finally {
+    if (window.__ovliveJourneyPageState === state) {
+      state.inFlight = false;
+      state.loadingDirection = '';
+      state.controller = null;
+      updateJourneyPageControls(state.message);
+    }
+  }
+}
+
 $('planBtn').onclick = async () => {
   stopLivePlanRealtimeRefresh();
   stopAllLiveJourneyTracking();
