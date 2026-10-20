@@ -885,25 +885,42 @@ console.log("PASS: confirmed cancelled trips are retrieved from the timetable an
 assert.ok(!html.includes("cancellationQuery.set('maxItineraries', '12')"),
   "the cancellation lookup must not overwrite maxItineraries=16 with 12");
 
-// The stop board and line lookup must use selected Transitous stop IDs and the
-// same stop-times API for departure, arrival, and available route-stop details.
+// The stop board and standalone line/vehicle search must be separate tools.
+// The stop board uses an actual Transitous stop ID; line search must not require a stop.
 assert.ok(html.includes('id="stopTimesPanel"') &&
   html.includes('id="boardStopFind"') &&
   html.includes('id="boardDirection"') &&
   html.includes('id="boardSearch"') &&
+  html.includes('id="boardStopMeta"') &&
+  html.includes('id="lineSearchPanel"') &&
   html.includes('id="lineNumber"') &&
   html.includes('id="lineSearch"'),
-  "the UI must expose a stop departures/arrivals board and a line/destination lookup");
+  "the UI must expose a stop board and a separate standalone line/vehicle search");
+assert.ok(html.indexOf('id="lineSearchPanel"') > html.indexOf('</section>', html.indexOf('id="stopTimesPanel"')) &&
+  html.includes("api('/api/line-search?' + query.toString()"),
+  "line search must be outside the stop panel and call its own API");
 assert.ok(html.includes("fetchStop: 'true'") &&
   html.includes("arriveBy: String(direction === 'arrivals')") &&
-  html.includes("direction: 'true'") &&
+  !html.includes("direction: 'true'") &&
   html.includes("row?.nextStops") &&
   html.includes("row?.previousStops"),
-  "stop-time queries must request arrivals/departures and the route's available next/previous stops");
-assert.ok(workerSource.includes('const booleanParams = ["arriveBy", "direction", "fetchStop", "withScheduledSkippedStops"]') &&
+  "stop-time queries must set arriveBy separately and must not send an invalid boolean direction");
+assert.ok(workerSource.includes('const booleanParams = ["arriveBy", "fetchStop", "withScheduledSkippedStops"]') &&
+  workerSource.includes('const requestedDirection = String(url.searchParams.get("direction") ?? "").trim().toUpperCase()') &&
+  workerSource.includes('Ongeldige waarde voor direction; gebruik EARLIER of LATER.') &&
   workerSource.includes('upstream.searchParams.set("pageCursor", pageCursor)') &&
   workerSource.includes('upstream.searchParams.set("time", requestedTime)'),
-  "the Worker must safely forward time, direction, route-stop and paging parameters to Transitous");
+  "the Worker must validate direction as EARLIER/LATER and safely forward time and paging parameters");
+assert.ok(workerSource.includes('url.pathname === "/api/line-search"') &&
+  workerSource.includes('http://v0.ovapi.nl/line/') &&
+  workerSource.includes('getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")') &&
+  workerSource.includes('TRANSITOUS + "/trip"'),
+  "the standalone line-search API must combine public line metadata with current vehicle/trip identities");
+assert.ok(html.includes("function displayStopBoardMetadata(data)") &&
+  html.includes("Halte-ID: ") &&
+  html.includes("<th>Lijn</th><th>Richting</th>") &&
+  html.includes("Verwachte aankomsttijd"),
+  "the stop board must display available stop metadata and a timetable-style arrivals/departures table");
 
 const boardTimeFormatterStart = html.indexOf("function stopTimeEvent(row, direction) {");
 const boardTimeFormatterEnd = html.indexOf("\nfunction stopTimeDestination(", boardTimeFormatterStart);
@@ -934,7 +951,7 @@ assert.deepEqual(
 const lineMatchStart = html.indexOf("function stopTimeMatchesLine(row, query) {");
 const lineMatchEnd = html.indexOf("\nfunction renderStopSequence(", lineMatchStart);
 assert.ok(lineMatchStart >= 0 && lineMatchEnd > lineMatchStart,
-  "line matching must remain independently testable");
+  "stop-time line matching must remain independently testable");
 const lineMatchContext = {};
 new vm.Script(
   html.slice(lineMatchStart, lineMatchEnd).trim() +
@@ -942,5 +959,20 @@ new vm.Script(
 ).runInNewContext(lineMatchContext);
 assert.equal(lineMatchContext.stopTimeMatchesLine({ routeShortName: "5", displayName: "Bus 5" }, "5"), true);
 assert.equal(lineMatchContext.stopTimeMatchesLine({ routeShortName: "11", displayName: "Bus 11" }, "5"), false);
-console.log("PASS: stop board separates real-time observations from scheduled times and supports line route filtering");
+
+const lineSearchMatcherStart = html.indexOf("function lineSearchMatchesRecord(row, query) {");
+const lineSearchMatcherEnd = html.indexOf("\nfunction renderLineSearchCard(", lineSearchMatcherStart);
+assert.ok(lineSearchMatcherStart >= 0 && lineSearchMatcherEnd > lineSearchMatcherStart,
+  "the standalone vehicle search matcher must remain independently testable");
+const lineSearchMatcherContext = {};
+new vm.Script(
+  html.slice(lineSearchMatcherStart, lineSearchMatcherEnd).trim() +
+  "\nthis.lineSearchMatchesRecord = lineSearchMatchesRecord;"
+).runInNewContext(lineSearchMatcherContext);
+assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "73", destination: "Maarssenbroek" }, "73"), true);
+assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "500", vehicleNumber: "7305" }, "73"), true);
+assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "3", tripNumber: "73" }, "73"), true);
+assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "77", destination: "Bilthoven" }, "73"), false);
+console.log("PASS: stop board separates live observations from scheduled times and displays a timetable table");
+console.log("PASS: standalone line search matches public line numbers, vehicle numbers and trip numbers without a selected stop");
 console.log("All public UI JavaScript checks passed.");
