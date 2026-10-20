@@ -145,7 +145,7 @@ function normalizeOvapiJourneyStops(
     : {};
   const orderedStops: Array<Record<string, any>> = Object.entries(stopsObject)
     .filter(([, stop]) => stop && typeof stop === "object" && !Array.isArray(stop))
-    .map(([key, stop]) => ({ key, ...(stop as Record<string, any>) }))
+    .map(([key, stop]) => ({ key, ...(stop as Record<string, any>) } as Record<string, any>))
     .sort((a, b) =>
       Number(a.UserStopOrderNumber ?? a.StopSequence ?? a.key) -
       Number(b.UserStopOrderNumber ?? b.StopSequence ?? b.key)
