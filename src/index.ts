@@ -43,7 +43,7 @@ const TRANSITOUS = "https://api.transitous.org/api/v6";
 function normalizeLineSearchTripId(value: unknown): string {
   // Transitous/OpenOV composite IDs can start with the service date and trip start time.
   // Those timestamp digits must not be mistaken for a requested line/trip number.
-  return String(value ?? "").trim().replace(/^\d{8}_\d{2}:\d{2}_/, "");
+  return String(value ?? "").trim().replace(/^\d{8}_\d{2}:\d{2}(?::\d{2})?_/, "");
 }
 
 interface OpenovRouteMetadataEntry {
