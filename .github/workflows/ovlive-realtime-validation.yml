@@ -20,6 +20,7 @@ on:
       - assistant/fix-itinerary-status-tdz-20261018
       - assistant/live-realtime-timetable-poll-20261018
       - assistant/realtime-poll-10s-no-overlap-20261018
+      - feat/live-multi-vehicle-map-20261020
   pull_request:
     branches:
       - assistant/metro-resource-cache-prune-20261018
@@ -91,6 +92,9 @@ jobs:
 
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
+
+      - name: Live multi-mode fleet map regression tests
+        run: npm run live-map:selftest
 
       - name: OpenOV public route metadata builder regression tests
         run: npm run ndov:openov-route-metadata-selftest

@@ -242,6 +242,18 @@
     .live-map{height:285px;min-height:220px;width:100%;border-radius:11px;overflow:hidden;background:#20262e;border:1px solid var(--line)}
     .live-map-attribution{font-size:10px;color:var(--muted);text-align:right;margin:4px 0 12px}
     .live-map-attribution a{color:inherit}
+
+    .live-fleet-controls{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+    .live-fleet-mode{display:flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.025);font-size:12px;font-weight:700;cursor:pointer}
+    .live-fleet-mode input{width:15px;height:15px;margin:0;accent-color:var(--accent)}
+    .live-fleet-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0}
+    .live-fleet-actions button{width:auto;margin:0}
+    .live-fleet-status{font-size:12px;color:var(--muted);margin:8px 0;padding:9px 11px;border-radius:9px;background:#20262e;line-height:1.5;overflow-wrap:anywhere}
+    .live-fleet-status.is-live{color:var(--green)}
+    .live-fleet-status.is-warning{color:#facc15}
+    .live-fleet-status.is-error{color:#fca5a5}
+    .live-fleet-counts{font-variant-numeric:tabular-nums}
+
     .ovlive-vehicle-marker{background:transparent;border:0}
     .ovlive-vehicle-marker span{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border:2px solid white;border-radius:50%;box-shadow:0 1px 8px #0009;background:var(--accent);font-size:17px}
     .live-stop-heading{font-size:14px;margin:12px 0 7px}
@@ -332,6 +344,26 @@
     <button id="planBtn">Zoek reizen</button>
     <div id="planStatus" class="muted" aria-live="polite"></div>
     <div id="journeys"></div>
+  </section>
+
+  <section class="panel" id="liveFleetMapPanel">
+    <h2>Live kaart · voertuigen in Nederland</h2>
+    <p class="muted">Bekijk beschikbare liveposities van treinen, bussen, trams en metro's. Tik op een voertuig voor de beschikbare lijn-, rit- en brongegevens. Eerst maken we de voertuigpunten en verversing stabiel; de volledige gereden route tekenen we daarna.</p>
+    <div class="live-fleet-controls" role="group" aria-label="Vervoersmiddelen op de live kaart">
+      <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="train" checked><span>🚆 Treinen</span></label>
+      <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="bus" checked><span>🚌 Bussen</span></label>
+      <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="tram" checked><span>🚊 Trams</span></label>
+      <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="metro" checked><span>🚇 Metro's</span></label>
+      <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="ferry" checked><span>⛴️ Veerponten</span></label>
+      <label class="live-fleet-mode"><input type="checkbox" data-live-fleet-mode="other" checked><span>❔ Overig / onbekend</span></label>
+    </div>
+    <div class="live-fleet-actions">
+      <button type="button" class="secondary" id="liveFleetRefresh">↻ Ververs nu</button>
+      <span class="muted">Automatisch verversen zolang deze tab actief is.</span>
+    </div>
+    <div id="liveFleetStatus" class="live-fleet-status" role="status" aria-live="polite">Live kaart wordt gestart…</div>
+    <div id="liveFleetMap" class="live-map" role="application" aria-label="Live kaart met OV-voertuigen"></div>
+    <div class="live-map-attribution">Kaart: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a></div>
   </section>
 
   <section class="panel" id="stopTimesPanel">
@@ -5652,4 +5684,5 @@ function normalizeTransitousStopId(value) {
 })();
 </script>
 
+<script src="/live-fleet-map.js" defer></script>
 </body></html>

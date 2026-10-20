@@ -2919,6 +2919,260 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
 }
 
 
+const LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000;
+const LIVE_MAP_OPENOV_CACHE_TTL_SECONDS = 15;
+const LIVE_MAP_OPENOV_MAX_POSITIONS = 2000;
+
+type LiveMapOpenovCachedBody = {
+  body: string;
+  status: number;
+  headers: Record<string, string>;
+};
+
+let liveMapOpenovMemoryCache: {
+  expiresAtMs: number;
+  value: LiveMapOpenovCachedBody;
+} | null = null;
+let liveMapOpenovInFlight: Promise<LiveMapOpenovCachedBody> | null = null;
+let liveMapOpenovInFlightStartedAtMs = 0;
+
+function defaultLiveMapOpenovCache(): Cache | null {
+  if (typeof caches === "undefined") return null;
+  return (caches as unknown as { default?: Cache }).default ?? null;
+}
+
+function respondLiveMapOpenov(
+  value: LiveMapOpenovCachedBody,
+  requestHeaders: Record<string, string>,
+  cacheState: string
+): Response {
+  const headers = new Headers(value.headers);
+  for (const [name, headerValue] of Object.entries(requestHeaders)) {
+    headers.set(name, headerValue);
+  }
+  headers.set("x-ovlive-live-map-cache", cacheState);
+  return new Response(value.body, { status: value.status, headers });
+}
+
+async function handleLiveMapOpenovApi(
+  url: URL,
+  headers: Record<string, string>
+): Promise<Response> {
+  const cacheKey = new Request(new URL(
+    "/__ovlive-internal/live-map-openov-v1",
+    url.origin
+  ).toString());
+  const edgeCache = defaultLiveMapOpenovCache();
+  const now = Date.now();
+
+  if (liveMapOpenovMemoryCache &&
+      liveMapOpenovMemoryCache.expiresAtMs > now) {
+    return respondLiveMapOpenov(
+      liveMapOpenovMemoryCache.value,
+      headers,
+      "memory-hit"
+    );
+  }
+
+  if (edgeCache) {
+    try {
+      const cached = await edgeCache.match(cacheKey);
+      if (cached && cached.status === 200) {
+        const cachedHeaders = new Headers(cached.headers);
+        for (const [name, headerValue] of Object.entries(headers)) {
+          cachedHeaders.set(name, headerValue);
+        }
+        cachedHeaders.set("x-ovlive-live-map-cache", "edge-hit");
+        return new Response(cached.body, {
+          status: cached.status,
+          headers: cachedHeaders
+        });
+      }
+    } catch (error) {
+      console.warn("[OVLIVE_LIVE_MAP_CACHE_READ_ERROR]", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (liveMapOpenovInFlight) {
+    const inflightAgeMs = now - liveMapOpenovInFlightStartedAtMs;
+    if (inflightAgeMs <= 18_000) {
+      const shared = await liveMapOpenovInFlight;
+      return respondLiveMapOpenov(shared, headers, "single-flight");
+    }
+
+    // Do not let a request which appears abandoned after a Worker/CPU failure
+    // block all later map refreshes in this isolate.
+    console.warn("[OVLIVE_LIVE_MAP_OPENOV_STALE_INFLIGHT]", JSON.stringify({
+      inflightAgeMs
+    }));
+    liveMapOpenovInFlight = null;
+    liveMapOpenovInFlightStartedAtMs = 0;
+  }
+
+  const task = (async (): Promise<LiveMapOpenovCachedBody> => {
+    try {
+      const startedAt = Date.now();
+      const response = await fetch(OPENOV.vehiclePositions, {
+        headers: {
+          "user-agent": "OVLive/0.1.0 (open-source Dutch transit realtime client)",
+          "accept-encoding": "gzip"
+        },
+        signal: AbortSignal.timeout(12_000),
+        cf: { cacheTtl: 5, cacheEverything: true }
+      });
+
+      if (!response.ok) {
+        const status = response.status === 429 ? 429 : 502;
+        const body = JSON.stringify({
+          ok: false,
+          source: "OpenOV / OVapi GTFS-Realtime",
+          upstreamStatus: response.status,
+          checkedAt: new Date().toISOString(),
+          error: response.status === 429
+            ? "De OpenOV-bron beperkt tijdelijk het aantal verzoeken."
+            : "De OpenOV-voertuigfeed is tijdelijk niet beschikbaar."
+        });
+        return {
+          status,
+          body,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff"
+          }
+        };
+      }
+
+      const declaredLength = Number(response.headers.get("content-length") ?? "0");
+      if (declaredLength > MAX_BODY_BYTES) {
+        throw new Error("De voertuigfeed is groter dan de ingestelde veiligheidslimiet.");
+      }
+
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > MAX_BODY_BYTES) {
+        throw new Error("De voertuigfeed is groter dan de ingestelde veiligheidslimiet.");
+      }
+
+      const decodeStartedAt = performance.now();
+      // Gebruik hier bewust uitsluitend de selectieve decoder. Bij een wijziging
+      // in het bronschema falen we veilig in plaats van een zware volledige
+      // GTFS-RT-objectboom op te bouwen en opnieuw een CPU-limit te riskeren.
+      const decoded = decodeOpenovVehiclePositions(bytes);
+      const decodeDurationMs = Number((performance.now() - decodeStartedAt).toFixed(2));
+      // Avoid sorting the entire national feed on the CPU-limited Worker.
+      // Every returned point is independently age-checked by the UI; a stable
+      // capped source-order sample is preferable to an expensive global sort.
+      const entities = decoded.entities
+        .filter((entity: any) =>
+          Number.isFinite(entity.latitude) &&
+          Number.isFinite(entity.longitude) &&
+          entity.latitude >= 49 &&
+          entity.latitude <= 56 &&
+          entity.longitude >= 2 &&
+          entity.longitude <= 9.5
+        )
+        .slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS);
+
+      const feedTimestamp = decoded.feedTimestamp;
+      const rawAgeSeconds = typeof feedTimestamp === "number"
+        ? Date.now() / 1000 - feedTimestamp
+        : Number.NaN;
+      const ageSeconds = Number.isFinite(rawAgeSeconds)
+        ? Math.max(0, Math.round(rawAgeSeconds))
+        : null;
+      const freshness = Number.isFinite(rawAgeSeconds) &&
+          rawAgeSeconds >= -60 &&
+          rawAgeSeconds <= 180
+        ? "fresh"
+        : "stale_or_unknown";
+
+      console.log("[OVLIVE_LIVE_MAP_OPENOV_DECODE]", JSON.stringify({
+        decoder: "selective-protobuf",
+        byteCount: bytes.byteLength,
+        sourceEntityCount: decoded.sourceEntityCount,
+        validPositionCount: entities.length,
+        decodeDurationMs,
+        totalDurationMs: Date.now() - startedAt,
+        freshness
+      }));
+
+      const body = JSON.stringify({
+        ok: true,
+        source: "OpenOV / OVapi GTFS-Realtime",
+        checkedAt: new Date().toISOString(),
+        feedTimestamp: typeof feedTimestamp === "number" && feedTimestamp > 0
+          ? new Date(feedTimestamp * 1000).toISOString()
+          : null,
+        ageSeconds,
+        freshness,
+        entityCount: decoded.sourceEntityCount,
+        returnedCount: entities.length,
+        decoder: "selective-protobuf",
+        entities
+      });
+
+      return {
+        status: 200,
+        body,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "public, max-age=" + LIVE_MAP_OPENOV_CACHE_TTL_SECONDS,
+          "x-content-type-options": "nosniff"
+        }
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("[OVLIVE_LIVE_MAP_OPENOV_ERROR]", JSON.stringify({
+        error: detail,
+        kind: "vehiclePositions"
+      }));
+      return {
+        status: 502,
+        body: JSON.stringify({
+          ok: false,
+          source: "OpenOV / OVapi GTFS-Realtime",
+          checkedAt: new Date().toISOString(),
+          error: "De snelle voertuigdecoder kon de feed niet veilig verwerken."
+        }),
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff"
+        }
+      };
+    }
+  })();
+
+  liveMapOpenovInFlight = task;
+  liveMapOpenovInFlightStartedAtMs = Date.now();
+  try {
+    const value = await task;
+    if (value.status === 200) {
+      liveMapOpenovMemoryCache = {
+        expiresAtMs: Date.now() + LIVE_MAP_OPENOV_CACHE_TTL_MS,
+        value
+      };
+      if (edgeCache) {
+        try {
+          await edgeCache.put(cacheKey, new Response(value.body, {
+            status: value.status,
+            headers: value.headers
+          }));
+        } catch (error) {
+          console.warn("[OVLIVE_LIVE_MAP_CACHE_WRITE_ERROR]", error instanceof Error ? error.message : String(error));
+        }
+      }
+    }
+    return respondLiveMapOpenov(value, headers, "miss");
+  } finally {
+    if (liveMapOpenovInFlight === task) {
+      liveMapOpenovInFlight = null;
+      liveMapOpenovInFlightStartedAtMs = 0;
+    }
+  }
+}
+
+
 async function handleApi(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const origin = request.headers.get("origin");
@@ -3020,21 +3274,26 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  if (url.pathname === "/api/live-map/openov") {
+    return handleLiveMapOpenovApi(url, headers);
+  }
+
   if (url.pathname === "/api/ns/vehicle-positions") {
+    const includeAllPositions = url.searchParams.get("all") === "1";
     const rawTrainNumbers = String(url.searchParams.get("trainNumbers") ?? "");
     const requestedTrainNumbers = [...new Set(
       rawTrainNumbers.split(",").map(value => value.trim()).filter(Boolean)
     )];
 
     if (
-      requestedTrainNumbers.length < 1 ||
+      (!includeAllPositions && requestedTrainNumbers.length < 1) ||
       requestedTrainNumbers.length > 20 ||
       requestedTrainNumbers.some(value => !/^\d{1,6}$/.test(value))
     ) {
       return json({
         ok: false,
         source: "NS Virtual Train API",
-        error: "Geef 1–20 geldige treinnummers op via trainNumbers, gescheiden door komma's."
+        error: "Geef 1–20 geldige treinnummers op, of gebruik all=1 voor de live kaart."
       }, 400, headers);
     }
 
@@ -3049,13 +3308,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     try {
       const feed = await fetchNsLiveVehiclePositions(env, url.origin);
       const requested = new Set(requestedTrainNumbers);
-      const positions = feed.positions.filter(position =>
-        requested.has(position.trainNumber)
-      );
+      const positions = includeAllPositions
+        ? feed.positions.slice(0, 2000)
+        : feed.positions.filter(position => requested.has(position.trainNumber));
       return json({
         ok: true,
         source: "NS Virtual Train API",
         checkedAt: feed.fetchedAt,
+        allPositions: includeAllPositions,
         positions
       }, 200, { ...headers, "cache-control": "no-store" });
     } catch (error) {
@@ -3077,7 +3337,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       console.warn("[OVLIVE_NS_VEHICLE_POSITIONS]", JSON.stringify({
         upstreamStatus,
         errorCode: detail.match(/NS_VIRTUAL_TRAIN_[A-Z_]+/)?.[0] ?? "unexpected_error",
-        requestedCount: requestedTrainNumbers.length
+        requestedCount: includeAllPositions ? null : requestedTrainNumbers.length,
+        includeAllPositions
       }));
       return json({
         ok: false,
