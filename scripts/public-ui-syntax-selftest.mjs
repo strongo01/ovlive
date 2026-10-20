@@ -808,12 +808,12 @@ new vm.Script(
   "\nthis.takeJourneyPageBatch = takeJourneyPageBatch;"
 ).runInNewContext(pageBatchContext);
 const laterQueue = { pendingNext: [1, 2, 3, 4, 5, 6, 7], pendingPrevious: [] };
-assert.deepEqual(Array.from(pageBatchContext.takeJourneyPageBatch(laterQueue, "next")), [1, 2, 3],
+assert.deepEqual(Array.from(pageBatchContext.takeJourneyPageBatch(laterQueue, "next", 3)), [1, 2, 3],
   "loading later journeys must return the next three items from the queue");
 assert.deepEqual(laterQueue.pendingNext, [4, 5, 6, 7],
   "loading later journeys must leave remaining options queued");
 const earlierQueue = { pendingNext: [], pendingPrevious: [1, 2, 3, 4, 5, 6, 7] };
-assert.deepEqual(Array.from(pageBatchContext.takeJourneyPageBatch(earlierQueue, "previous")), [5, 6, 7],
+assert.deepEqual(Array.from(pageBatchContext.takeJourneyPageBatch(earlierQueue, "previous", 3)), [5, 6, 7],
   "loading earlier journeys must choose the closest three items before the current page");
 assert.deepEqual(earlierQueue.pendingPrevious, [1, 2, 3, 4],
   "loading earlier journeys must keep more distant journeys queued");
