@@ -173,7 +173,9 @@ function normalizeOvapiJourneyStops(
     targetDeparture: String(stop.TargetDepartureTime ?? "").trim() || null,
     status: String(stop.TripStopStatus ?? "").trim(),
     stopOrder: Number(stop.UserStopOrderNumber ?? stop.StopSequence ?? index + 1),
-    isCurrent: currentIndex >= 0 && index === 0
+    isCurrent: currentIndex >= 0 && index === 0,
+    isAtStop: currentIndex >= 0 && index === 0 &&
+      ["ARRIVED", "ONSTOP", "ATSTOP"].includes(String(stop.TripStopStatus ?? "").trim().toUpperCase())
   })).filter((stop) => stop.name);
   const coachValue = remainingStops.find((stop) => stop.NumberOfCoaches != null)?.NumberOfCoaches ??
     orderedStops.find((stop) => stop.NumberOfCoaches != null)?.NumberOfCoaches ?? null;
