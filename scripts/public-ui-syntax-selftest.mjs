@@ -1072,7 +1072,8 @@ const normalizeJourneyStopsSource = workerSource
     "function normalizeOvapiJourneyStops(\n  rawStops: unknown,\n  currentStopCodeValue: unknown\n): { stops: Array<Record<string, any>>; numberOfCoaches: number | string | null; blockCode: string | null }",
     "function normalizeOvapiJourneyStops(rawStops, currentStopCodeValue)"
   )
-  .replaceAll(" as Record<string, any>", "");
+  .replaceAll(" as Record<string, any>", "")
+  .replace("const orderedStops: Array<Record<string, any>> =", "const orderedStops =");
 const journeyStopContext = {};
 new vm.Script(normalizeJourneyStopsSource +
   "\nthis.normalizeOvapiJourneyStops = normalizeOvapiJourneyStops;")
