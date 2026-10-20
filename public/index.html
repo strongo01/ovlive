@@ -168,8 +168,10 @@
     .line-search-stops .stop-time-table{min-width:0}
     .line-search-stops .stop-time-table th,.line-search-stops .stop-time-table td{padding:8px 7px}
     .line-search-stops .stop-time-table td:last-child{white-space:nowrap}
-    .line-search-all-stops{margin-top:6px}
-    .line-search-all-stops summary{cursor:pointer;color:var(--accent);font-size:12px;font-weight:750;padding:7px 0}
+    .line-search-all-stops,.line-search-past-stops{margin-top:8px}
+    .line-search-all-stops summary,.line-search-past-stops summary{cursor:pointer;color:var(--accent);font-size:12px;font-weight:750;padding:7px 0}
+    .line-search-stop-link{color:var(--accent);text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}
+    .line-search-eta-countdown{font-variant-numeric:tabular-nums;font-weight:750;white-space:nowrap}
     .divider{height:1px;background:var(--line);margin:18px 0}
     @media(max-width:600px){.stop-time-card{padding:10px}.stop-time-time{font-size:20px}}
 
@@ -4179,6 +4181,7 @@ function lineSearchDelayText(value) {
 function lineSearchStopEta(stop, nowMs = Date.now()) {
   const status = String(stop?.status ?? '').trim().toUpperCase();
   if (stop?.isAtStop || ['ARRIVED', 'ONSTOP', 'ATSTOP'].includes(status)) return 'Bij halte';
+  if (stop?.isLastReportedStop) return 'Laatst gemelde halte';
   if (['CANCEL', 'CANCELLED'].includes(status)) return 'Rijdt niet';
   const value = stop?.expectedArrival ?? stop?.expectedDeparture ??
     stop?.targetArrival ?? stop?.targetDeparture ?? null;
@@ -4186,50 +4189,84 @@ function lineSearchStopEta(stop, nowMs = Date.now()) {
   const timestamp = lineSearchTimestampMs(value);
   if (!Number.isFinite(timestamp)) return 'Tijd onbekend';
   const totalSeconds = Math.round((timestamp - nowMs) / 1000);
+  if (totalSeconds <= -60) return 'Tijd verstreken';
   if (totalSeconds <= 0) return 'Nu';
-  if (totalSeconds >= 3600) {
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    return hours + ':' + String(minutes).padStart(2, '0') + ' uur';
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return hours + ':' + String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
   }
-  return Math.floor(totalSeconds / 60) + ':' +
-    String(totalSeconds % 60).padStart(2, '0') + ' min';
+  return minutes + ':' + String(seconds).padStart(2, '0');
 }
 
 function renderLineSearchStopTable(stops, nowMs) {
   if (!Array.isArray(stops) || stops.length === 0) return '';
   const rows = stops.map(stop => {
     const stopName = String(stop?.name ?? 'Onbekende halte').trim();
-    const stopCode = String(stop?.userStopCode ?? stop?.timingPointCode ?? '').trim();
-    const linked = /^[A-Za-z0-9_-]+$/.test(stopCode);
+    const rawStopCode = String(stop?.userStopCode ?? stop?.timingPointCode ?? '').trim();
+    const stopCode = /^nl-OpenOV_/i.test(rawStopCode)
+      ? rawStopCode
+      : /^\d+$/.test(rawStopCode) ? 'nl-OpenOV_' + rawStopCode : rawStopCode;
+    const linked = /^[A-Za-z0-9_.:-]+$/.test(stopCode) && stopCode.length >= 3;
     const nameHtml = linked
-      ? '<a href="https://ovzoeker.nl/halte/' + encodeURIComponent(stopCode) +
-        '" target="_blank" rel="noopener noreferrer">' + esc(stopName) + '</a>'
+      ? '<a class="line-search-stop-link" href="#stopTimesPanel" data-stop-id="' +
+        esc(stopCode) + '" data-stop-name="' + esc(stopName) + '">' + esc(stopName) + '</a>'
       : esc(stopName);
     const eta = lineSearchStopEta(stop, nowMs);
+    const etaHtml = '<span class="line-search-eta-countdown" data-line-search-eta="1"' +
+      ' data-status="' + esc(stop?.status ?? '') + '"' +
+      ' data-is-at-stop="' + (stop?.isAtStop === true ? 'true' : 'false') + '"' +
+      ' data-is-last-reported-stop="' + (stop?.isLastReportedStop === true ? 'true' : 'false') + '"' +
+      ' data-expected-arrival="' + esc(stop?.expectedArrival ?? '') + '"' +
+      ' data-expected-departure="' + esc(stop?.expectedDeparture ?? '') + '"' +
+      ' data-target-arrival="' + esc(stop?.targetArrival ?? '') + '"' +
+      ' data-target-departure="' + esc(stop?.targetDeparture ?? '') + '">' + esc(eta) + '</span>';
     const planned = stop?.expectedArrival && stop?.targetArrival &&
       lineSearchTimestampMs(stop.expectedArrival) !== lineSearchTimestampMs(stop.targetArrival)
       ? '<small>Volgens dienstregeling: ' + esc(lineSearchClock(stop.targetArrival)) + '</small>'
       : '';
-    return '<tr><td>' + nameHtml + '</td><td>' + esc(eta) + planned + '</td></tr>';
+    return '<tr><td>' + nameHtml + '</td><td>' + etaHtml + planned + '</td></tr>';
   }).join('');
   return '<div class="stop-time-table-wrap"><table class="stop-time-table">' +
     '<thead><tr><th>Halte</th><th>Verwachte aankomsttijd</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table></div>';
 }
 
-function renderLineSearchStops(row) {
+function lineSearchStopNameKey(value) {
+  return String(value ?? '').trim().toLocaleLowerCase('nl-NL')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function renderLineSearchStops(row, nowMs = Date.now()) {
   const stops = Array.isArray(row?.stops) ? row.stops : [];
   if (stops.length === 0) return '';
-  const nowMs = Date.now();
-  const preview = stops.slice(0, 5);
-  const remaining = stops.slice(5);
+  const currentCode = String(row?.currentStopCode ?? '').trim().toLocaleLowerCase('nl-NL');
+  const currentName = lineSearchStopNameKey(row?.stop);
+  let currentIndex = stops.findIndex(stop => {
+    const code = String(stop?.userStopCode ?? stop?.timingPointCode ?? '').trim().toLocaleLowerCase('nl-NL');
+    return currentCode && code && currentCode === code;
+  });
+  if (currentIndex < 0 && currentName) {
+    currentIndex = stops.findIndex(stop => {
+      const name = lineSearchStopNameKey(stop?.name);
+      return name && (name === currentName || name.includes(currentName) || currentName.includes(name));
+    });
+  }
+  // A planned time alone is not evidence that a delayed vehicle has passed a stop.
+  // Use the last location/stop matched from the vehicle/trip row as the boundary.
+  const previous = currentIndex > 0 ? stops.slice(0, currentIndex) : [];
+  const currentAndNext = (currentIndex >= 0 ? stops.slice(currentIndex) : stops).map((stop, index) => ({
+    ...stop,
+    isLastReportedStop: currentIndex >= 0 && index === 0
+  }));
   return '<section class="line-search-stops"><h3>Volgende haltes</h3>' +
-    renderLineSearchStopTable(preview, nowMs) +
-    (remaining.length
-      ? '<details class="line-search-all-stops"><summary>Toon alle haltes (' + stops.length + ')</summary>' +
-        renderLineSearchStopTable(remaining, nowMs) + '</details>'
+    (previous.length
+      ? '<details class="line-search-past-stops"><summary>Vorige haltes (' + previous.length + ')</summary>' +
+        renderLineSearchStopTable(previous, nowMs) + '</details>'
       : '') +
+    renderLineSearchStopTable(currentAndNext, nowMs) +
     '</section>';
 }
 
@@ -4239,6 +4276,8 @@ function renderLineSearchCard(row) {
   const operator = String(row?.operatorName ?? '').trim();
   const heading = [operator, line, destination].filter(Boolean).join(' ');
   const vehicleLabel = String(row?.vehicleLabel ?? 'Voertuig').trim();
+  const lineSearchCardId = String(row?.id ?? [line, destination, row?.tripId, row?.vehicleNumber].join('|'));
+  lineSearchRowsByCardId.set(lineSearchCardId, row);
   const facts = [];
   if (row?.tripNumber != null && String(row.tripNumber).trim()) {
     facts.push({ label: 'Rit ' + String(row.tripNumber).trim(), kind: '' });
@@ -4295,7 +4334,8 @@ function renderLineSearchCard(row) {
     ? '<p class="line-search-stop-provenance">Haltes uit ' + esc(row.stopDataSource) +
       '; de bron bevestigt hiermee niet automatisch een realtime-aankomst per halte.</p>'
     : '';
-  return '<details class="line-search-card line-search-card-expandable">' +
+  return '<details class="line-search-card line-search-card-expandable" data-line-search-card-id="' +
+    esc(lineSearchCardId) + '">' +
     '<summary class="line-search-card-summary">' +
       '<span class="line-search-primary">' + esc(heading) + '</span>' +
       '<span class="line-search-secondary">' + esc(vehicleLabel) + '</span>' +
@@ -4312,15 +4352,49 @@ function renderLineSearchCard(row) {
     '</details>';
 }
 
+const lineSearchRowsByCardId = new Map();
+
 function displayLineSearchResults(containerId, rows, emptyText) {
   const container = $(containerId);
   if (!container) return;
+  const previousStates = new Map();
+  for (const card of container.querySelectorAll('details.line-search-card-expandable')) {
+    const cardId = card.dataset.lineSearchCardId;
+    if (!cardId) continue;
+    previousStates.set(cardId, {
+      open: card.open,
+      previousStopsOpen: card.querySelector('.line-search-past-stops')?.open === true
+    });
+  }
+  lineSearchRowsByCardId.clear();
   if (!Array.isArray(rows) || rows.length === 0) {
     container.innerHTML = '<div class="stop-time-empty">' + esc(emptyText) + '</div>';
     return;
   }
   container.innerHTML = '<div class="line-search-list">' +
     rows.map(renderLineSearchCard).join('') + '</div>';
+  for (const card of container.querySelectorAll('details.line-search-card-expandable')) {
+    const state = previousStates.get(card.dataset.lineSearchCardId);
+    if (!state) continue;
+    card.open = state.open;
+    const previousStops = card.querySelector('.line-search-past-stops');
+    if (previousStops) previousStops.open = state.previousStopsOpen;
+  }
+}
+
+function refreshLineSearchCountdowns() {
+  const nowMs = Date.now();
+  const container = $('lineResults');
+  if (!container) return;
+  for (const card of container.querySelectorAll('details.line-search-card-expandable')) {
+    const row = lineSearchRowsByCardId.get(card.dataset.lineSearchCardId);
+    const stopSection = card.querySelector('.line-search-stops');
+    if (!row || !stopSection) continue;
+    const wasOpen = card.querySelector('.line-search-past-stops')?.open === true;
+    stopSection.outerHTML = renderLineSearchStops(row, nowMs);
+    const previousStops = card.querySelector('.line-search-past-stops');
+    if (previousStops) previousStops.open = wasOpen;
+  }
 }
 
 function renderJourneyCard(journey, index, walkSettings) {
@@ -5149,37 +5223,95 @@ $('boardSearch').onclick = async () => {
     button.disabled = false;
   }
 };
-$('lineSearch').onclick = async () => {
+const LINE_SEARCH_REFRESH_MS = 10000;
+let lineSearchRefreshTimer = null;
+let lineSearchRequestController = null;
+let lineSearchGeneration = 0;
+let lineSearchCurrentQuery = '';
+let lineSearchCurrentLimit = 30;
+let lineSearchRequestInFlight = false;
+
+async function fetchLineSearchResults(query, limit, generation, automatic = false) {
+  if (automatic && (lineSearchRequestInFlight || document.visibilityState === 'hidden')) return;
+  if (!automatic) lineSearchRequestController?.abort();
+  const controller = new AbortController();
+  lineSearchRequestController = controller;
+  lineSearchRequestInFlight = true;
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
   const button = $('lineSearch');
+  if (!automatic) {
+    button.disabled = true;
+    $('lineResults').innerHTML = '';
+    $('lineStatus').textContent = 'Actuele voertuigen en ritten zoeken…';
+  }
+  try {
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    const data = await api('/api/line-search?' + params.toString(), { signal: controller.signal });
+    if (generation !== lineSearchGeneration) return;
+    const rows = Array.isArray(data?.results) ? data.results : [];
+    const countText = rows.length
+      ? query + ' · ' + rows.length + ' voertuig(en)/ritten gevonden.'
+      : 'Geen actieve voertuigen of ritten gevonden die bij ' + query + ' passen.';
+    $('lineStatus').textContent = countText +
+      (data?.partial ? ' Een realtimebron was tijdelijk niet beschikbaar.' : '') +
+      ' · Vernieuwt elke 10 seconden.';
+    displayLineSearchResults('lineResults', rows,
+      'Geen actieve voertuigen of ritten gevonden. Probeer een ander nummer.');
+    refreshLineSearchCountdowns();
+  } catch (error) {
+    if (generation !== lineSearchGeneration) return;
+    if (automatic && $('lineResults').querySelector('.line-search-card')) {
+      $('lineStatus').textContent = 'Automatisch bijwerken mislukt; de bestaande resultaten blijven zichtbaar.';
+    } else if (error?.name !== 'AbortError') {
+      $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn- of voertuigzoekopdracht is mislukt.';
+    }
+  } finally {
+    clearTimeout(timeoutId);
+    if (lineSearchRequestController === controller) {
+      lineSearchRequestInFlight = false;
+      lineSearchRequestController = null;
+      button.disabled = false;
+    }
+  }
+}
+
+$('lineSearch').onclick = async () => {
   const requestedLine = $('lineNumber').value.trim();
   if (!requestedLine) {
     $('lineStatus').textContent = 'Vul eerst een lijnnummer, voertuignummer of ritnummer in, bijvoorbeeld 73.';
     return;
   }
-  button.disabled = true;
-  $('lineResults').innerHTML = '';
-  $('lineStatus').textContent = 'Actuele voertuigen en ritten zoeken…';
-  try {
-    const query = new URLSearchParams({
-      q: requestedLine,
-      limit: String(Math.min(50, Math.max(1, Number($('lineLimit').value) || 30)))
-    });
-    const data = await api('/api/line-search?' + query.toString(), {
-      signal: AbortSignal.timeout(30000)
-    });
-    const rows = Array.isArray(data?.results) ? data.results : [];
-    $('lineStatus').textContent = rows.length
-      ? requestedLine + ' · ' + rows.length + ' voertuig(en)/ritten gevonden.' +
-        (data?.partial ? ' Een realtimebron was tijdelijk niet beschikbaar.' : '')
-      : 'Geen actieve voertuigen of ritten gevonden die bij ' + requestedLine + ' passen.';
-    displayLineSearchResults('lineResults', rows,
-      'Geen actieve voertuigen of ritten gevonden. Probeer een ander nummer.');
-  } catch (error) {
-    $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn- of voertuigzoekopdracht is mislukt.';
-  } finally {
-    button.disabled = false;
-  }
+  lineSearchCurrentQuery = requestedLine;
+  lineSearchCurrentLimit = Math.min(50, Math.max(1, Number($('lineLimit').value) || 30));
+  const generation = ++lineSearchGeneration;
+  if (lineSearchRefreshTimer !== null) clearInterval(lineSearchRefreshTimer);
+  lineSearchRefreshTimer = setInterval(() => {
+    if (document.visibilityState === 'hidden') return;
+    refreshLineSearchCountdowns();
+    void fetchLineSearchResults(lineSearchCurrentQuery, lineSearchCurrentLimit, lineSearchGeneration, true);
+  }, LINE_SEARCH_REFRESH_MS);
+  await fetchLineSearchResults(lineSearchCurrentQuery, lineSearchCurrentLimit, generation, false);
 };
+
+$('lineResults').addEventListener('click', event => {
+  const link = event.target?.closest?.('a.line-search-stop-link');
+  if (!link) return;
+  event.preventDefault();
+  const rawStopId = String(link.dataset.stopId ?? '').trim();
+  const stopName = String(link.dataset.stopName ?? link.textContent ?? '').trim();
+  if (!rawStopId) return;
+  const stopId = /^nl-OpenOV_/i.test(rawStopId)
+    ? rawStopId
+    : /^\d+$/.test(rawStopId) ? 'nl-OpenOV_' + rawStopId : rawStopId;
+  $('boardStop').value = stopId;
+  $('boardWhen').value = '';
+  $('boardStopChoice').hidden = true;
+  $('boardStopChoice').innerHTML = '<option value="">Kies een gevonden halte…</option>';
+  $('boardStopFindStatus').textContent = stopName + ' geselecteerd vanuit de lijnzoeker.';
+  $('stopTimesPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('boardSearch').click();
+});
+
 $('lineNumber').addEventListener('keydown', event => {
   if (event.key === 'Enter') $('lineSearch').click();
 });
