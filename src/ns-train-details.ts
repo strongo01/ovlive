@@ -148,11 +148,117 @@ function formatCrowdFromEntries(entries: Entry[]): NsTrainDetailsSummary["crowdF
   return found ? crowdLabel(found.value) : null;
 }
 
-function facilityBoolean(entries: Entry[], pattern: RegExp): boolean | null {
-  for (const entry of entries) {
-    if (!pattern.test(entry.key)) continue;
-    const parsed = parseBoolean(entry.value);
+const FACILITY_STATUS_KEYS =
+  /^(available|beschikbaar|aanwezig|present|enabled|exists|isavailable|isbeschikbaar|isaanwezig|ispresent|beschikbaarheid|status|heeft|has)$/;
+const FACILITY_NAME_KEYS =
+  /^(type|name|label|code|feature|facility|voorziening|naam|id|item|omschrijving|description|titel)$/;
+
+function explicitFacilityState(value: unknown, depth = 0): boolean | null {
+  if (depth > 6 || value === null || value === undefined) return null;
+  const direct = parseBoolean(value);
+  if (direct !== null) return direct;
+  if (Array.isArray(value)) {
+    const states = value
+      .map(item => explicitFacilityState(item, depth + 1))
+      .filter((item): item is boolean => item !== null);
+    if (states.includes(true)) return true;
+    if (states.length && states.every(item => item === false)) return false;
+    return null;
+  }
+  if (typeof value !== "object") return null;
+
+  for (const [rawKey, child] of Object.entries(value as Record<string, unknown>)) {
+    if (!FACILITY_STATUS_KEYS.test(normalizeKey(rawKey))) continue;
+    const parsed = parseBoolean(child);
     if (parsed !== null) return parsed;
+  }
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    const nested = explicitFacilityState(child, depth + 1);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+function isNegativeFacilityDescription(value: string): boolean {
+  return /^(?:geen|niet|zonder|no|not|non|without|unavailable|afwezig|nietaanwezig)/.test(
+    normalizeKey(value)
+  );
+}
+
+function facilityTokenMatches(value: unknown, pattern: RegExp): boolean {
+  if (typeof value !== "string" || isNegativeFacilityDescription(value)) return false;
+  return pattern.test(normalizeKey(value));
+}
+
+function facilityStateFromPayload(
+  input: unknown,
+  pattern: RegExp,
+  depth = 0
+): boolean | null {
+  if (depth > 8 || input === null || input === undefined) return null;
+
+  if (Array.isArray(input)) {
+    // Sommige NS-features leveren voorzieningen als lijst met namen in plaats
+    // van als { voorziening: true }. Een genoemd item betekent dat het aanwezig is.
+    for (const item of input) {
+      if (facilityTokenMatches(item, pattern)) return true;
+      if (item && typeof item === "object") {
+        const described = facilityStateFromPayload(item, pattern, depth + 1);
+        if (described !== null) return described;
+      }
+    }
+    return null;
+  }
+
+  if (typeof input !== "object") return null;
+  const record = input as Record<string, unknown>;
+  const entries = Object.entries(record);
+
+  // Prioriteit voor expliciete vlaggen: een false mag niet later door een
+  // naam- of labelveld per ongeluk als true worden geïnterpreteerd.
+  for (const [rawKey, value] of entries) {
+    const key = normalizeKey(rawKey);
+    if (!pattern.test(key)) continue;
+
+    const direct = parseBoolean(value);
+    if (direct !== null) return direct;
+
+    if (typeof value === "number" && Number.isFinite(value) &&
+        /aantal|count|quantity|number/.test(key)) {
+      return value > 0;
+    }
+
+    if (Array.isArray(value)) {
+      const nestedState = explicitFacilityState(value);
+      if (nestedState !== null) return nestedState;
+      if (value.some(item => facilityTokenMatches(item, pattern))) return true;
+      if (value.length === 0) return false;
+    } else if (value && typeof value === "object") {
+      const nestedState = explicitFacilityState(value);
+      if (nestedState !== null) return nestedState;
+      // Een concreet object onder een expliciete toilet/wifi/etc.-sleutel
+      // beschrijft die voorziening, tenzij het expliciet anders zegt.
+      return Object.keys(value as Record<string, unknown>).length > 0;
+    }
+  }
+
+  // In platformitems/CTA-achtige responses staat de voorziening soms in een
+  // waarde zoals { type: "WC", beschikbaar: true } in plaats van in de sleutel.
+  const descriptor = entries.some(([rawKey, value]) =>
+    FACILITY_NAME_KEYS.test(normalizeKey(rawKey)) &&
+    facilityTokenMatches(value, pattern)
+  );
+  if (descriptor) {
+    const state = explicitFacilityState(record);
+    return state ?? true;
+  }
+
+  // Ondersteun geneste objecten en arrays, inclusief train-delen met eigen
+  // voorzieningen. Niet herkend betekent onbekend; er wordt niets afgeleid
+  // uit alleen het materieeltype.
+  for (const [, value] of entries) {
+    const nested = facilityStateFromPayload(value, pattern, depth + 1);
+    if (nested !== null) return nested;
   }
   return null;
 }
@@ -181,22 +287,18 @@ export function normalizeNsTrainDetails(
   const trainType = typeEntry?.value ?? null;
 
   const explicitUnitCount = trainEntries.find(entry =>
-    /aantal.*(bak|rijtuig|treindeel|unit|carriage|vehicle)/.test(entry.key)
+    /aantal.*(bak|deel|rijtuig|unit|carriage|vehicle)/.test(entry.key)
   );
   const listedUnits = trainEntries.find(entry =>
-    /^(bakken|rijtuigen|treindelen|trainunits|carriages|units)$/.test(entry.key) &&
+    /^(delen|bakken|rijtuigen|treindelen|materieeldelen|trainunits|carriages|units)$/.test(entry.key) &&
     (Array.isArray(entry.value) || typeof entry.value === "number" ||
       (typeof entry.value === "string" && /^\s*\d+\s*$/.test(entry.value)))
   );
   const selectedUnits = explicitUnitCount ?? listedUnits;
   const unitCount = selectedUnits ? countValue(selectedUnits.value) : null;
-  const unitLabel = selectedUnits
-    ? /rijtuig|carriage/.test(selectedUnits.key)
-      ? "rijtuigen"
-      : /bak/.test(selectedUnits.key)
-        ? "bakken"
-        : "treindelen"
-    : null;
+  // NS beschrijft de opbouw als treindelen; gebruik dat woord ook als het
+  // bronveld intern een andere naam heeft (bijvoorbeeld aantalBakken).
+  const unitLabel = selectedUnits ? "delen" : null;
 
   const compositionEntry = findScalar(trainEntries, /^(samenstelling|composition|formation)$/);
   const composition = compositionEntry?.value ?? null;
@@ -220,14 +322,15 @@ export function normalizeNsTrainDetails(
   const facilities: NsTrainFacility[] = [];
   const facilityDefinitions: Array<{ key: string; label: string; pattern: RegExp }> = [
     { key: "toilet", label: "Toilet", pattern: /toilet|wc/ },
-    { key: "wifi", label: "Wifi", pattern: /wifi/ },
-    { key: "rolstoel", label: "Rolstoeltoegankelijk", pattern: /rolstoel|wheelchair/ },
-    { key: "fiets", label: "Fietsruimte", pattern: /fietsruimte|bikefacility|bikespace/ },
-    { key: "stilte", label: "Stiltezone", pattern: /stiltezone|stiltecoupe|quietzone/ },
-    { key: "stopcontact", label: "Stopcontacten", pattern: /stopcontact|poweroutlet/ }
+    { key: "wifi", label: "Wifi", pattern: /wifi|draadloosinternet/ },
+    { key: "rolstoel", label: "Rolstoeltoegankelijk", pattern: /rolstoel|wheelchair|toegankelijk/ },
+    { key: "fiets", label: "Fietsruimte", pattern: /fietsruimte|fiets|bicycle|bike/ },
+    { key: "stilte", label: "Stiltezone", pattern: /stiltezone|stiltecoupe|quietzone|quietarea/ },
+    { key: "stopcontact", label: "Stopcontacten / USB", pattern: /stopcontact|poweroutlet|usb|laadpunt|oplaadpunt/ },
+    { key: "airco", label: "Airconditioning", pattern: /airco|airconditioning|klimaatregeling/ }
   ];
   for (const definition of facilityDefinitions) {
-    const available = facilityBoolean(trainEntries, definition.pattern);
+    const available = facilityStateFromPayload(trainPayload, definition.pattern);
     if (available !== null) {
       facilities.push({ key: definition.key, label: definition.label, available });
     }
