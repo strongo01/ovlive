@@ -155,7 +155,7 @@
     .line-search-expanded{padding-top:10px}
     .line-search-no-stops,.line-search-stop-provenance{font-size:12px;color:var(--muted);margin:8px 0 0}
     .line-search-map-link{display:inline-block;margin-top:8px;font-size:12px;font-weight:750}
-    .line-search-primary{font-weight:850;font-size:16px}
+    .line-search-primary{display:block;font-weight:850;font-size:16px}
     .line-search-secondary{margin-top:4px;color:var(--accent);font-weight:750;font-size:13px}
     .line-search-meta{margin-top:5px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
     .line-search-facts{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
@@ -4297,11 +4297,11 @@ function renderLineSearchCard(row) {
     : '';
   return '<details class="line-search-card line-search-card-expandable">' +
     '<summary class="line-search-card-summary">' +
-      '<div class="line-search-primary">' + esc(heading) + '</div>' +
-      '<div class="line-search-secondary">' + esc(vehicleLabel) + '</div>' +
-      (facts.length ? '<div class="line-search-facts">' + facts.map(item =>
+      '<span class="line-search-primary">' + esc(heading) + '</span>' +
+      '<span class="line-search-secondary">' + esc(vehicleLabel) + '</span>' +
+      (facts.length ? '<span class="line-search-facts">' + facts.map(item =>
         '<span class="line-search-fact ' + item.kind + '">' + esc(item.label) + '</span>'
-      ).join('') + '</div>' : '') +
+      ).join('') + '</span>' : '') +
       '<span class="line-search-expand-hint"><span>Bekijk ritdetails en volgende haltes</span>' +
         '<span class="line-search-expand-chevron" aria-hidden="true">⌄</span></span>' +
     '</summary>' +
