@@ -2708,6 +2708,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       }, 400, { ...headers, "cache-control": "no-store" });
     }
 
+    const stationCode = String(url.searchParams.get("stationCode") ?? "")
+      .trim()
+      .toUpperCase();
+    if (stationCode && !/^[A-Z0-9]{2,6}$/.test(stationCode)) {
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        error: "De NS-stationscode is ongeldig."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
     if (!String(env.NS_API_SUBSCRIPTION_KEY ?? "").trim()) {
       return json({
         ok: false,
@@ -2717,7 +2728,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
 
     try {
-      const info = await fetchNsTrainDetails(trainNumber, dateTime || null, env);
+      const info = await fetchNsTrainDetails(
+        trainNumber,
+        dateTime || null,
+        env,
+        stationCode || null
+      );
       return json(info, 200, {
         ...headers,
         "cache-control": "private, max-age=15"
@@ -2732,7 +2748,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           ? "De NS API-sleutel ontbreekt."
           : detail === "NS_TRAIN_DETAILS_INVALID_TRAIN_NUMBER"
             ? "Het NS-treinnummer is ongeldig."
-            : upstreamStatus === 401 || upstreamStatus === 403
+            : detail === "NS_TRAIN_DETAILS_INVALID_STATION_CODE"
+              ? "De NS-stationscode is ongeldig."
+              : upstreamStatus === 401 || upstreamStatus === 403
               ? "NS heeft deze treininfo-aanvraag geweigerd. Controleer of de bestaande sleutel toegang heeft tot de Virtual Train-detail-API."
               : upstreamStatus === 429
                 ? "De NS Virtual Train API heeft de aanvraaglimiet bereikt."
@@ -2742,6 +2760,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
       console.warn("[OVLIVE_NS_TRAIN_DETAILS]", JSON.stringify({
         trainNumber,
+        stationCode: stationCode || null,
         upstreamStatus,
         errorCode: detail.match(/NS_TRAIN_DETAILS_[A-Z_]+/)?.[0] ?? "unexpected_error"
       }));
