@@ -36,13 +36,39 @@ assert.equal(data.crowdForecast?.level, "high");
 assert.equal(data.crowdForecast?.label, "Druk");
 assert.equal(data.trainType, "VIRM");
 assert.equal(data.unitCount, 6);
-assert.equal(data.unitLabel, "bakken");
+assert.equal(data.unitLabel, "delen");
 assert.equal(data.lengthMeters, 162);
 assert.equal(data.facilities.length, 4);
 assert.equal(data.facilities.find(item => item.key === "toilet")?.available, true);
 assert.equal(data.facilities.find(item => item.key === "stopcontact")?.available, false);
 assert.equal(data.status, "available");
 console.log("PASS: NS-drukte, materieel, expliciete lengte en voorzieningen worden genormaliseerd");
+
+// NS kan voorzieningen ook als items/labels teruggeven, niet alleen als losse
+// true/false-eigenschappen. Test die vorm, inclusief een expliciete afwezigheid.
+const itemBased = normalizeNsTrainDetails(
+  {
+    payload: {
+      materieelDelen: [{ volgnummer: 1 }, { volgnummer: 2 }, { volgnummer: 3 }, { volgnummer: 4 }],
+      platformitems: [
+        { type: "WC", beschikbaar: false },
+        { type: "WIFI" },
+        { naam: "ROLSTOELTOEGANKELIJK", aanwezig: true },
+        { code: "USB" }
+      ]
+    }
+  },
+  null,
+  "3525"
+);
+assert.equal(itemBased.unitCount, 4);
+assert.equal(itemBased.unitLabel, "delen");
+assert.equal(itemBased.facilities.find(item => item.key === "toilet")?.available, false);
+assert.equal(itemBased.facilities.find(item => item.key === "wifi")?.available, true);
+assert.equal(itemBased.facilities.find(item => item.key === "rolstoel")?.available, true);
+assert.equal(itemBased.facilities.find(item => item.key === "stopcontact")?.available, true);
+assert.equal(itemBased.facilities.length, 4);
+console.log("PASS: voorzieningen uit NS-platformitems worden getoond en treindelen heten 'delen'");
 
 const calm = normalizeNsTrainDetails(
   { payload: { crowdForecast: "LOW", length: 160 } },
