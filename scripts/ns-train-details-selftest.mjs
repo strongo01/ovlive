@@ -72,8 +72,15 @@ console.log("PASS: ontbrekende NS-data blijft onbekend en wordt niet als rustig 
 
 const ui = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const realtime = await readFile(new URL("../src/ns-train-realtime.ts", import.meta.url), "utf8");
 assert.ok(ui.includes("ns-train-details-button"), "UI must provide the on-demand train-details control");
 assert.ok(ui.includes("function bindNsTrainDetailsButtons"));
 assert.ok(ui.includes("fetch('/api/ns/train-details?'"));
+assert.ok(ui.includes("class=\"ns-train-consist\""), "UI must show a visual train-composition diagram");
+assert.ok(ui.includes("data-station-code="), "UI must pass the train's departure station for station-specific detail data");
+assert.ok(!ui.includes("De ontvangen ritgegevens bevestigen op dit moment geen specifieke voorzieningen."),
+  "UI should not show an unhelpful empty-facilities notice");
 assert.ok(worker.includes('url.pathname === "/api/ns/train-details"'));
-console.log("PASS: UI gebruikt de beveiligde Worker-route en laadt treindetails op aanvraag");
+assert.ok(worker.includes('url.searchParams.get("stationCode")'), "Worker must validate and accept a station code");
+assert.ok(realtime.includes("departureStationCode: fromCode"), "matched NS train legs must carry the departure station code");
+console.log("PASS: UI shows train composition and requests station-specific NS details securely");
