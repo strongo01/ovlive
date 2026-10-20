@@ -3500,7 +3500,7 @@ q.set('pedestrianSpeed', '1.5');
           const existing = knownByKey.get(key);
           if (existing) {
             existing.ovliveTightTransferCandidate = true;
-          } else {
+          } else if (tightAdditions.length < 3) {
             knownByKey.set(key, journey);
             tightAdditions.push(journey);
           }
