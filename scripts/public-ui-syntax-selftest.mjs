@@ -786,4 +786,43 @@ assert.ok(html.includes("q.set('numItineraries', '10')"),
   "the planner must request extra alternatives so a later service can replace a missed connection");
 console.log("PASS: impossible walking transfers are filtered and later tram alternatives remain eligible");
 console.log("PASS: all walking legs use the selected speed and check transfer feasibility");
+
+// A scheduled-only supplementary search must retain only explicitly confirmed
+// cancellations and show them separately, never as usable trip options.
+const cancelledHelperStart = html.indexOf("function journeySourceLegs(journey) {");
+const cancelledHelperEnd = html.indexOf("function prepareJourneyLegsForDisplay(", cancelledHelperStart);
+assert.ok(cancelledHelperStart >= 0 && cancelledHelperEnd > cancelledHelperStart,
+  "cancelled-trip identity helpers must remain available for deterministic tests");
+const cancelledHelperContext = {};
+new vm.Script(
+  html.slice(cancelledHelperStart, cancelledHelperEnd).trim() +
+  "\nthis.confirmedCancelledLegs = confirmedCancelledLegs;" +
+  "\nthis.journeyHasConfirmedCancellation = journeyHasConfirmedCancellation;" +
+  "\nthis.confirmedCancelledSource = confirmedCancelledSource;" +
+  "\nthis.confirmedTripIdentityKey = confirmedTripIdentityKey;"
+).runInNewContext(cancelledHelperContext);
+assert.equal(cancelledHelperContext.journeyHasConfirmedCancellation({
+  legs: [{ mode: "TRAM", ndovRealtime: { status: "cancelled", source: "NDOV BISON KV17" } }]
+}), true, "an exact NDOV cancellation must be recognized");
+assert.equal(cancelledHelperContext.confirmedCancelledSource({
+  mode: "TRAM", ndovRealtime: { status: "cancelled", source: "NDOV BISON KV17" }
+}), "NDOV BISON KV17");
+assert.equal(cancelledHelperContext.journeyHasConfirmedCancellation({
+  legs: [{ mode: "TRAM", ndovRealtime: { status: "unknown" } }]
+}), false, "missing/unconfirmed realtime must not be described as a cancellation");
+assert.equal(cancelledHelperContext.confirmedTripIdentityKey({
+  mode: "TRAM", tripId: "20261020_12:55_nl-OpenOV_123456"
+}), "TRAM|20261020_12:55_nl-OpenOV_123456");
+assert.ok(html.includes("cancellationQuery.delete('deferRealtime')") &&
+  html.includes("cancellationQuery.set('realtimeMode', 'OFF')") &&
+  html.includes("cancellationQuery.set('numItineraries', '12')"),
+  "the supplementary search must request scheduled journeys and allow cancellation enrichment to run");
+assert.ok(html.includes('id="cancelled-trips-container"') &&
+  html.includes("Rijdt niet — reis niet mogelijk met deze rit") &&
+  html.includes("Vervallen ritten"),
+  "confirmed cancelled trips must be displayed in a separate, clearly unavailable section");
+assert.ok(html.includes("data-transit-trip-ids=") &&
+  html.includes("cancelledTripIds.has(String(id))"),
+  "a confirmed cancelled trip must not remain in the normal list as a usable option");
+console.log("PASS: confirmed cancelled trips are retrieved from the timetable and shown separately as unavailable");
 console.log("All public UI JavaScript checks passed.");

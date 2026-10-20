@@ -29,6 +29,15 @@
     .ns-train-layout-crowd:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
     .ns-train-facility{font-weight:650}
     .ns-train-details-section-title{font-size:12px;font-weight:800;margin:8px 0 5px}
+    .cancelled-trips-section{margin:18px 0 12px;padding-top:8px;border-top:1px solid var(--line)}
+    .cancelled-trips-intro{font-size:12px;color:var(--muted);margin:0 0 10px}
+    .cancelled-trip-card{border:1px solid rgba(252,165,165,.6);border-radius:14px;margin:10px 0;background:var(--panel);overflow:hidden}
+    .cancelled-trip-card>summary{list-style:none;cursor:pointer;padding:14px}
+    .cancelled-trip-card>summary::-webkit-details-marker{display:none}
+    .cancelled-trip-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:9px;color:var(--red);font-weight:850}
+    .cancelled-trip-pill{display:inline-block;padding:3px 7px;border-radius:7px;border:1px solid rgba(252,165,165,.5);background:rgba(252,165,165,.1);font-size:11px}
+    .cancelled-trip-card .journey-detail-body{border-top:1px solid var(--line);padding:14px}
+    .cancelled-trip-card .journey-card-bottom{margin-top:9px}
     #tightTransferHelp{margin-top:0}.journey-tight-transfer-tag{display:inline-block;border-radius:7px;padding:3px 8px;font-size:11px;font-weight:750;color:#fcd34d;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3)}button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:var(--muted);font-size:13px}.status{padding:10px 12px;border-radius:10px;background:#222a32;margin:8px 0}.ok{color:var(--green)}.bad{color:var(--red)}
     .journey{border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}.leg{padding:10px 0;border-bottom:1px solid var(--line)}.leg:last-child{border-bottom:0}.pill{font-size:12px;border-radius:999px;background:#2a3038;padding:3px 8px;display:inline-block;margin-right:6px}.source{font-size:12px;color:var(--muted);overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#dbe4ee;font-size:12px}
 
@@ -731,6 +740,8 @@ const LIVE_PLAN_REALTIME_POLL_MS = 10000;
 let livePlanRealtimeTimer = null;
 let livePlanRealtimeInFlight = false;
 let livePlanRealtimeGeneration = 0;
+let cancelledTripLookupGeneration = 0;
+let cancelledTripLookupController = null;
 // Avoid showing a noisy hard error for a transient Cloudflare/upstream 5xx.
 // Back off progressively if consecutive refreshes fail, then recover automatically.
 let livePlanRealtimeFailureStreak = 0;
@@ -2974,6 +2985,185 @@ function journeySourceLegs(journey) {
       : [];
 }
 
+function confirmedCancelledLegs(journey) {
+  return journeySourceLegs(journey).filter(leg =>
+    leg?.cancelled === true ||
+    leg?.ndovRealtime?.status === 'cancelled' ||
+    leg?.openovRealtime?.status === 'cancelled' ||
+    leg?.nsRealtime?.status === 'cancelled'
+  );
+}
+
+function journeyHasConfirmedCancellation(journey) {
+  return confirmedCancelledLegs(journey).length > 0;
+}
+
+function confirmedCancelledSource(leg) {
+  if (leg?.nsRealtime?.status === 'cancelled') return 'NS Reisinformatie API';
+  if (leg?.ndovRealtime?.status === 'cancelled') {
+    return String(leg.ndovRealtime.source || 'NDOV BISON KV17');
+  }
+  if (leg?.openovRealtime?.status === 'cancelled') {
+    return String(leg.openovRealtime.source || 'OpenOV GTFS-Realtime');
+  }
+  return String(leg?.ndovRealtime?.source || 'Bevestigde realtimebron');
+}
+
+function confirmedTripIdentityKey(leg) {
+  const tripId = String(leg?.tripId ?? leg?.trip?.id ?? '').trim();
+  if (!tripId) return '';
+  return String(leg?.mode ?? '').toUpperCase() + '|' + tripId;
+}
+
+function renderCancelledJourneyCard(journey) {
+  const legs = journeySourceLegs(journey);
+  const transitModes = new Set(['WALK', 'WAIT', 'TRANSFER']);
+  const transitLegs = legs.filter(leg =>
+    !transitModes.has(String(leg?.mode ?? '').toUpperCase())
+  );
+  const cancelledLegs = confirmedCancelledLegs(journey);
+  if (!transitLegs.length || !cancelledLegs.length) return '';
+
+  const first = transitLegs[0];
+  const last = transitLegs[transitLegs.length - 1];
+  const departure = plannedEndpointTime(first, 'departure') ||
+    journey?.startTime || first?.startTime || null;
+  const arrival = plannedEndpointTime(last, 'arrival') ||
+    journey?.endTime || last?.endTime || null;
+  const originName = first?.from?.name || first?.origin?.name || 'Vertrekpunt';
+  const destinationName = last?.to?.name || last?.destination?.name || 'Bestemming';
+  const routeLabels = transitLegs.map(leg => lineTitle(leg)).filter(Boolean);
+  const routeText = routeLabels.join(' → ') || 'OV-rit';
+  const sources = [...new Set(cancelledLegs.map(confirmedCancelledSource))];
+  const cancelledLabels = [...new Set(cancelledLegs.map(leg => lineTitle(leg)).filter(Boolean))];
+  const summary = cancelledLabels.length ? cancelledLabels.join(', ') : routeText;
+  const tripIds = transitLegs.map(confirmedTripIdentityKey).filter(Boolean);
+  const itineraryKey = itineraryRealtimeKey(journey);
+
+  return `<details class="cancelled-trip-card" data-itinerary-key="${esc(itineraryKey)}"
+      data-transit-trip-ids="${esc(JSON.stringify(tripIds))}">
+    <summary>
+      <div class="cancelled-trip-top">
+        <span class="cancelled-trip-pill">⚠ RIJDT NIET</span>
+        <span>${esc(summary)}</span>
+        <span class="muted">Details bekijken ↓</span>
+      </div>
+      <div class="journey-time-grid">
+        <div class="journey-time-block">
+          <span class="journey-time-label">VERTREK</span>
+          <span class="journey-big-time">${departure ? esc(clock(departure)) : '—'}</span>
+          <span class="journey-endpoint" title="${esc(originName)}">${esc(originName)}</span>
+        </div>
+        <span class="journey-middle-arrow" aria-hidden="true">→</span>
+        <div class="journey-time-block">
+          <span class="journey-time-label">AANKOMST</span>
+          <span class="journey-big-time">${arrival ? esc(clock(arrival)) : '—'}</span>
+          <span class="journey-endpoint" title="${esc(destinationName)}">${esc(destinationName)}</span>
+        </div>
+      </div>
+      <div class="journey-card-bottom">
+        <span class="journey-meta">${esc(routeText)}</span>
+        <span class="journey-meta">·</span>
+        <span class="journey-meta">Niet bruikbaar door uitval</span>
+      </div>
+    </summary>
+    <div class="journey-detail-body">
+      <div class="status rt-cancelled">
+        <strong>Rijdt niet — reis niet mogelijk met deze rit</strong>
+        <div class="rt-details">Bevestigde annulering via: ${esc(sources.join(', '))}. Dit reisschema wordt alleen getoond om de uitval zichtbaar te maken; gebruik het niet als reisadvies.</div>
+      </div>
+      <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Vervallen rit · niet instappen</span></div>
+      <div class="journey-leg-details">${legs.map((leg, legIndex) => renderLeg(leg, legIndex, legs)).join('')}</div>
+    </div>
+  </details>`;
+}
+
+function loadCancelledTripSupplement(baseQuery, generation) {
+  if (generation !== cancelledTripLookupGeneration) return;
+  const container = document.getElementById('cancelled-trips-container');
+  if (!container) return;
+
+  const controller = new AbortController();
+  cancelledTripLookupController = controller;
+  container.innerHTML = '<p class="muted">Controleert de dienstregeling op vervallen ritten…</p>';
+
+  const cancellationQuery = new URLSearchParams(baseQuery);
+  cancellationQuery.delete('deferRealtime');
+  cancellationQuery.set('realtimeMode', 'OFF');
+  cancellationQuery.set('numItineraries', '12');
+  cancellationQuery.set('maxItineraries', '12');
+
+  void (async () => {
+    try {
+      // A realtime route search may omit a cancelled service before OVLive can
+      // mark it. The scheduled-only search brings those trip instances back;
+      // the Worker then checks their actual realtime status before showing them.
+      const data = await api('/api/plan?' + cancellationQuery.toString(), {
+        signal: controller.signal
+      });
+      if (generation !== cancelledTripLookupGeneration) return;
+
+      const candidates = Array.isArray(data?.itineraries) ? data.itineraries
+        : Array.isArray(data?.journeys) ? data.journeys : [];
+      const confirmed = [];
+      const seenItineraries = new Set();
+      const cancelledTripIds = new Set();
+
+      for (const journey of candidates) {
+        const cancelledLegs = confirmedCancelledLegs(journey);
+        if (!cancelledLegs.length) continue;
+        for (const leg of cancelledLegs) {
+          const key = confirmedTripIdentityKey(leg);
+          if (key) cancelledTripIds.add(key);
+        }
+        const key = itineraryRealtimeKey(journey);
+        if (seenItineraries.has(key)) continue;
+        seenItineraries.add(key);
+        confirmed.push(journey);
+      }
+
+      // A main result with the same trip must not remain displayed as usable
+      // after the scheduled-only lookup has confirmed that it is cancelled.
+      const cancelledItineraryKeys = new Set(confirmed.map(itineraryRealtimeKey));
+      document.querySelectorAll('.journey-card[data-transit-trip-ids]').forEach(card => {
+        let ids = [];
+        try {
+          ids = JSON.parse(card.getAttribute('data-transit-trip-ids') || '[]');
+        } catch {}
+        const overlapsCancelledTrip = Array.isArray(ids) &&
+          ids.some(id => cancelledTripIds.has(String(id)));
+        const isSameItinerary = cancelledItineraryKeys.has(
+          String(card.getAttribute('data-itinerary-key') || '')
+        );
+        if (overlapsCancelledTrip || isSameItinerary) card.remove();
+      });
+
+      if (!confirmed.length) {
+        container.innerHTML = '';
+        return;
+      }
+
+      container.innerHTML =
+        '<section class="cancelled-trips-section">' +
+        '<div class="results-heading"><h3>Vervallen ritten</h3><span>Ter informatie · niet bruikbaar</span></div>' +
+        '<p class="cancelled-trips-intro">Deze ritten staan in de geplande dienstregeling, maar een realtimebron bevestigt dat ze zijn uitgevallen. Ze worden apart gehouden van de bruikbare reisopties.</p>' +
+        confirmed.map(renderCancelledJourneyCard).join('') +
+        '</section>';
+      bindNsTrainDetailsButtons(container);
+    } catch (error) {
+      if (generation !== cancelledTripLookupGeneration ||
+          (error instanceof Error && error.name === 'AbortError')) return;
+      container.innerHTML =
+        '<div class="status rt-unknown"><strong>Vervallen ritten konden niet volledig worden gecontroleerd.</strong>' +
+        '<div class="rt-details">De hoofdresultaten blijven beschikbaar, maar een ontbrekende vervallen rit betekent niet dat er geen uitval is. ' +
+        esc(error instanceof Error ? error.message : 'De extra dienstregelingcontrole is mislukt.') +
+        '</div></div>';
+    } finally {
+      if (cancelledTripLookupController === controller) cancelledTripLookupController = null;
+    }
+  })();
+}
+
 function prepareJourneyLegsForDisplay(
   journey,
   sourceLegs,
@@ -3564,6 +3754,11 @@ $('planBtn').onclick = async () => {
   window.__ovliveTrackingJourneys = [];
   $('planBtn').disabled = true;
   $('tightTransferBtn').disabled = true;
+  if (cancelledTripLookupController) {
+    cancelledTripLookupController.abort();
+    cancelledTripLookupController = null;
+  }
+  const cancelledTripLookupId = ++cancelledTripLookupGeneration;
   $('planStatus').textContent = 'Reizen ophalen en realtime controleren…';
   $('journeys').innerHTML = '';
 
@@ -3995,7 +4190,7 @@ q.set('pedestrianSpeed', '1.5');
         }
       }
 
-      return `<details class="journey-card" data-tracking-index="${index}" data-sort-departure-ms="${sortMetrics.departureMs ?? ''}" data-sort-arrival-ms="${sortMetrics.arrivalMs ?? ''}" data-sort-duration-ms="${sortMetrics.durationMs ?? ''}" data-sort-transfers="${sortMetrics.transfers}" data-sort-transfer-wait-seconds="${sortMetrics.transferWaitSeconds ?? ''}">
+      return `<details class="journey-card" data-tracking-index="${index}" data-itinerary-key="${esc(itineraryRealtimeKey(journey))}" data-transit-trip-ids="${esc(JSON.stringify(transitLegs.map(confirmedTripIdentityKey).filter(Boolean)))}" data-sort-departure-ms="${sortMetrics.departureMs ?? ''}" data-sort-arrival-ms="${sortMetrics.arrivalMs ?? ''}" data-sort-duration-ms="${sortMetrics.durationMs ?? ''}" data-sort-transfers="${sortMetrics.transfers}" data-sort-transfer-wait-seconds="${sortMetrics.transferWaitSeconds ?? ''}">
         <summary class="journey-card-summary" aria-label="Bekijk details van reis ${index + 1}">
           <div class="journey-card-top">
             <span class="journey-number">REIS ${index + 1}</span>
@@ -4051,6 +4246,7 @@ q.set('pedestrianSpeed', '1.5');
         <span class="muted" id="live-refresh-status" role="status">Automatische realtime-update start na zoeken.</span>
       </div>` +
       `<div class="journey-results-list">${cards}</div>` +
+      `<div id="cancelled-trips-container" aria-live="polite"></div>` +
       renderAlerts(data.openovAlerts || []) +
       `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted" id="realtime-plan-diagnostic-status">${esc(diagnosticPlanStatus)}</p><div id="realtime-feed-info">${feedInfo}</div>${renderRealtimeLegend()}</div></details>`;
     bindLiveJourneyCards();
@@ -4061,6 +4257,7 @@ q.set('pedestrianSpeed', '1.5');
     }
     sortJourneyCards(journeySort?.value || 'departure');
     startLivePlanRealtimeRefresh(data);
+    loadCancelledTripSupplement(q, cancelledTripLookupId);
     $('journeys').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   } catch (error) {
