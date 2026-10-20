@@ -4106,7 +4106,7 @@ function lineSearchMatchesRecord(row, query) {
 }
 
 function renderLineSearchCard(row) {
-  const line = String(row?.line ?? 'OV-voertuig').trim();
+  const line = String(row?.line ?? 'Lijn onbekend').trim();
   const destination = String(row?.destination ?? 'Bestemming onbekend').trim();
   const vehicleLabel = String(row?.vehicleLabel ?? 'Voertuig').trim();
   const meta = [];
@@ -4118,6 +4118,9 @@ function renderLineSearchCard(row) {
       : 'Laatst bijgewerkt ' + Math.round(row.updateAgeSeconds / 60) + ' min geleden');
   }
   if (row?.source) meta.push('Bron: ' + String(row.source));
+  if (row?.vehicleNumber) meta.push('Voertuig-ID: ' + String(row.vehicleNumber));
+  if (row?.tripId) meta.push('Rit-ID: ' + String(row.tripId));
+  if (row?.routeId) meta.push('Route-ID: ' + String(row.routeId));
   return '<article class="line-search-card">' +
     '<div class="line-search-primary">' + esc(line) + ' richting ' + esc(destination) + '</div>' +
     '<div class="line-search-secondary">' + esc(vehicleLabel) + '</div>' +
