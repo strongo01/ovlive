@@ -1102,11 +1102,11 @@ const normalizedJourney = journeyStopContext.normalizeOvapiJourneyStops({
 }, "3924355");
 assert.deepEqual(
   JSON.parse(JSON.stringify(normalizedJourney.stops.map(stop => ({
-    name: stop.name, userStopCode: stop.userStopCode, isCurrent: stop.isCurrent
+    name: stop.name, userStopCode: stop.userStopCode, isCurrent: stop.isCurrent, isAtStop: stop.isAtStop
   })))),
   [
-    { name: "Station Leidsche Rijn (F)", userStopCode: "3924355", isCurrent: true },
-    { name: "Thomas à Kempisplantsoen", userStopCode: "3923804", isCurrent: false }
+    { name: "Station Leidsche Rijn (F)", userStopCode: "3924355", isCurrent: true, isAtStop: false },
+    { name: "Thomas à Kempisplantsoen", userStopCode: "3923804", isCurrent: false, isAtStop: false }
   ],
   "journey stops must be ordered from the exact current stop, excluding already passed and cancelled stops"
 );
@@ -1166,7 +1166,7 @@ const detailedCard = lineCardContext.renderLineSearchCard({
   updatedAt: "2026-10-20T15:58:31+02:00",
   permalink: "https://ovzoeker.nl/voertuig/CXX:9568", source: "OVAPI",
   stops: [
-    { name: "Station Leidsche Rijn (F)", userStopCode: "3924355", isCurrent: true, status: "DRIVING" },
+    { name: "Station Leidsche Rijn (F)", userStopCode: "3924355", isCurrent: true, isAtStop: true, status: "ARRIVED" },
     { name: "Thomas à Kempisplantsoen", userStopCode: "3923804", expectedArrival: "2026-10-20T16:01:00", targetArrival: "2026-10-20T16:01:00", status: "PLANNED" },
     { name: "Majellapark", userStopCode: "3923829", expectedArrival: "2026-10-20T16:02:00", targetArrival: "2026-10-20T16:02:00", status: "PLANNED" },
     { name: "Hasebroekstraat", userStopCode: "3923827", expectedArrival: "2026-10-20T16:04:00", targetArrival: "2026-10-20T16:04:00", status: "PLANNED" },
@@ -1201,6 +1201,15 @@ assert.equal(
   lineCardContext.lineSearchStopEta({ expectedArrival: "2026-10-20T16:01:00" }),
   "2:26 min",
   "OVAPI local stop times must be converted from Europe/Amsterdam before computing arrival countdowns"
+);
+assert.equal(
+  lineCardContext.lineSearchStopEta({
+    isCurrent: true,
+    status: "DRIVING",
+    expectedArrival: "2026-10-20T16:01:00"
+  }),
+  "2:26 min",
+  "the first displayed journey stop is not necessarily a stop the vehicle has reached when status is DRIVING"
 );
 console.log("PASS: OVAPI journey data is normalized from the current stop and excludes passed/cancelled stops");
 console.log("PASS: line-search detail cards show operator/vehicle metadata, permalink and stop-by-stop arrival countdowns");
