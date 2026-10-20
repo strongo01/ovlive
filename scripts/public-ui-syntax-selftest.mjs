@@ -940,7 +940,7 @@ assert.equal(timestampPrefixedTripId.toLocaleLowerCase("nl-NL").includes("11"), 
   "searching for line 11 must not match the :11 in a date/time prefix");
 
 const routeHelperStart = workerSource.indexOf("function openovRouteMetadataForId(");
-const routeHelperEnd = workerSource.indexOf("\nfunction lineSearchTripIdMatches(", routeHelperStart);
+const routeHelperEnd = workerSource.indexOf("\nfunction openovAgencyNameForLine(", routeHelperStart);
 assert.ok(routeHelperStart >= 0 && routeHelperEnd > routeHelperStart,
   "OpenOV public route metadata resolution must remain independently testable");
 const routeHelperSource = workerSource.slice(routeHelperStart, routeHelperEnd)
