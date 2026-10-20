@@ -3630,7 +3630,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           const displayLine = String(
             leg?.routeShortName ?? leg?.tripShortName ?? leg?.displayName ?? ""
           ).trim();
-          const line = displayLine || (String(leg?.mode ?? "").toUpperCase() === "TRAIN" ? "Trein" : "OV-voertuig");
+          const routeId = String(entity?.routeId ?? "").trim();
+          const line = displayLine || (String(leg?.mode ?? "").toUpperCase() === "TRAIN" ? "Trein" : "Lijn onbekend");
           const destination = String(
             leg?.headsign ?? leg?.tripTo?.name ?? leg?.tripTo?.displayName ??
             leg?.to?.name ?? leg?.destination?.name ?? itinerary?.to?.name ?? ""
@@ -3638,11 +3639,18 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           const suffixMatch = tripId.match(/_nl-OpenOV_(.+)$/i);
           const tripNumber = suffixMatch?.[1] ?? "";
           const vehicleMatched = vehicleId.toLocaleLowerCase("nl-NL").includes(needle);
+          const tripMatched = tripId.toLocaleLowerCase("nl-NL").includes(needle);
           const vehicleLabel = vehicleMatched
             ? "Voertuig met nummer " + vehicleId
-            : tripId.toLocaleLowerCase("nl-NL").includes(needle) && tripNumber
-              ? "Voertuig met ritnummer " + tripNumber
-              : "Voertuig";
+            : tripMatched
+              ? "Rit-ID " + (tripNumber || tripId)
+              : vehicleId
+                ? "Voertuig met nummer " + vehicleId
+                : tripNumber
+                  ? "Voertuig met ritnummer " + tripNumber
+                  : tripId
+                    ? "Rit-ID " + tripId
+                    : "Identificatie niet beschikbaar";
           const timestamp = Number(entity?.timestamp ?? 0);
           return {
             id: "openov|" + (tripId || "no-trip") + "|" + (vehicleId || "no-vehicle"),
@@ -3651,6 +3659,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             mode: String(leg?.mode ?? ""),
             vehicleNumber: vehicleId || null,
             tripNumber: tripNumber || null,
+            routeId: routeId || null,
             vehicleLabel,
             stop: String(leg?.from?.name ?? ""),
             status: "",
