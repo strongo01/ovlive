@@ -1183,7 +1183,9 @@ const detailedCard = lineCardContext.renderLineSearchCard({
   tripNumber: "83", blockCode: "80728", numberOfCoaches: 1, delaySeconds: 0,
   updatedAt: "2026-10-20T15:58:31+02:00",
   permalink: "https://ovzoeker.nl/voertuig/CXX:9568", source: "OVAPI",
+  stop: "Station Leidsche Rijn (F)",
   stops: [
+    { name: "Previous stop", userStopCode: "3924354", expectedArrival: "2026-10-20T15:57:00", targetArrival: "2026-10-20T15:57:00", status: "PLANNED" },
     { name: "Station Leidsche Rijn (F)", userStopCode: "3924355", isCurrent: true, isAtStop: true, status: "ARRIVED" },
     { name: "Thomas à Kempisplantsoen", userStopCode: "3923804", expectedArrival: "2026-10-20T16:01:00", targetArrival: "2026-10-20T16:01:00", status: "PLANNED" },
     { name: "Majellapark", userStopCode: "3923829", expectedArrival: "2026-10-20T16:02:00", targetArrival: "2026-10-20T16:02:00", status: "PLANNED" },
@@ -1201,13 +1203,17 @@ assert.ok(detailedCard.includes("U-OV 73 Zeist") &&
   detailedCard.includes("15:58:31"),
   "line search cards must display operator, public line, destination, vehicle, trip, block, coach count, punctuality and source timestamp");
 assert.ok(detailedCard.includes('href="https://ovzoeker.nl/voertuig/CXX:9568"') &&
-  detailedCard.includes('href="https://ovzoeker.nl/halte/3924355"') &&
+  detailedCard.includes('href="#stopTimesPanel"') &&
+  detailedCard.includes('data-stop-id="nl-OpenOV_3924355"') &&
+  !detailedCard.includes('href="https://ovzoeker.nl/halte/') &&
   detailedCard.includes("Bij halte") &&
-  detailedCard.includes("2:26 min") &&
-  detailedCard.includes("3:26 min") &&
-  detailedCard.includes("Toon alle haltes (6)") &&
-  detailedCard.includes("Further stop"),
-  "line search cards must display a vehicle permalink, stop links, correct Dutch ETA countdowns and expandable remaining stops");
+  detailedCard.includes("2:26") &&
+  detailedCard.includes("3:26") &&
+  detailedCard.includes('<details class="line-search-past-stops"><summary>Vorige haltes (1)</summary>') &&
+  detailedCard.includes("Previous stop") &&
+  detailedCard.includes("Further stop") &&
+  !detailedCard.includes("Toon alle haltes"),
+  "line search cards must use internal stop links, MM:SS countdowns, collapsible previous stops, and a normal list of future stops");
 assert.equal(
   lineCardContext.lineSearchClock("2026-10-20T15:58:31+02:00"),
   "15:58:31",
@@ -1217,8 +1223,8 @@ assert.equal(lineCardContext.lineSearchDelayText(null), "",
   "missing expected-vs-target delay data must stay unknown instead of showing Op tijd");
 assert.equal(
   lineCardContext.lineSearchStopEta({ expectedArrival: "2026-10-20T16:01:00" }),
-  "2:26 min",
-  "OVAPI local stop times must be converted from Europe/Amsterdam before computing arrival countdowns"
+  "2:26",
+  "OVAPI local stop times must be converted from Europe/Amsterdam before computing the MM:SS countdown"
 );
 assert.equal(
   lineCardContext.lineSearchStopEta({
@@ -1226,7 +1232,7 @@ assert.equal(
     status: "DRIVING",
     expectedArrival: "2026-10-20T16:01:00"
   }),
-  "2:26 min",
+  "2:26",
   "the first displayed journey stop is not necessarily a stop the vehicle has reached when status is DRIVING"
 );
 console.log("PASS: OVAPI journey data is normalized from the current stop and excludes passed/cancelled stops");
@@ -1251,3 +1257,28 @@ assert.ok(lineSearchSource.includes("const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;") 
 assert.ok(lineSearchSource.includes("OVAPI-lijnbatch ") &&
   lineSearchSource.includes("warnings.push"),
   "individual OVAPI batch failures must be reported without hiding successful batches");
+
+assert.equal(
+  lineCardContext.lineSearchStopEta({ isLastReportedStop: true, expectedArrival: "2026-10-20T16:01:00" }),
+  "Laatst gemelde halte",
+  "the observed current trip stop must be distinguished from downstream scheduled stops"
+);
+assert.equal(
+  lineCardContext.lineSearchStopEta({ expectedArrival: "2026-10-20T15:57:00" }),
+  "Tijd verstreken",
+  "an elapsed schedule time must not be presented as a fresh arrival"
+);
+assert.ok(html.includes("const LINE_SEARCH_REFRESH_MS = 10000;") &&
+  html.includes("setInterval(() => {") &&
+  html.includes("refreshLineSearchCountdowns();") &&
+  html.includes("fetchLineSearchResults(lineSearchCurrentQuery, lineSearchCurrentLimit, lineSearchGeneration, true)"),
+  "line-search rows and stop countdowns must refresh on a ten-second interval");
+assert.ok(html.includes("lineSearchRequestInFlight") &&
+  html.includes("previousStopsOpen: card.querySelector('.line-search-past-stops')?.open === true"),
+  "automatic refresh must avoid overlapping requests and preserve expanded-card state");
+assert.ok(html.includes("$('lineResults').addEventListener('click'") &&
+  html.includes("$('boardSearch').click();") &&
+  html.includes("$('boardStop').value = stopId") &&
+  html.includes('href="#stopTimesPanel"') &&
+  !html.includes('href="https://ovzoeker.nl/halte/'),
+  "clicking a stop must open OVLive's own stop-times search instead of sending users to OVZoeker");
