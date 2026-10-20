@@ -3059,6 +3059,9 @@ async function handleLiveMapOpenovApi(
       // GTFS-RT-objectboom op te bouwen en opnieuw een CPU-limit te riskeren.
       const decoded = decodeOpenovVehiclePositions(bytes);
       const decodeDurationMs = Number((performance.now() - decodeStartedAt).toFixed(2));
+      // Avoid sorting the entire national feed on the CPU-limited Worker.
+      // Every returned point is independently age-checked by the UI; a stable
+      // capped source-order sample is preferable to an expensive global sort.
       const entities = decoded.entities
         .filter((entity: any) =>
           Number.isFinite(entity.latitude) &&
@@ -3067,9 +3070,6 @@ async function handleLiveMapOpenovApi(
           entity.latitude <= 56 &&
           entity.longitude >= 2 &&
           entity.longitude <= 9.5
-        )
-        .sort((left: any, right: any) =>
-          Number(right.timestamp ?? 0) - Number(left.timestamp ?? 0)
         )
         .slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS);
 
