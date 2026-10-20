@@ -3977,6 +3977,7 @@ function createJourneyPageState(query, basePlan, displayedJourneys, cursors = {}
     inFlight: false,
     loadingDirection: '',
     controller: null,
+    timeoutTimer: null,
     message: ''
   };
 }
@@ -4057,8 +4058,9 @@ function updateJourneyPageControls(message = '') {
     }
   });
   if (status) {
+    const visibleCardCount = document.querySelectorAll('.journey-results-list details.journey-card').length;
     const baseMessage = hasState
-      ? `${state.displayedJourneys.length} reizen weergegeven. Per klik worden maximaal 3 reizen toegevoegd.`
+      ? `${visibleCardCount || state.displayedJourneys.length} reizen weergegeven. Per klik worden maximaal 3 reizen toegevoegd.`
       : '';
     status.textContent = message || state?.message || baseMessage;
   }
@@ -4093,6 +4095,7 @@ async function loadMoreJourneys(direction) {
 
   const controller = new AbortController();
   state.controller = controller;
+  state.timeoutTimer = window.setTimeout(() => controller.abort(), 30000);
   try {
     const queue = direction === 'previous' ? state.pendingPrevious : state.pendingNext;
     let pageAttempts = 0;
@@ -4174,6 +4177,8 @@ async function loadMoreJourneys(direction) {
       state.inFlight = false;
       state.loadingDirection = '';
       state.controller = null;
+      if (state.timeoutTimer) window.clearTimeout(state.timeoutTimer);
+      state.timeoutTimer = null;
       updateJourneyPageControls(state.message);
     }
   }
@@ -4182,6 +4187,7 @@ async function loadMoreJourneys(direction) {
 $('planBtn').onclick = async () => {
   const previousPageState = window.__ovliveJourneyPageState;
   if (previousPageState?.controller) previousPageState.controller.abort();
+  if (previousPageState?.timeoutTimer) window.clearTimeout(previousPageState.timeoutTimer);
   window.__ovliveJourneyPageState = null;
   stopLivePlanRealtimeRefresh();
   stopAllLiveJourneyTracking();
