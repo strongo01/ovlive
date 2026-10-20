@@ -153,10 +153,17 @@ export function normalizeNsLiveVehiclePositions(
   return [...deduped.values()];
 }
 
+function defaultWorkerCache(): Cache | null {
+  if (typeof caches === "undefined") return null;
+  // Cloudflare Workers adds caches.default at runtime; the generic DOM CacheStorage type omits it.
+  return (caches as unknown as { default?: Cache }).default ?? null;
+}
+
 async function readEdgeCache(cacheKey: Request): Promise<NsLiveVehicleFeed | null> {
-  if (typeof caches === "undefined" || !caches.default) return null;
+  const cache = defaultWorkerCache();
+  if (!cache) return null;
   try {
-    const response = await caches.default.match(cacheKey);
+    const response = await cache.match(cacheKey);
     if (!response) return null;
     const value = await response.json() as NsLiveVehicleFeed;
     if (!value || !Array.isArray(value.positions) || typeof value.fetchedAt !== "string") return null;
@@ -167,9 +174,10 @@ async function readEdgeCache(cacheKey: Request): Promise<NsLiveVehicleFeed | nul
 }
 
 async function writeEdgeCache(cacheKey: Request, feed: NsLiveVehicleFeed): Promise<void> {
-  if (typeof caches === "undefined" || !caches.default) return;
+  const cache = defaultWorkerCache();
+  if (!cache) return;
   try {
-    await caches.default.put(cacheKey, new Response(JSON.stringify(feed), {
+    await cache.put(cacheKey, new Response(JSON.stringify(feed), {
       status: 200,
       headers: {
         "content-type": "application/json; charset=utf-8",
