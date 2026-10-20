@@ -3737,12 +3737,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               const expectedArrivalTime = String(actual.ExpectedArrivalTime ?? "").trim();
               const targetTime = String(
                 expectedDepartureTime
-                  ? actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
+                  ? actual.TargetDepartureTime ?? ""
                   : expectedArrivalTime
-                    ? actual.TargetArrivalTime ?? actual.TargetDepartureTime ?? ""
-                    : actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
+                    ? actual.TargetArrivalTime ?? ""
+                    : ""
               ).trim();
-              const expectedTime = expectedDepartureTime || expectedArrivalTime || targetTime;
+              const expectedTime = expectedDepartureTime || expectedArrivalTime;
               const tripId = String(actualId ?? "");
               const currentStopCode = String(actual.UserStopCode ?? actual.TimingPointCode ?? "").trim();
               const permalink = operatorCode && vehicleNumber &&
