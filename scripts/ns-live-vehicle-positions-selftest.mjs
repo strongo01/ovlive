@@ -51,7 +51,7 @@ const positions = normalizeNsLiveVehiclePositions({
       },
       {
         treinNummer: 2,
-        lat: 52.1,
+        lat: 56.1,
         lng: 5.2
       },
       {
