@@ -3907,16 +3907,6 @@ function resolveTransitStop(inputId = 'boardStop', choiceId = 'boardStopChoice')
   }
   throw new Error('Zoek de halte en selecteer een OV-halte uit de gevonden resultaten.');
 }
-    return choice.value;
-  }
-  if (/^[A-Za-z0-9_.:-]{3,200}$/.test(raw) &&
-      !/\\s/.test(raw) &&
-      !/^-?\\d+(?:\\.\\d+)?\\s*,\\s*-?\\d+(?:\\.\\d+)?$/.test(raw)) {
-    return raw;
-  }
-  throw new Error('Zoek de halte en selecteer een OV-halte uit de gevonden resultaten.');
-}
-
 function stopTimeEvent(row, direction) {
   const place = row?.place ?? {};
   const field = direction === 'arrivals' ? 'arrival' : 'departure';
