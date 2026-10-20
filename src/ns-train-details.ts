@@ -26,6 +26,8 @@ export interface NsTrainDetailsSummary {
   facilities: NsTrainFacility[];
   errors: string[];
   message: string | null;
+  stationCode?: string | null;
+  stationContextUsed?: boolean;
 }
 
 const NS_ROOT = "https://gateway.apiportal.ns.nl/virtual-train-api/v1";
