@@ -2836,7 +2836,7 @@ function renderLeg(leg, index = 0, journeyLegs = null) {
     'HIGHSPEED_RAIL', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL', 'SUBURBAN', 'TRAIN']
     .includes(normalizedLegMode);
   const nsTrainNumber = String(leg?.nsRealtime?.trainNumber ?? '').trim();
-  const nsTrainDetailsHtml = isRailLeg && /^\\d{1,6}$/.test(nsTrainNumber)
+  const nsTrainDetailsHtml = isRailLeg && /^\d{1,6}$/.test(nsTrainNumber)
     ? `<div class="ns-train-details-wrap">
         <button type="button" class="secondary ns-train-details-button"
           data-train-number="${esc(nsTrainNumber)}"
