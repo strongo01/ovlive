@@ -3764,7 +3764,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           const journeysResponse = await fetch("http://v0.ovapi.nl/journey/" + journeyKeys.join(","), {
             headers: {
               "accept": "application/json",
-              "user-agent": \`\${env.APP_NAME}/\${env.APP_VERSION} (\${env.APP_CONTACT})\`
+              "user-agent": env.APP_NAME + "/" + env.APP_VERSION + " (" + env.APP_CONTACT + ")"
             },
             signal: AbortSignal.timeout(8000),
             cf: { cacheEverything: true, cacheTtl: 10 }
