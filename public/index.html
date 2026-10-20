@@ -3890,6 +3890,208 @@ if (walkingSpeedInput && walkingSpeedValue) {
   updateWalkingSpeedReadout();
 }
 
+
+function resolveTransitStop(inputId = 'boardStop', choiceId = 'boardStopChoice') {
+  const raw = $(inputId).value.trim();
+  const choice = $(choiceId);
+  const selected = choice?.selectedOptions?.[0];
+  if (choice?.value && selected?.dataset.label === raw) {
+    if (selected.dataset.provider !== 'transitous') {
+      throw new Error('Kies een echte OV-halte uit de resultaten; een adres of kaartlocatie heeft geen vertrektijdenbord.');
+    }
+    return choice.value;
+  }
+  if (/^[A-Za-z0-9_.:-]{3,200}$/.test(raw) &&
+      !/\\s/.test(raw) &&
+      !/^-?\\d+(?:\\.\\d+)?\\s*,\\s*-?\\d+(?:\\.\\d+)?$/.test(raw)) {
+    return raw;
+  }
+  throw new Error('Zoek de halte en selecteer een OV-halte uit de gevonden resultaten.');
+}
+
+function stopTimeEvent(row, direction) {
+  const place = row?.place ?? {};
+  const field = direction === 'arrivals' ? 'arrival' : 'departure';
+  const capitalized = field.charAt(0).toUpperCase() + field.slice(1);
+  const scheduled = place['scheduled' + capitalized] ??
+    place['planned' + capitalized] ?? null;
+  const reported = place[field] ?? null;
+  const live = row?.realTime === true && reported != null;
+  return {
+    time: live ? reported : (scheduled ?? reported),
+    scheduled,
+    reported,
+    live
+  };
+}
+
+function stopTimeDestination(row) {
+  return String(row?.tripTo?.name ?? row?.tripTo?.displayName ??
+    row?.headsign ?? row?.destination?.name ?? 'Bestemming onbekend').trim();
+}
+
+function stopTimeMatchesLine(row, query) {
+  const target = String(query ?? '').trim().toLocaleLowerCase('nl-NL');
+  if (!target) return true;
+  const shortName = String(row?.routeShortName ?? '').trim().toLocaleLowerCase('nl-NL');
+  if (shortName === target) return true;
+  const candidates = [
+    row?.displayName, row?.routeLongName, row?.tripShortName, row?.headsign
+  ].map(value => String(value ?? ''));
+  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\\\function renderJourneyCard(journey, index, walkSettings) {');
+  const boundary = new RegExp('(^|[^\\p{L}\\p{N}])' + escaped + '(?=$|[^\\p{L}\\p{N}])', 'iu');
+  return candidates.some(value => boundary.test(value));
+}
+
+function renderStopSequence(row, direction) {
+  const stops = direction === 'arrivals'
+    ? (Array.isArray(row?.previousStops) ? row.previousStops : [])
+    : (Array.isArray(row?.nextStops) ? row.nextStops : []);
+  if (!stops.length) {
+    return '<p class="muted">De bron levert voor deze rit geen volledige reeks tussenliggende haltes. De bestemming hierboven komt uit de dienstregeling.</p>';
+  }
+  return '<ol class="stop-time-stops">' + stops.map(stop => {
+    const name = stop?.name ?? stop?.displayName ?? stop?.stopName ?? 'Onbekende halte';
+    const timeValue = direction === 'arrivals'
+      ? (stop?.arrival ?? stop?.scheduledArrival ?? stop?.departure ?? stop?.scheduledDeparture)
+      : (stop?.departure ?? stop?.scheduledDeparture ?? stop?.arrival ?? stop?.scheduledArrival);
+    const platform = stop?.track ?? stop?.scheduledTrack ?? '';
+    return '<li><time>' + esc(clock(timeValue)) + '</time><span>' +
+      esc(name) + (platform ? ' · ' + esc('perron ' + platform) : '') +
+      '</span></li>';
+  }).join('') + '</ol>';
+}
+
+function renderStopTimeCard(row, direction, index) {
+  const event = stopTimeEvent(row, direction);
+  const place = row?.place ?? {};
+  const routeName = String(row?.displayName ??
+    [modeName(row?.mode), row?.routeShortName].filter(Boolean).join(' ') ??
+    'OV-rit');
+  const destination = stopTimeDestination(row);
+  const cancelled = row?.cancelled === true || row?.tripCancelled === true;
+  const platform = place?.track ?? place?.scheduledTrack ?? '';
+  const scheduledText = event.live && event.scheduled &&
+    clock(event.scheduled) !== clock(event.time)
+      ? '<div class="stop-time-meta">Dienstregeling: ' + esc(clock(event.scheduled)) + '</div>'
+      : '';
+  const status = cancelled
+    ? '<span class="stop-time-status is-cancelled">⚠ RIJDT NIET</span>'
+    : event.live
+      ? '<span class="stop-time-status is-live">REALTIME</span>'
+      : '<span class="stop-time-status">DIENSTREGELING</span>';
+  const stopLabel = direction === 'arrivals' ? 'Aankomst' : 'Vertrek';
+  return '<article class="stop-time-card' + (cancelled ? ' is-cancelled' : '') + '">' +
+    '<div class="stop-time-top"><div><div class="stop-time-route">' + esc(routeName) +
+      '</div><div class="stop-time-meta">' + esc(stopLabel + ' · ' + destination) +
+      (platform ? ' · ' + esc('perron ' + platform) : '') + '</div></div>' +
+    '<div><div class="stop-time-time">' + esc(clock(event.time)) + '</div>' + status + scheduledText + '</div></div>' +
+    '<details class="stop-time-details"><summary>Bestemming en haltes bekijken</summary>' +
+    '<div class="stop-time-meta">Richting/bestemming: ' + esc(destination) + '</div>' +
+    renderStopSequence(row, direction) +
+    '<div class="stop-time-meta">Rit-ID: ' + esc(row?.tripId ?? 'niet beschikbaar') +
+    (row?.agencyName ? ' · ' + esc(row.agencyName) : '') + '</div></details>' +
+    '</article>';
+}
+
+async function requestStopTimes({ direction = 'departures', n = 20 } = {}) {
+  const stopId = resolveTransitStop();
+  const query = new URLSearchParams({
+    stopId,
+    n: String(Math.min(50, Math.max(1, Number(n) || 20))),
+    arriveBy: String(direction === 'arrivals'),
+    direction: 'true',
+    fetchStop: 'true',
+    withScheduledSkippedStops: 'true',
+    language: 'nl'
+  });
+  const selectedWhen = $('boardWhen').value;
+  if (selectedWhen) {
+    const timestamp = new Date(selectedWhen);
+    if (!Number.isFinite(timestamp.getTime())) throw new Error('Kies een geldige datum en tijd.');
+    query.set('time', timestamp.toISOString());
+  }
+  return api('/api/stoptimes?' + query.toString(), {
+    signal: AbortSignal.timeout(20000)
+  });
+}
+
+function displayStopTimes(containerId, rows, direction, emptyText) {
+  const container = $(containerId);
+  if (!container) return;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    container.innerHTML = '<div class="stop-time-empty">' + esc(emptyText) + '</div>';
+    return;
+  }
+  container.innerHTML = '<div class="stop-time-list">' +
+    rows.map((row, index) => renderStopTimeCard(row, direction, index)).join('') +
+    '</div>';
+}
+
+$('boardStopFind').onclick = () =>
+  findPlaces('boardStop', 'boardStopChoice', 'boardStopFindStatus');
+$('boardStopChoice').onchange = () => {
+  const option = $('boardStopChoice').selectedOptions[0];
+  if (option?.dataset.label) $('boardStop').value = option.dataset.label;
+};
+$('boardSearch').onclick = async () => {
+  const button = $('boardSearch');
+  button.disabled = true;
+  $('boardResults').innerHTML = '';
+  $('boardStatus').textContent = 'Vertrek- en aankomsttijden ophalen…';
+  try {
+    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
+    const data = await requestStopTimes({
+      direction,
+      n: $('boardLimit').value
+    });
+    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
+      : Array.isArray(data?.stop_times) ? data.stop_times : [];
+    const placeName = data?.place?.name ?? $('boardStop').value.trim();
+    $('boardStatus').textContent = rows.length
+      ? placeName + ' · ' + rows.length + ' ' +
+        (direction === 'arrivals' ? 'aankomsten' : 'vertrekken') +
+        ' opgehaald. Realtime staat alleen bij ritten waarvoor de bron dat bevestigt.'
+      : 'Geen tijden gevonden. Controleer de geselecteerde halte of probeer een andere tijd.';
+    displayStopTimes('boardResults', rows, direction,
+      'Geen vertrek- of aankomsttijden beschikbaar voor deze halte.');
+  } catch (error) {
+    $('boardStatus').textContent = error instanceof Error ? error.message : 'Haltevertrektijden konden niet worden opgehaald.';
+  } finally {
+    button.disabled = false;
+  }
+};
+$('lineSearch').onclick = async () => {
+  const button = $('lineSearch');
+  const requestedLine = $('lineNumber').value.trim();
+  if (!requestedLine) {
+    $('lineStatus').textContent = 'Vul eerst een lijnnummer in, bijvoorbeeld 5 of 28.';
+    return;
+  }
+  button.disabled = true;
+  $('lineResults').innerHTML = '';
+  $('lineStatus').textContent = 'Ritten en routehaltes ophalen…';
+  try {
+    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
+    const data = await requestStopTimes({ direction, n: $('lineLimit').value });
+    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
+      : Array.isArray(data?.stop_times) ? data.stop_times : [];
+    const matchingRows = rows.filter(row => stopTimeMatchesLine(row, requestedLine));
+    $('lineStatus').textContent = matchingRows.length
+      ? 'Lijn ' + requestedLine + ' · ' + matchingRows.length +
+        ' passende rit(ten) gevonden bij ' + (data?.place?.name ?? $('boardStop').value.trim()) +
+        '. De route toont de haltes die de dienstregelingbron heeft meegeleverd.'
+      : 'Geen rit voor lijn ' + requestedLine +
+        ' gevonden in deze lijst. Probeer een andere tijd of verhoog het aantal ritten dat wordt doorzocht.';
+    displayStopTimes('lineResults', matchingRows, direction,
+      'Geen passende ritten gevonden. Controleer het lijnnummer en de geselecteerde halte.');
+  } catch (error) {
+    $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn kon niet worden opgezocht.';
+  } finally {
+    button.disabled = false;
+  }
+};
+
 function renderJourneyCard(journey, index, walkSettings) {
   const sourceLegs = journeySourceLegs(journey);
 
