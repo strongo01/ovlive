@@ -119,6 +119,26 @@
     .results-sort-control{display:flex;align-items:center;gap:8px;margin:0;color:var(--muted);font-size:12px;white-space:nowrap}
     #journeySort{width:auto;min-width:230px;max-width:100%;padding:9px 11px;margin:0;font-size:14px}
     .journey-results-list{display:flex;flex-direction:column;gap:0}
+    .stop-time-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+    .stop-time-card{border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);padding:12px}
+    .stop-time-card.is-cancelled{border-color:rgba(252,165,165,.55)}
+    .stop-time-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+    .stop-time-route{font-weight:850;font-size:15px}
+    .stop-time-time{font-size:22px;font-weight:850;font-variant-numeric:tabular-nums;line-height:1.2}
+    .stop-time-meta{font-size:12px;color:var(--muted);margin-top:4px}
+    .stop-time-status{display:inline-block;padding:3px 7px;border-radius:7px;font-size:11px;font-weight:800;background:rgba(127,127,127,.1);border:1px solid var(--line)}
+    .stop-time-status.is-live{color:var(--green);border-color:rgba(134,239,172,.35)}
+    .stop-time-status.is-cancelled{color:var(--red);border-color:rgba(252,165,165,.5)}
+    .stop-time-details{margin-top:9px;border-top:1px solid var(--line);padding-top:8px}
+    .stop-time-details>summary{cursor:pointer;color:var(--accent);font-size:13px;font-weight:750}
+    .stop-time-stops{list-style:none;padding:0;margin:8px 0 0}
+    .stop-time-stops li{display:grid;grid-template-columns:52px minmax(0,1fr);gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.045);font-size:12px}
+    .stop-time-stops li:last-child{border-bottom:0}
+    .stop-time-stops time{font-variant-numeric:tabular-nums;color:var(--muted)}
+    .stop-time-empty{border:1px dashed var(--line);border-radius:10px;padding:14px;color:var(--muted)}
+    .divider{height:1px;background:var(--line);margin:18px 0}
+    @media(max-width:600px){.stop-time-card{padding:10px}.stop-time-time{font-size:20px}}
+
     .journey-page-controls{display:flex;justify-content:center;margin:12px 0}
     .journey-page-controls button{width:auto;min-width:min(100%,320px);max-width:100%;margin:0}
     .journey-page-status{text-align:center;margin:7px 0 12px;color:var(--muted);font-size:12px}
@@ -276,6 +296,54 @@
     <button id="planBtn">Zoek reizen</button>
     <div id="planStatus" class="muted" aria-live="polite"></div>
     <div id="journeys"></div>
+  </section>
+
+  <section class="panel" id="stopTimesPanel">
+    <h2>Vertrektijden per halte</h2>
+    <p class="muted">Zoek een echte OV-halte of een station en bekijk geplande en beschikbare realtime-vertrek- of aankomsttijden. Kies een halte uit de resultaten zodat OVLive de juiste halte-ID gebruikt.</p>
+    <div class="grid">
+      <div>
+        <label for="boardStop">Halte of station</label>
+        <input id="boardStop" autocomplete="off" placeholder="Bijvoorbeeld Utrecht Leidsche Rijn">
+        <button type="button" id="boardStopFind" class="secondary">Zoek halte</button>
+        <select class="place-choice" id="boardStopChoice" aria-label="Kies halte of station" hidden><option value="">Kies een gevonden halte…</option></select>
+      </div>
+      <div>
+        <label for="boardWhen">Vertrek- of aankomsttijd (optioneel)</label>
+        <input id="boardWhen" type="datetime-local">
+        <p class="muted mode-help">Leeg laten = vanaf nu.</p>
+      </div>
+      <div>
+        <label for="boardDirection">Zoek naar</label>
+        <select id="boardDirection">
+          <option value="departures" selected>Vertrekkende voertuigen</option>
+          <option value="arrivals">Aankomende voertuigen</option>
+        </select>
+      </div>
+      <div>
+        <label for="boardLimit">Aantal resultaten</label>
+        <select id="boardLimit"><option value="10">10</option><option value="20" selected>20</option><option value="30">30</option><option value="50">50</option></select>
+      </div>
+    </div>
+    <button type="button" id="boardSearch">Toon haltevertrektijden</button>
+    <div id="boardStatus" class="muted" role="status" aria-live="polite"></div>
+    <div id="boardResults"></div>
+    <div class="divider"></div>
+    <h3>Zoek een lijn en bekijk waar die naartoe gaat</h3>
+    <p class="muted">Kies hierboven een halte en vul hieronder een lijnnummer in, bijvoorbeeld 5 of 28. OVLive zoekt de komende ritten van die lijn bij die halte en toont de bestemming en alle volgende haltes die de dienstregeling beschikbaar stelt. Zo voorkom je verwarring tussen gelijk genummerde lijnen in verschillende steden.</p>
+    <div class="grid">
+      <div>
+        <label for="lineNumber">Lijnnummer</label>
+        <input id="lineNumber" autocomplete="off" maxlength="30" placeholder="Bijvoorbeeld 5">
+      </div>
+      <div>
+        <label for="lineLimit">Aantal ritten doorzoeken</label>
+        <select id="lineLimit"><option value="20">20 ritten</option><option value="50" selected>50 ritten</option></select>
+      </div>
+    </div>
+    <button type="button" id="lineSearch">Zoek lijn en bekijk route</button>
+    <div id="lineStatus" class="muted" role="status" aria-live="polite"></div>
+    <div id="lineResults"></div>
   </section>
 
   <section class="panel" id="ndovLocalDiagnosticsPanel" hidden>
