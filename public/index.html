@@ -4158,6 +4158,9 @@ async function loadMoreJourneys(direction) {
 }
 
 $('planBtn').onclick = async () => {
+  const previousPageState = window.__ovliveJourneyPageState;
+  if (previousPageState?.controller) previousPageState.controller.abort();
+  window.__ovliveJourneyPageState = null;
   stopLivePlanRealtimeRefresh();
   stopAllLiveJourneyTracking();
   window.__ovliveTrackingJourneys = [];
