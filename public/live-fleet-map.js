@@ -399,12 +399,27 @@
       const sourceName = index === 0 ? "openov" : "ns";
       if (result.status === "fulfilled") {
         successful += 1;
-        state.sourceVehicles[sourceName] = result.value.vehicles;
-        state.sourceStatus[sourceName] = {
-          ...result.value.status,
-          sourceKey: sourceName
-        };
-        metadataMissing ||= result.value.metadataMissing;
+        const sourceResult = result.value;
+        const openovFeedNotFresh = sourceName === "openov" &&
+          sourceResult.status.freshness !== "fresh";
+        if (openovFeedNotFresh) {
+          // A successful HTTP response is not enough: never replace good
+          // last-known map points with an explicitly stale/unknown feed.
+          state.sourceStatus[sourceName] = {
+            ...sourceResult.status,
+            ok: false,
+            sourceKey: sourceName,
+            error: "De feed-timestamp bevestigt geen verse voertuigposities."
+          };
+          problems.push("OpenOV-feed niet vers; laatst bekende punten blijven zichtbaar");
+        } else {
+          state.sourceVehicles[sourceName] = sourceResult.vehicles;
+          state.sourceStatus[sourceName] = {
+            ...sourceResult.status,
+            sourceKey: sourceName
+          };
+        }
+        metadataMissing ||= sourceResult.metadataMissing;
       } else {
         const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
         state.sourceStatus[sourceName] = {
