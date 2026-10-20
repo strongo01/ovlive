@@ -13,6 +13,7 @@ import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 
 import { applyNdovCancellationsToPlan, prepareNsTrainIdentities } from "./ndov-plan-cancellation.js";
 import { enrichNsTrainPlan } from "./ns-train-realtime";
+import { fetchNsLiveVehiclePositions } from "./ns-live-vehicle-positions";
 import { mergeTransitousAndMapFeatureCollections, transitousMatchesToFeatureCollection } from "./transitous-geocode.js";
 import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
@@ -2685,6 +2686,75 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   const rateLimitResponse = await enforcePublicApiRateLimit(request, env, headers);
   if (rateLimitResponse) return rateLimitResponse;
+
+  if (url.pathname === "/api/ns/vehicle-positions") {
+    const rawTrainNumbers = String(url.searchParams.get("trainNumbers") ?? "");
+    const requestedTrainNumbers = [...new Set(
+      rawTrainNumbers.split(",").map(value => value.trim()).filter(Boolean)
+    )];
+
+    if (
+      requestedTrainNumbers.length < 1 ||
+      requestedTrainNumbers.length > 20 ||
+      requestedTrainNumbers.some(value => !/^\d{1,6}$/.test(value))
+    ) {
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        error: "Geef 1–20 geldige treinnummers op via trainNumbers, gescheiden door komma's."
+      }, 400, headers);
+    }
+
+    if (!String(env.NS_API_SUBSCRIPTION_KEY ?? "").trim()) {
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        error: "De bestaande NS-sleutel is niet ingesteld in de Worker."
+      }, 503, { ...headers, "cache-control": "no-store" });
+    }
+
+    try {
+      const feed = await fetchNsLiveVehiclePositions(env, url.origin);
+      const requested = new Set(requestedTrainNumbers);
+      const positions = feed.positions.filter(position =>
+        requested.has(position.trainNumber)
+      );
+      return json({
+        ok: true,
+        source: "NS Virtual Train API",
+        checkedAt: feed.fetchedAt,
+        positions
+      }, 200, { ...headers, "cache-control": "no-store" });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const statusMatch = detail.match(/NS_VIRTUAL_TRAIN_HTTP_(\d{3})/);
+      const upstreamStatus = statusMatch ? Number(statusMatch[1]) : null;
+      const status = upstreamStatus === 429 ? 429 : 502;
+      const message =
+        detail === "NS_VIRTUAL_TRAIN_KEY_MISSING"
+          ? "De bestaande NS-sleutel ontbreekt."
+          : upstreamStatus === 401 || upstreamStatus === 403
+            ? "NS heeft de aanvraag geweigerd. Controleer of de bestaande NS-sleutel toegang heeft tot de Virtual Train API."
+            : upstreamStatus === 429
+              ? "De NS Virtual Train API heeft de aanvraaglimiet bereikt."
+              : /timeout|timed out|abort/i.test(detail)
+                ? "De NS Virtual Train API reageert niet op tijd."
+                : "De live treinposities van NS zijn tijdelijk niet beschikbaar.";
+
+      console.warn("[OVLIVE_NS_VEHICLE_POSITIONS]", JSON.stringify({
+        upstreamStatus,
+        errorCode: detail.match(/NS_VIRTUAL_TRAIN_[A-Z_]+/)?.[0] ?? "unexpected_error",
+        requestedCount: requestedTrainNumbers.length
+      }));
+      return json({
+        ok: false,
+        source: "NS Virtual Train API",
+        error: message,
+        upstreamStatus,
+        checkedAt: new Date().toISOString()
+      }, status, { ...headers, "cache-control": "no-store" });
+    }
+  }
 
   if (isRealtimeRefresh && request.method === "POST") {
     const declaredLength = Number(request.headers.get("content-length") ?? "0");
