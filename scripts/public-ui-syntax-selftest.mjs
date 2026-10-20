@@ -783,11 +783,43 @@ assert.equal(walkingHelperContext.journeyWalkingTransferIssue(
 assert.ok(html.includes("journeyWalkingTransferIssue(sourceLegs, walkSettings.walkingSpeedKmh)"),
   "unreachable walking transfers must be filtered before journey cards are rendered");
 assert.ok(html.includes("q.set('searchWindow', '7200')") &&
-  html.includes("q.set('numItineraries', '24')") &&
-  html.includes("q.set('maxItineraries', '24')"),
-  "the planner must search a wider timetable window and request more alternatives");
+  html.includes("q.set('numItineraries', '10')") &&
+  html.includes("q.set('maxItineraries', '10')"),
+  "the first timetable page must request ten itineraries over a two-hour window");
+assert.ok(html.includes("data-page-direction=\"previous\"") &&
+  html.includes("Laad 3 eerdere reizen") &&
+  html.includes("data-page-direction=\"next\"") &&
+  html.includes("Laad 3 latere reizen"),
+  "earlier and later buttons must appear above and below the journey list");
+assert.ok(html.includes("pageQuery.set('pageCursor', state.cursors[direction])") &&
+  workerSource.includes('"maxItineraries", "searchWindow", "pageCursor",'),
+  "page cursors must be forwarded to Transitous without changing the original search parameters");
+assert.ok(html.includes("function renderJourneyCard(journey, index, walkSettings)") &&
+  html.includes("function loadMoreJourneys(direction)"),
+  "newly loaded journeys must use the same detailed card renderer and loading handler");
+
+const pageBatchStart = html.indexOf("function takeJourneyPageBatch(state, direction, batchSize = JOURNEY_PAGE_BATCH_SIZE) {");
+const pageBatchEnd = html.indexOf("function filterNewPageJourneys(", pageBatchStart);
+assert.ok(pageBatchStart >= 0 && pageBatchEnd > pageBatchStart,
+  "the three-at-a-time paging helper must remain available for tests");
+const pageBatchContext = {};
+new vm.Script(
+  html.slice(pageBatchStart, pageBatchEnd).trim() +
+  "\\nthis.takeJourneyPageBatch = takeJourneyPageBatch;"
+).runInNewContext(pageBatchContext);
+const laterQueue = { pendingNext: [1, 2, 3, 4, 5, 6, 7], pendingPrevious: [] };
+assert.deepEqual(Array.from(pageBatchContext.takeJourneyPageBatch(laterQueue, "next")), [1, 2, 3],
+  "loading later journeys must return the next three items from the queue");
+assert.deepEqual(laterQueue.pendingNext, [4, 5, 6, 7],
+  "loading later journeys must leave remaining options queued");
+const earlierQueue = { pendingNext: [], pendingPrevious: [1, 2, 3, 4, 5, 6, 7] };
+assert.deepEqual(Array.from(pageBatchContext.takeJourneyPageBatch(earlierQueue, "previous")), [5, 6, 7],
+  "loading earlier journeys must choose the closest three items before the current page");
+assert.deepEqual(earlierQueue.pendingPrevious, [1, 2, 3, 4],
+  "loading earlier journeys must keep more distant journeys queued");
+
 assert.ok(!html.includes("validItineraryCandidates.slice(0, 8)"),
-  "all feasible itinerary candidates should be eligible for display, not capped at eight cards");
+  "the UI must no longer use the old eight-card truncation");
 
 const batchingStart = html.indexOf("function chunkLivePlanRealtimeEntries(entries, maxPerBatch = 8) {");
 const batchingEnd = html.indexOf("function setLivePlanRealtimeRefreshBatch(", batchingStart);
