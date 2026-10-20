@@ -782,9 +782,31 @@ assert.equal(walkingHelperContext.journeyWalkingTransferIssue(
 ), null, "the next tram with enough walking time must remain a valid option");
 assert.ok(html.includes("journeyWalkingTransferIssue(sourceLegs, walkSettings.walkingSpeedKmh)"),
   "unreachable walking transfers must be filtered before journey cards are rendered");
-assert.ok(html.includes("q.set('numItineraries', '10')"),
-  "the planner must request extra alternatives so a later service can replace a missed connection");
+assert.ok(html.includes("q.set('searchWindow', '7200')") &&
+  html.includes("q.set('numItineraries', '24')") &&
+  html.includes("q.set('maxItineraries', '24')"),
+  "the planner must search a wider timetable window and request more alternatives");
+assert.ok(!html.includes("validItineraryCandidates.slice(0, 8)"),
+  "all feasible itinerary candidates should be eligible for display, not capped at eight cards");
+
+const batchingStart = html.indexOf("function chunkLivePlanRealtimeEntries(entries, maxPerBatch = 8) {");
+const batchingEnd = html.indexOf("function setLivePlanRealtimeRefreshBatch(", batchingStart);
+assert.ok(batchingStart >= 0 && batchingEnd > batchingStart,
+  "the realtime refresh batch helper must remain available for deterministic tests");
+const batchingContext = {};
+new vm.Script(
+  html.slice(batchingStart, batchingEnd).trim() +
+  "\nthis.chunkLivePlanRealtimeEntries = chunkLivePlanRealtimeEntries;"
+).runInNewContext(batchingContext);
+const batchSample = Array.from({ length: 17 }, (_, index) => index);
+const batches = batchingContext.chunkLivePlanRealtimeEntries(batchSample, 8);
+assert.deepEqual(Array.from(batches, batch => batch.length), [8, 8, 1],
+  "all displayed journeys must be split into small realtime refresh batches");
+assert.deepEqual(Array.from(batches).flat(), batchSample,
+  "realtime batching must retain every journey without omissions or duplicates");
 console.log("PASS: impossible walking transfers are filtered and later tram alternatives remain eligible");
+console.log("PASS: more timetable options are requested and all feasible cards can be displayed");
+console.log("PASS: realtime refresh batches cover every displayed journey");
 console.log("PASS: all walking legs use the selected speed and check transfer feasibility");
 
 // A scheduled-only supplementary search must retain only explicitly confirmed
@@ -815,8 +837,9 @@ assert.equal(cancelledHelperContext.confirmedTripIdentityKey({
 }), "TRAM|20261020_12:55_nl-OpenOV_123456");
 assert.ok(html.includes("cancellationQuery.delete('deferRealtime')") &&
   html.includes("cancellationQuery.set('realtimeMode', 'OFF')") &&
-  html.includes("cancellationQuery.set('numItineraries', '12')"),
-  "the supplementary search must request scheduled journeys and allow cancellation enrichment to run");
+  html.includes("cancellationQuery.set('numItineraries', '16')") &&
+  html.includes("cancellationQuery.set('maxItineraries', '16')"),
+  "the supplementary search must request more scheduled journeys and allow cancellation enrichment to run");
 assert.ok(html.includes('id="cancelled-trips-container"') &&
   html.includes("Rijdt niet — reis niet mogelijk met deze rit") &&
   html.includes("Vervallen ritten"),

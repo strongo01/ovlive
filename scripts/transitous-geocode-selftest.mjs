@@ -96,7 +96,7 @@ assert.ok(html.includes("const optionValue = transitousId || ("),
   "a Transitous stop must submit its native ID rather than lat/lon");
 assert.ok(html.includes("data-provider=\"${transitousId ? 'transitous' : 'coordinates'}\""),
   "the location result must identify whether it uses a stop ID or map coordinates");
-assert.ok(html.includes("validItineraryCandidates.slice(0, 8)"),
-  "the UI must not hide a sixth valid journey when six results were returned");
-console.log("PASS: place selection uses exact stop IDs and the planner can show up to eight returned options");
+assert.ok(!html.includes("validItineraryCandidates.slice(0, 8)"),
+  "the UI must not hide valid journeys just because more than eight were returned");
+console.log("PASS: place selection uses exact stop IDs and every feasible returned option can be shown");
 console.log("All Transitous stop geocoding selftests passed.");
