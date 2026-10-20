@@ -921,6 +921,25 @@ assert.ok(workerSource.includes('const routeId = String(entity?.routeId ?? "").t
   workerSource.includes('"Lijn onbekend"') &&
   workerSource.includes('Rit-ID " + (tripNumber || tripId)'),
   "OpenOV results must retain exact route/trip identifiers when schedule enrichment is unavailable");
+
+const normalizeTripIdStart = workerSource.indexOf("function normalizeLineSearchTripId(value: unknown): string {");
+const normalizeTripIdEnd = workerSource.indexOf("\n}", normalizeTripIdStart) + 2;
+assert.ok(normalizeTripIdStart >= 0 && normalizeTripIdEnd > normalizeTripIdStart,
+  "the line-search trip-ID normalizer must remain independently testable");
+const normalizeTripIdContext = {};
+const normalizeTripIdSource = workerSource.slice(normalizeTripIdStart, normalizeTripIdEnd)
+  .replace("function normalizeLineSearchTripId(value: unknown): string", "function normalizeLineSearchTripId(value)");
+new vm.Script(normalizeTripIdSource + "\nthis.normalizeLineSearchTripId = normalizeLineSearchTripId;")
+  .runInNewContext(normalizeTripIdContext);
+const timestampPrefixedTripId = normalizeTripIdContext.normalizeLineSearchTripId(
+  "20261020_15:11_nl-OpenOV_392830208"
+);
+assert.equal(timestampPrefixedTripId, "nl-OpenOV_392830208");
+assert.equal(timestampPrefixedTripId.toLocaleLowerCase("nl-NL").includes("11"), false,
+  "searching for line 11 must not match the :11 in a date/time prefix");
+assert.equal(timestampPrefixedTripId.includes("392830208"), true,
+  "searching by the actual trip-number suffix must still match");
+assert.equal(normalizeTripIdContext.normalizeLineSearchTripId("nl-OpenOV_392830208"), "nl-OpenOV_392830208");
 assert.ok(html.includes("function renderStopBoardMetadata(data)") &&
   html.includes("Halte-ID: ") &&
   html.includes("<th>Lijn</th><th>Richting</th><th>") &&
