@@ -4099,7 +4099,8 @@ async function loadMoreJourneys(direction) {
   try {
     const queue = direction === 'previous' ? state.pendingPrevious : state.pendingNext;
     let pageAttempts = 0;
-    while (queue.length === 0 && state.cursors[direction] && pageAttempts < 2) {
+    while (queue.length < JOURNEY_PAGE_BATCH_SIZE &&
+           state.cursors[direction] && pageAttempts < 2) {
       const pageQuery = new URLSearchParams(state.query);
       // Keep the original routing parameters unchanged; Transitous' cursor
       // moves the timetable window backward or forward from the last page.
@@ -4122,7 +4123,7 @@ async function loadMoreJourneys(direction) {
         filterNewPageJourneys(state, pageJourneys, walkingSpeed),
         window.__ovliveActiveWalkSettings
       );
-      if (direction === 'previous') state.pendingPrevious.push(...validPageJourneys);
+      if (direction === 'previous') state.pendingPrevious.unshift(...validPageJourneys);
       else state.pendingNext.push(...validPageJourneys);
       pageAttempts += 1;
     }
