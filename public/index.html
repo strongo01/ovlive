@@ -4159,6 +4159,7 @@ function lineSearchClock(value) {
 }
 
 function lineSearchDelayText(value) {
+  if (value == null || String(value).trim() === '') return '';
   const seconds = Number(value);
   if (!Number.isFinite(seconds)) return '';
   if (Math.abs(seconds) < 45) return 'Op tijd';
@@ -4249,8 +4250,8 @@ function renderLineSearchCard(row) {
   if (updateTime) facts.push({ label: updateTime, kind: '' });
 
   const meta = [];
-  if (row?.stop && !Array.isArray(row?.stops)) meta.push('Waargenomen bij ' + String(row.stop));
-  if (row?.status && !Array.isArray(row?.stops)) meta.push(String(row.status).replaceAll('_', ' ').toLocaleLowerCase('nl-NL'));
+  if (row?.stop && (!Array.isArray(row?.stops) || row.stops.length === 0)) meta.push('Waargenomen bij ' + String(row.stop));
+  if (row?.status && (!Array.isArray(row?.stops) || row.stops.length === 0)) meta.push(String(row.status).replaceAll('_', ' ').toLocaleLowerCase('nl-NL'));
   if (typeof row?.updateAgeSeconds === 'number' && !updateTime) {
     meta.push(row.updateAgeSeconds < 60
       ? 'Laatst bijgewerkt ' + row.updateAgeSeconds + ' sec geleden'
