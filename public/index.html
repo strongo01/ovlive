@@ -4024,9 +4024,11 @@ q.set('pedestrianSpeed', '1.5');
 
     if (journeys.length === 0) {
       $('journeys').innerHTML =
-        '<p>Geen reisopties ontvangen. Controleer de locaties of probeer een andere tijd.</p>' +
+        '<p>Geen bruikbare reisopties uit de realtime-zoekronde ontvangen. Controleer hieronder ook of er vervallen ritten zijn gevonden.</p>' +
+        `<div id="cancelled-trips-container" aria-live="polite"></div>` +
         renderAlerts(data.openovAlerts || []) +
         `<details><summary>Technische details</summary><pre>${esc(JSON.stringify(data, null, 2).slice(0, 8000))}</pre></details>`;
+      loadCancelledTripSupplement(q, cancelledTripLookupId);
       return;
     }
 
@@ -4079,14 +4081,16 @@ q.set('pedestrianSpeed', '1.5');
         (invalidChronologyCount || invalidWalkingTransferCount
           ? `<div class="status rt-unknown"><strong>Geen haalbare reisoptie gevonden.</strong><div class="rt-details">` +
             (invalidWalkingTransferCount
-              ? `Transitous leverde ${invalidWalkingTransferCount} route(s) waarbij de loopafstand niet binnen de beschikbare overstaptijd past. Die worden verborgen; OVLive heeft ook extra reisopties opgevraagd.`
+              ? `Transitous leverde ${invalidWalkingTransferCount} route(s) waarbij de loopafstand niet binnen de beschikbare overstaptijd past. Die worden verborgen; ook vervallen ritten worden apart gecontroleerd.`
               : '') +
             (invalidChronologyCount
               ? ` ${invalidChronologyCount} route(s) hadden daarnaast een onmogelijke tijdvolgorde.`
               : '') +
             ` Probeer een eerdere vertrektijd of een hogere loopsnelheid als er geen alternatief beschikbaar is.</div></div>`
           : '<p>Er zijn geen bruikbare reisopties ontvangen.</p>') +
+        `<div id="cancelled-trips-container" aria-live="polite"></div>` +
         renderAlerts(data.openovAlerts || []);
+      loadCancelledTripSupplement(q, cancelledTripLookupId);
       return;
     }
 
