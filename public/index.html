@@ -149,6 +149,18 @@
     .line-search-primary{font-weight:850;font-size:16px}
     .line-search-secondary{margin-top:4px;color:var(--accent);font-weight:750;font-size:13px}
     .line-search-meta{margin-top:5px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+    .line-search-facts{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+    .line-search-fact{border:1px solid var(--line);border-radius:8px;padding:4px 8px;font-size:12px;font-variant-numeric:tabular-nums}
+    .line-search-fact.is-good{color:var(--green)}
+    .line-search-fact.is-warning{color:var(--accent)}
+    .line-search-permalink{display:inline-block;margin-top:8px;font-size:12px;font-weight:750}
+    .line-search-stops{margin-top:12px}
+    .line-search-stops h3{font-size:13px;margin:0 0 3px}
+    .line-search-stops .stop-time-table{min-width:0}
+    .line-search-stops .stop-time-table th,.line-search-stops .stop-time-table td{padding:8px 7px}
+    .line-search-stops .stop-time-table td:last-child{white-space:nowrap}
+    .line-search-all-stops{margin-top:6px}
+    .line-search-all-stops summary{cursor:pointer;color:var(--accent);font-size:12px;font-weight:750;padding:7px 0}
     .divider{height:1px;background:var(--line);margin:18px 0}
     @media(max-width:600px){.stop-time-card{padding:10px}.stop-time-time{font-size:20px}}
 
@@ -4105,29 +4117,166 @@ function lineSearchMatchesRecord(row, query) {
     .some(value => String(value ?? '').toLocaleLowerCase('nl-NL').includes(needle));
 }
 
+function lineSearchTimestampMs(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return Number.NaN;
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)) return Date.parse(text);
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
+  if (!match) return Date.parse(text);
+  const [, year, month, day, hour, minute, second = '0', fraction = '0'] = match;
+  const wallClockUtc = Date.UTC(
+    Number(year), Number(month) - 1, Number(day),
+    Number(hour), Number(minute), Number(second),
+    Number(String(fraction).padEnd(3, '0'))
+  );
+  const offsetAt = timestamp => {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Amsterdam',
+      timeZoneName: 'longOffset',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(new Date(timestamp));
+    const label = String(parts.find(part => part.type === 'timeZoneName')?.value ?? 'GMT');
+    const offset = label.match(/GMT([+-])(\d{2}):?(\d{2})/);
+    if (!offset) return 0;
+    const minutes = Number(offset[2]) * 60 + Number(offset[3]);
+    return (offset[1] === '-' ? -1 : 1) * minutes * 60000;
+  };
+  const firstInstant = wallClockUtc - offsetAt(wallClockUtc);
+  return wallClockUtc - offsetAt(firstInstant);
+}
+
+function lineSearchClock(value) {
+  const timestamp = lineSearchTimestampMs(value);
+  if (!Number.isFinite(timestamp)) return '';
+  return new Date(timestamp).toLocaleTimeString('nl-NL', {
+    timeZone: 'Europe/Amsterdam',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+}
+
+function lineSearchDelayText(value) {
+  if (value == null || String(value).trim() === '') return '';
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return '';
+  if (Math.abs(seconds) < 45) return 'Op tijd';
+  const minutes = Math.max(1, Math.round(Math.abs(seconds) / 60));
+  return seconds > 0 ? '+' + minutes + ' min' : minutes + ' min te vroeg';
+}
+
+function lineSearchStopEta(stop, nowMs = Date.now()) {
+  const status = String(stop?.status ?? '').trim().toUpperCase();
+  if (stop?.isCurrent || ['ARRIVED', 'ONSTOP', 'ATSTOP'].includes(status)) return 'Bij halte';
+  if (['CANCEL', 'CANCELLED'].includes(status)) return 'Rijdt niet';
+  const value = stop?.expectedArrival ?? stop?.expectedDeparture ??
+    stop?.targetArrival ?? stop?.targetDeparture ?? null;
+  if (!value) return 'Tijd onbekend';
+  const timestamp = lineSearchTimestampMs(value);
+  if (!Number.isFinite(timestamp)) return 'Tijd onbekend';
+  const totalSeconds = Math.round((timestamp - nowMs) / 1000);
+  if (totalSeconds <= 0) return 'Nu';
+  if (totalSeconds >= 3600) {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    return hours + ':' + String(minutes).padStart(2, '0') + ' uur';
+  }
+  return Math.floor(totalSeconds / 60) + ':' +
+    String(totalSeconds % 60).padStart(2, '0') + ' min';
+}
+
+function renderLineSearchStopTable(stops, nowMs) {
+  if (!Array.isArray(stops) || stops.length === 0) return '';
+  const rows = stops.map(stop => {
+    const stopName = String(stop?.name ?? 'Onbekende halte').trim();
+    const stopCode = String(stop?.userStopCode ?? stop?.timingPointCode ?? '').trim();
+    const linked = /^[A-Za-z0-9_-]+$/.test(stopCode);
+    const nameHtml = linked
+      ? '<a href="https://ovzoeker.nl/halte/' + encodeURIComponent(stopCode) +
+        '" target="_blank" rel="noopener noreferrer">' + esc(stopName) + '</a>'
+      : esc(stopName);
+    const eta = lineSearchStopEta(stop, nowMs);
+    const planned = stop?.expectedArrival && stop?.targetArrival &&
+      lineSearchTimestampMs(stop.expectedArrival) !== lineSearchTimestampMs(stop.targetArrival)
+      ? '<small>Volgens dienstregeling: ' + esc(lineSearchClock(stop.targetArrival)) + '</small>'
+      : '';
+    return '<tr><td>' + nameHtml + '</td><td>' + esc(eta) + planned + '</td></tr>';
+  }).join('');
+  return '<div class="stop-time-table-wrap"><table class="stop-time-table">' +
+    '<thead><tr><th>Halte</th><th>Verwachte aankomsttijd</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table></div>';
+}
+
+function renderLineSearchStops(row) {
+  const stops = Array.isArray(row?.stops) ? row.stops : [];
+  if (stops.length === 0) return '';
+  const nowMs = Date.now();
+  const preview = stops.slice(0, 5);
+  const remaining = stops.slice(5);
+  return '<section class="line-search-stops"><h3>Volgende haltes</h3>' +
+    renderLineSearchStopTable(preview, nowMs) +
+    (remaining.length
+      ? '<details class="line-search-all-stops"><summary>Toon alle haltes (' + stops.length + ')</summary>' +
+        renderLineSearchStopTable(remaining, nowMs) + '</details>'
+      : '') +
+    '</section>';
+}
+
 function renderLineSearchCard(row) {
   const line = String(row?.line ?? 'Lijn onbekend').trim();
   const destination = String(row?.destination ?? 'Bestemming onbekend').trim();
+  const operator = String(row?.operatorName ?? '').trim();
+  const heading = [operator, line, destination].filter(Boolean).join(' ');
   const vehicleLabel = String(row?.vehicleLabel ?? 'Voertuig').trim();
+  const facts = [];
+  if (row?.tripNumber != null && String(row.tripNumber).trim()) {
+    facts.push({ label: 'Rit ' + String(row.tripNumber).trim(), kind: '' });
+  }
+  if (row?.blockCode != null && String(row.blockCode).trim()) {
+    facts.push({ label: 'Omloopnummer ' + String(row.blockCode).trim(), kind: '' });
+  }
+  const coaches = Number(row?.numberOfCoaches);
+  if (row?.numberOfCoaches != null && String(row.numberOfCoaches).trim() !== '' &&
+      Number.isFinite(coaches) && coaches > 0) {
+    facts.push({ label: coaches + (coaches === 1 ? ' rijtuig' : ' rijtuigen'), kind: '' });
+  }
+  const delayText = lineSearchDelayText(row?.delaySeconds);
+  if (delayText) {
+    facts.push({ label: delayText, kind: Math.abs(Number(row.delaySeconds)) < 45 ? 'is-good' : 'is-warning' });
+  }
+  const updateTime = lineSearchClock(row?.updatedAt);
+  if (updateTime) facts.push({ label: updateTime, kind: '' });
+
   const meta = [];
-  if (row?.stop) meta.push('Waargenomen bij ' + String(row.stop));
-  if (row?.status) meta.push(String(row.status).replaceAll('_', ' ').toLocaleLowerCase('nl-NL'));
-  if (typeof row?.updateAgeSeconds === 'number') {
+  if (row?.stop && (!Array.isArray(row?.stops) || row.stops.length === 0)) meta.push('Waargenomen bij ' + String(row.stop));
+  if (row?.status && (!Array.isArray(row?.stops) || row.stops.length === 0)) meta.push(String(row.status).replaceAll('_', ' ').toLocaleLowerCase('nl-NL'));
+  if (typeof row?.updateAgeSeconds === 'number' && !updateTime) {
     meta.push(row.updateAgeSeconds < 60
       ? 'Laatst bijgewerkt ' + row.updateAgeSeconds + ' sec geleden'
       : 'Laatst bijgewerkt ' + Math.round(row.updateAgeSeconds / 60) + ' min geleden');
   }
   if (row?.source) meta.push('Bron: ' + String(row.source));
-  if (row?.vehicleNumber) meta.push('Voertuig-ID: ' + String(row.vehicleNumber));
-  if (row?.tripId) meta.push('Rit-ID: ' + String(row.tripId));
+  if (row?.vehicleNumber && !row?.permalink) meta.push('Voertuig-ID: ' + String(row.vehicleNumber));
+  if (row?.tripId && !row?.tripNumber) meta.push('Rit-ID: ' + String(row.tripId));
   if (row?.routeId) meta.push('Route-ID: ' + String(row.routeId));
+
+  const permalink = /^https:\/\/ovzoeker\.nl\/voertuig\/[A-Za-z0-9:_-]+$/.test(String(row?.permalink ?? ''))
+    ? '<a class="line-search-permalink" href="' + esc(row.permalink) +
+      '" target="_blank" rel="noopener noreferrer">Permalink · volg voertuig</a>'
+    : '';
   return '<article class="line-search-card">' +
-    '<div class="line-search-primary">' + esc(line) + ' richting ' + esc(destination) + '</div>' +
+    '<div class="line-search-primary">' + esc(heading) + '</div>' +
     '<div class="line-search-secondary">' + esc(vehicleLabel) + '</div>' +
+    (facts.length ? '<div class="line-search-facts">' + facts.map(item =>
+      '<span class="line-search-fact ' + item.kind + '">' + esc(item.label) + '</span>'
+    ).join('') + '</div>' : '') +
+    permalink +
     (meta.length ? '<div class="line-search-meta">' + esc(meta.join(' · ')) + '</div>' : '') +
+    renderLineSearchStops(row) +
     '</article>';
 }
-
 function displayLineSearchResults(containerId, rows, emptyText) {
   const container = $(containerId);
   if (!container) return;
@@ -4981,7 +5130,7 @@ $('lineSearch').onclick = async () => {
       limit: String(Math.min(50, Math.max(1, Number($('lineLimit').value) || 30)))
     });
     const data = await api('/api/line-search?' + query.toString(), {
-      signal: AbortSignal.timeout(20000)
+      signal: AbortSignal.timeout(30000)
     });
     const rows = Array.isArray(data?.results) ? data.results : [];
     $('lineStatus').textContent = rows.length

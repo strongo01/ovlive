@@ -940,7 +940,7 @@ assert.equal(timestampPrefixedTripId.toLocaleLowerCase("nl-NL").includes("11"), 
   "searching for line 11 must not match the :11 in a date/time prefix");
 
 const routeHelperStart = workerSource.indexOf("function openovRouteMetadataForId(");
-const routeHelperEnd = workerSource.indexOf("\nfunction lineSearchTripIdMatches(", routeHelperStart);
+const routeHelperEnd = workerSource.indexOf("\nfunction openovAgencyNameForLine(", routeHelperStart);
 assert.ok(routeHelperStart >= 0 && routeHelperEnd > routeHelperStart,
   "OpenOV public route metadata resolution must remain independently testable");
 const routeHelperSource = workerSource.slice(routeHelperStart, routeHelperEnd)
@@ -1062,14 +1062,92 @@ assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "500", veh
 assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "3", tripNumber: "73" }, "73"), true);
 assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "77", destination: "Bilthoven" }, "73"), false);
 
-const lineCardStart = html.indexOf("function renderLineSearchCard(row) {");
+const normalizeJourneyStopsStart = workerSource.indexOf("function normalizeOvapiJourneyStops(");
+const normalizeJourneyStopsEnd = workerSource.indexOf("\nfunction lineSearchTripIdMatches(", normalizeJourneyStopsStart);
+assert.ok(normalizeJourneyStopsStart >= 0 && normalizeJourneyStopsEnd > normalizeJourneyStopsStart,
+  "OVAPI journey stop normalization must remain independently testable");
+const normalizeJourneyStopsSource = workerSource
+  .slice(normalizeJourneyStopsStart, normalizeJourneyStopsEnd)
+  .replace(
+    "function normalizeOvapiJourneyStops(\n  rawStops: unknown,\n  currentStopCodeValue: unknown\n): { stops: Array<Record<string, any>>; numberOfCoaches: number | string | null; blockCode: string | null }",
+    "function normalizeOvapiJourneyStops(rawStops, currentStopCodeValue)"
+  )
+  .replaceAll(" as Record<string, any>", "")
+  .replace("const orderedStops: Array<Record<string, any>> =", "const orderedStops =");
+const journeyStopContext = {};
+new vm.Script(normalizeJourneyStopsSource +
+  "\nthis.normalizeOvapiJourneyStops = normalizeOvapiJourneyStops;")
+  .runInNewContext(journeyStopContext);
+const normalizedJourney = journeyStopContext.normalizeOvapiJourneyStops({
+  "1": {
+    UserStopOrderNumber: 1, TimingPointName: "Passed stop", UserStopCode: "3924000",
+    TripStopStatus: "PASSED", NumberOfCoaches: 1
+  },
+  "2": {
+    UserStopOrderNumber: 2, TimingPointName: "Station Leidsche Rijn (F)",
+    TimingPointCode: "30000001", UserStopCode: "3924355",
+    ExpectedArrivalTime: "2026-10-20T15:58:31", TripStopStatus: "DRIVING",
+    NumberOfCoaches: 1, BlockCode: "80728"
+  },
+  "3": {
+    UserStopOrderNumber: 3, TimingPointName: "Thomas à Kempisplantsoen",
+    TimingPointCode: "30000002", UserStopCode: "3923804",
+    ExpectedArrivalTime: "2026-10-20T16:01:00", TargetArrivalTime: "2026-10-20T16:01:00",
+    TripStopStatus: "PLANNED"
+  },
+  "4": {
+    UserStopOrderNumber: 4, TimingPointName: "Cancelled stop", UserStopCode: "3924999",
+    TripStopStatus: "CANCEL"
+  }
+}, "3924355");
+assert.deepEqual(
+  JSON.parse(JSON.stringify(normalizedJourney.stops.map(stop => ({
+    name: stop.name, userStopCode: stop.userStopCode, isCurrent: stop.isCurrent
+  })))),
+  [
+    { name: "Station Leidsche Rijn (F)", userStopCode: "3924355", isCurrent: true },
+    { name: "Thomas à Kempisplantsoen", userStopCode: "3923804", isCurrent: false }
+  ],
+  "journey stops must be ordered from the exact current stop, excluding already passed and cancelled stops"
+);
+assert.equal(normalizedJourney.numberOfCoaches, 1,
+  "coach count must be read from the actual journey-stop data");
+assert.equal(normalizedJourney.blockCode, "80728",
+  "block/omloop number must be retained from actual journey-stop data");
+
+const delayStart = workerSource.indexOf("function lineSearchDelaySeconds(");
+const delayEnd = workerSource.indexOf("\nfunction normalizeOvapiJourneyStops(", delayStart);
+const delaySource = workerSource.slice(delayStart, delayEnd)
+  .replace("expectedValue: unknown", "expectedValue")
+  .replace("targetValue: unknown", "targetValue")
+  .replace("): number | null {", ") {");
+const delayContext = {};
+new vm.Script(delaySource + "\nthis.lineSearchDelaySeconds = lineSearchDelaySeconds;")
+  .runInNewContext(delayContext);
+assert.equal(delayContext.lineSearchDelaySeconds("2026-10-20T16:01:00", "2026-10-20T16:01:00"), 0);
+assert.equal(delayContext.lineSearchDelaySeconds("2026-10-20T16:03:00", "2026-10-20T16:01:00"), 120);
+
+assert.ok(workerSource.includes('fetch("http://v0.ovapi.nl/journey/" + journeyKeys.join(","), {') &&
+  workerSource.includes("NumberOfCoaches") &&
+  workerSource.includes("actual.BlockCode") &&
+  workerSource.includes('https://ovzoeker.nl/voertuig/'),
+  "line search must load official OVAPI journey stops and retain vehicle, block and coach metadata");
+
+const lineCardStart = html.indexOf("function lineSearchTimestampMs(value) {");
 const lineCardEnd = html.indexOf("\nfunction displayLineSearchResults(", lineCardStart);
 assert.ok(lineCardStart >= 0 && lineCardEnd > lineCardStart,
-  "the line-search card renderer must remain independently testable");
-const lineCardContext = { esc: value => String(value ?? "") };
+  "the line-search renderer and its time/stop helpers must remain independently testable");
+const fixedNowMs = Date.parse("2026-10-20T13:58:34Z");
+const FixedDate = class extends Date {
+  static now() { return fixedNowMs; }
+};
+const lineCardContext = { esc: value => String(value ?? ""), Date: FixedDate };
 new vm.Script(
   html.slice(lineCardStart, lineCardEnd).trim() +
-  "\nthis.renderLineSearchCard = renderLineSearchCard;"
+  "\nthis.renderLineSearchCard = renderLineSearchCard;" +
+  "\nthis.lineSearchStopEta = lineSearchStopEta;" +
+  "\nthis.lineSearchClock = lineSearchClock;" +
+  "\nthis.lineSearchDelayText = lineSearchDelayText;"
 ).runInNewContext(lineCardContext);
 const fallbackCard = lineCardContext.renderLineSearchCard({
   line: "Lijn onbekend", destination: "Bestemming onbekend",
@@ -1080,6 +1158,52 @@ assert.ok(fallbackCard.includes("Voertuig-ID: 7305") &&
   fallbackCard.includes("Rit-ID: rt-trip-73") &&
   fallbackCard.includes("Route-ID: rt-route-7"),
   "fallback line-search cards must show exact vehicle, trip and route IDs");
+
+const detailedCard = lineCardContext.renderLineSearchCard({
+  line: "73", operatorName: "U-OV", destination: "Zeist",
+  mode: "BUS", vehicleNumber: "9568", vehicleLabel: "Bus 9568",
+  tripNumber: "83", blockCode: "80728", numberOfCoaches: 1, delaySeconds: 0,
+  updatedAt: "2026-10-20T15:58:31+02:00",
+  permalink: "https://ovzoeker.nl/voertuig/CXX:9568", source: "OVAPI",
+  stops: [
+    { name: "Station Leidsche Rijn (F)", userStopCode: "3924355", isCurrent: true, status: "DRIVING" },
+    { name: "Thomas à Kempisplantsoen", userStopCode: "3923804", expectedArrival: "2026-10-20T16:01:00", targetArrival: "2026-10-20T16:01:00", status: "PLANNED" },
+    { name: "Majellapark", userStopCode: "3923829", expectedArrival: "2026-10-20T16:02:00", targetArrival: "2026-10-20T16:02:00", status: "PLANNED" },
+    { name: "Hasebroekstraat", userStopCode: "3923827", expectedArrival: "2026-10-20T16:04:00", targetArrival: "2026-10-20T16:04:00", status: "PLANNED" },
+    { name: "Moskeeplein", userStopCode: "3923825", expectedArrival: "2026-10-20T16:06:00", targetArrival: "2026-10-20T16:06:00", status: "PLANNED" },
+    { name: "Further stop", userStopCode: "3924001", expectedArrival: "2026-10-20T16:08:00", targetArrival: "2026-10-20T16:08:00", status: "PLANNED" }
+  ]
+});
+assert.ok(detailedCard.includes("U-OV 73 Zeist") &&
+  detailedCard.includes("Bus 9568") &&
+  detailedCard.includes("Rit 83") &&
+  detailedCard.includes("Omloopnummer 80728") &&
+  detailedCard.includes("1 rijtuig") &&
+  detailedCard.includes("Op tijd") &&
+  detailedCard.includes("15:58:31"),
+  "line search cards must display operator, public line, destination, vehicle, trip, block, coach count, punctuality and source timestamp");
+assert.ok(detailedCard.includes('href="https://ovzoeker.nl/voertuig/CXX:9568"') &&
+  detailedCard.includes('href="https://ovzoeker.nl/halte/3924355"') &&
+  detailedCard.includes("Bij halte") &&
+  detailedCard.includes("2:26 min") &&
+  detailedCard.includes("3:26 min") &&
+  detailedCard.includes("Toon alle haltes (6)") &&
+  detailedCard.includes("Further stop"),
+  "line search cards must display a vehicle permalink, stop links, correct Dutch ETA countdowns and expandable remaining stops");
+assert.equal(
+  lineCardContext.lineSearchClock("2026-10-20T15:58:31+02:00"),
+  "15:58:31",
+  "vehicle timestamps must be displayed in the Netherlands time zone"
+);
+assert.equal(lineCardContext.lineSearchDelayText(null), "",
+  "missing expected-vs-target delay data must stay unknown instead of showing Op tijd");
+assert.equal(
+  lineCardContext.lineSearchStopEta({ expectedArrival: "2026-10-20T16:01:00" }),
+  "2:26 min",
+  "OVAPI local stop times must be converted from Europe/Amsterdam before computing arrival countdowns"
+);
+console.log("PASS: OVAPI journey data is normalized from the current stop and excludes passed/cancelled stops");
+console.log("PASS: line-search detail cards show operator/vehicle metadata, permalink and stop-by-stop arrival countdowns");
 console.log("PASS: line-search fallback cards preserve exact vehicle, trip and route identifiers");
 console.log("PASS: stop board separates live observations from scheduled times and displays a timetable table");
 console.log("PASS: standalone line search matches public line numbers, vehicle numbers and trip numbers without a selected stop");
