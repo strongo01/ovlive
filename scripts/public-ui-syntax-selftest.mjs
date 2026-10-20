@@ -980,13 +980,13 @@ assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "3", tripN
 assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "77", destination: "Bilthoven" }, "73"), false);
 
 const lineCardStart = html.indexOf("function renderLineSearchCard(row) {");
-const lineCardEnd = html.indexOf("\\nfunction displayLineSearchResults(", lineCardStart);
+const lineCardEnd = html.indexOf("\nfunction displayLineSearchResults(", lineCardStart);
 assert.ok(lineCardStart >= 0 && lineCardEnd > lineCardStart,
   "the line-search card renderer must remain independently testable");
 const lineCardContext = { esc: value => String(value ?? "") };
 new vm.Script(
   html.slice(lineCardStart, lineCardEnd).trim() +
-  "\\nthis.renderLineSearchCard = renderLineSearchCard;"
+  "\nthis.renderLineSearchCard = renderLineSearchCard;"
 ).runInNewContext(lineCardContext);
 const fallbackCard = lineCardContext.renderLineSearchCard({
   line: "Lijn onbekend", destination: "Bestemming onbekend",
