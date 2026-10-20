@@ -880,4 +880,67 @@ assert.ok(html.includes("data-transit-trip-ids=") &&
   html.includes("cancelledTripIds.has(String(id))"),
   "a confirmed cancelled trip must not remain in the normal list as a usable option");
 console.log("PASS: confirmed cancelled trips are retrieved from the timetable and shown separately as unavailable");
+
+// The cancellation supplement must not overwrite maxItineraries with a lower value.
+assert.ok(!html.includes("cancellationQuery.set('maxItineraries', '12')"),
+  "the cancellation lookup must not overwrite maxItineraries=16 with 12");
+
+// The stop board and line lookup must use selected Transitous stop IDs and the
+// same stop-times API for departure, arrival, and available route-stop details.
+assert.ok(html.includes('id="stopTimesPanel"') &&
+  html.includes('id="boardStopFind"') &&
+  html.includes('id="boardDirection"') &&
+  html.includes('id="boardSearch"') &&
+  html.includes('id="lineNumber"') &&
+  html.includes('id="lineSearch"'),
+  "the UI must expose a stop departures/arrivals board and a line/destination lookup");
+assert.ok(html.includes("fetchStop: 'true'") &&
+  html.includes("arriveBy: String(direction === 'arrivals')") &&
+  html.includes("direction: 'true'") &&
+  html.includes("row?.nextStops") &&
+  html.includes("row?.previousStops"),
+  "stop-time queries must request arrivals/departures and the route's available next/previous stops");
+assert.ok(workerSource.includes('const booleanParams = ["arriveBy", "direction", "fetchStop", "withScheduledSkippedStops"]') &&
+  workerSource.includes('upstream.searchParams.set("pageCursor", pageCursor)') &&
+  workerSource.includes('upstream.searchParams.set("time", requestedTime)'),
+  "the Worker must safely forward time, direction, route-stop and paging parameters to Transitous");
+
+const boardTimeFormatterStart = html.indexOf("function stopTimeEvent(row, direction) {");
+const boardTimeFormatterEnd = html.indexOf("\nfunction stopTimeDestination(", boardTimeFormatterStart);
+assert.ok(boardTimeFormatterStart >= 0 && boardTimeFormatterEnd > boardTimeFormatterStart,
+  "the stop-time event formatter must remain independently testable");
+const stopEventContext = {};
+new vm.Script(
+  html.slice(boardTimeFormatterStart, boardTimeFormatterEnd).trim() +
+  "\nthis.stopTimeEvent = stopTimeEvent;"
+).runInNewContext(stopEventContext);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(stopEventContext.stopTimeEvent({
+    realTime: true,
+    place: { departure: "2026-10-20T12:03:00Z", scheduledDeparture: "2026-10-20T12:00:00Z" }
+  }, "departures"))),
+  { time: "2026-10-20T12:03:00Z", scheduled: "2026-10-20T12:00:00Z", reported: "2026-10-20T12:03:00Z", live: true },
+  "a real-time stop event must show the reported time while retaining its scheduled time"
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(stopEventContext.stopTimeEvent({
+    realTime: false,
+    place: { departure: null, scheduledDeparture: "2026-10-20T12:00:00Z" }
+  }, "departures"))),
+  { time: "2026-10-20T12:00:00Z", scheduled: "2026-10-20T12:00:00Z", reported: null, live: false },
+  "a scheduled-only stop event must not be presented as live"
+);
+
+const lineMatchStart = html.indexOf("function stopTimeMatchesLine(row, query) {");
+const lineMatchEnd = html.indexOf("\nfunction renderStopSequence(", lineMatchStart);
+assert.ok(lineMatchStart >= 0 && lineMatchEnd > lineMatchStart,
+  "line matching must remain independently testable");
+const lineMatchContext = {};
+new vm.Script(
+  html.slice(lineMatchStart, lineMatchEnd).trim() +
+  "\nthis.stopTimeMatchesLine = stopTimeMatchesLine;"
+).runInNewContext(lineMatchContext);
+assert.equal(lineMatchContext.stopTimeMatchesLine({ routeShortName: "5", displayName: "Bus 5" }, "5"), true);
+assert.equal(lineMatchContext.stopTimeMatchesLine({ routeShortName: "11", displayName: "Bus 11" }, "5"), false);
+console.log("PASS: stop board separates real-time observations from scheduled times and supports line route filtering");
 console.log("All public UI JavaScript checks passed.");

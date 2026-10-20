@@ -119,6 +119,26 @@
     .results-sort-control{display:flex;align-items:center;gap:8px;margin:0;color:var(--muted);font-size:12px;white-space:nowrap}
     #journeySort{width:auto;min-width:230px;max-width:100%;padding:9px 11px;margin:0;font-size:14px}
     .journey-results-list{display:flex;flex-direction:column;gap:0}
+    .stop-time-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+    .stop-time-card{border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);padding:12px}
+    .stop-time-card.is-cancelled{border-color:rgba(252,165,165,.55)}
+    .stop-time-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+    .stop-time-route{font-weight:850;font-size:15px}
+    .stop-time-time{font-size:22px;font-weight:850;font-variant-numeric:tabular-nums;line-height:1.2}
+    .stop-time-meta{font-size:12px;color:var(--muted);margin-top:4px}
+    .stop-time-status{display:inline-block;padding:3px 7px;border-radius:7px;font-size:11px;font-weight:800;background:rgba(127,127,127,.1);border:1px solid var(--line)}
+    .stop-time-status.is-live{color:var(--green);border-color:rgba(134,239,172,.35)}
+    .stop-time-status.is-cancelled{color:var(--red);border-color:rgba(252,165,165,.5)}
+    .stop-time-details{margin-top:9px;border-top:1px solid var(--line);padding-top:8px}
+    .stop-time-details>summary{cursor:pointer;color:var(--accent);font-size:13px;font-weight:750}
+    .stop-time-stops{list-style:none;padding:0;margin:8px 0 0}
+    .stop-time-stops li{display:grid;grid-template-columns:52px minmax(0,1fr);gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.045);font-size:12px}
+    .stop-time-stops li:last-child{border-bottom:0}
+    .stop-time-stops time{font-variant-numeric:tabular-nums;color:var(--muted)}
+    .stop-time-empty{border:1px dashed var(--line);border-radius:10px;padding:14px;color:var(--muted)}
+    .divider{height:1px;background:var(--line);margin:18px 0}
+    @media(max-width:600px){.stop-time-card{padding:10px}.stop-time-time{font-size:20px}}
+
     .journey-page-controls{display:flex;justify-content:center;margin:12px 0}
     .journey-page-controls button{width:auto;min-width:min(100%,320px);max-width:100%;margin:0}
     .journey-page-status{text-align:center;margin:7px 0 12px;color:var(--muted);font-size:12px}
@@ -276,6 +296,55 @@
     <button id="planBtn">Zoek reizen</button>
     <div id="planStatus" class="muted" aria-live="polite"></div>
     <div id="journeys"></div>
+  </section>
+
+  <section class="panel" id="stopTimesPanel">
+    <h2>Vertrektijden per halte</h2>
+    <p class="muted">Zoek een echte OV-halte of een station en bekijk geplande en beschikbare realtime-vertrek- of aankomsttijden. Kies een halte uit de resultaten zodat OVLive de juiste halte-ID gebruikt.</p>
+    <div class="grid">
+      <div>
+        <label for="boardStop">Halte of station</label>
+        <input id="boardStop" autocomplete="off" placeholder="Bijvoorbeeld Utrecht Leidsche Rijn">
+        <button type="button" id="boardStopFind" class="secondary">Zoek halte</button>
+        <select class="place-choice" id="boardStopChoice" aria-label="Kies halte of station" hidden><option value="">Kies een gevonden halte…</option></select>
+        <div id="boardStopFindStatus" class="muted" role="status" aria-live="polite"></div>
+      </div>
+      <div>
+        <label for="boardWhen">Vertrek- of aankomsttijd (optioneel)</label>
+        <input id="boardWhen" type="datetime-local">
+        <p class="muted mode-help">Leeg laten = vanaf nu.</p>
+      </div>
+      <div>
+        <label for="boardDirection">Zoek naar</label>
+        <select id="boardDirection">
+          <option value="departures" selected>Vertrekkende voertuigen</option>
+          <option value="arrivals">Aankomende voertuigen</option>
+        </select>
+      </div>
+      <div>
+        <label for="boardLimit">Aantal resultaten</label>
+        <select id="boardLimit"><option value="10">10</option><option value="20" selected>20</option><option value="30">30</option><option value="50">50</option></select>
+      </div>
+    </div>
+    <button type="button" id="boardSearch">Toon haltevertrektijden</button>
+    <div id="boardStatus" class="muted" role="status" aria-live="polite"></div>
+    <div id="boardResults"></div>
+    <div class="divider"></div>
+    <h3>Zoek een lijn en bekijk waar die naartoe gaat</h3>
+    <p class="muted">Kies hierboven een halte en vul hieronder een lijnnummer in, bijvoorbeeld 5 of 28. OVLive zoekt de komende ritten van die lijn bij die halte en toont de bestemming en alle volgende haltes die de dienstregeling beschikbaar stelt. Zo voorkom je verwarring tussen gelijk genummerde lijnen in verschillende steden.</p>
+    <div class="grid">
+      <div>
+        <label for="lineNumber">Lijnnummer</label>
+        <input id="lineNumber" autocomplete="off" maxlength="30" placeholder="Bijvoorbeeld 5">
+      </div>
+      <div>
+        <label for="lineLimit">Aantal ritten doorzoeken</label>
+        <select id="lineLimit"><option value="20">20 ritten</option><option value="50" selected>50 ritten</option></select>
+      </div>
+    </div>
+    <button type="button" id="lineSearch">Zoek lijn en bekijk route</button>
+    <div id="lineStatus" class="muted" role="status" aria-live="polite"></div>
+    <div id="lineResults"></div>
   </section>
 
   <section class="panel" id="ndovLocalDiagnosticsPanel" hidden>
@@ -3095,7 +3164,6 @@ function loadCancelledTripSupplement(baseQuery, generation) {
   cancellationQuery.set('realtimeMode', 'OFF');
   cancellationQuery.set('numItineraries', '16');
   cancellationQuery.set('maxItineraries', '16');
-  cancellationQuery.set('maxItineraries', '12');
 
   void (async () => {
     try {
@@ -3820,6 +3888,141 @@ const updateWalkingSpeedReadout = () => {
 if (walkingSpeedInput && walkingSpeedValue) {
   walkingSpeedInput.addEventListener('input', updateWalkingSpeedReadout);
   updateWalkingSpeedReadout();
+}
+
+
+function resolveTransitStop(inputId = 'boardStop', choiceId = 'boardStopChoice') {
+  const raw = $(inputId).value.trim();
+  const choice = $(choiceId);
+  const selected = choice?.selectedOptions?.[0];
+  if (choice?.value && selected?.dataset.label === raw) {
+    if (selected.dataset.provider !== 'transitous') {
+      throw new Error('Kies een echte OV-halte uit de resultaten; een adres of kaartlocatie heeft geen vertrektijdenbord.');
+    }
+    return choice.value;
+  }
+  // A pasted stop ID is fine; a free-typed place name or coordinate is not.
+  if (/^[A-Za-z0-9_.:-]{3,200}$/.test(raw) && /[_:.-]/.test(raw)) {
+    return raw;
+  }
+  throw new Error('Zoek de halte en selecteer een OV-halte uit de gevonden resultaten.');
+}
+function stopTimeEvent(row, direction) {
+  const place = row?.place ?? {};
+  const field = direction === 'arrivals' ? 'arrival' : 'departure';
+  const capitalized = field.charAt(0).toUpperCase() + field.slice(1);
+  const scheduled = place['scheduled' + capitalized] ??
+    place['planned' + capitalized] ?? null;
+  const reported = place[field] ?? null;
+  const live = row?.realTime === true && reported != null;
+  return {
+    time: live ? reported : (scheduled ?? reported),
+    scheduled,
+    reported,
+    live
+  };
+}
+
+function stopTimeDestination(row) {
+  return String(row?.tripTo?.name ?? row?.tripTo?.displayName ??
+    row?.headsign ?? row?.destination?.name ?? 'Bestemming onbekend').trim();
+}
+
+function stopTimeMatchesLine(row, query) {
+  const target = String(query ?? '').trim().toLocaleLowerCase('nl-NL');
+  if (!target) return true;
+  const shortName = String(row?.routeShortName ?? '').trim().toLocaleLowerCase('nl-NL');
+  if (shortName === target) return true;
+  const candidates = [
+    row?.displayName, row?.routeLongName, row?.tripShortName, row?.headsign
+  ].map(value => String(value ?? ''));
+  const tokens = candidates.flatMap(value => String(value ?? '').toLocaleLowerCase('nl-NL').split(/[^a-z0-9]+/i));
+  return tokens.includes(target);
+}
+
+function renderStopSequence(row, direction) {
+  const stops = direction === 'arrivals'
+    ? (Array.isArray(row?.previousStops) ? row.previousStops : [])
+    : (Array.isArray(row?.nextStops) ? row.nextStops : []);
+  if (!stops.length) {
+    return '<p class="muted">De bron levert voor deze rit geen volledige reeks tussenliggende haltes. De bestemming hierboven komt uit de dienstregeling.</p>';
+  }
+  return '<ol class="stop-time-stops">' + stops.map(stop => {
+    const name = stop?.name ?? stop?.displayName ?? stop?.stopName ?? 'Onbekende halte';
+    const timeValue = direction === 'arrivals'
+      ? (stop?.arrival ?? stop?.scheduledArrival ?? stop?.departure ?? stop?.scheduledDeparture)
+      : (stop?.departure ?? stop?.scheduledDeparture ?? stop?.arrival ?? stop?.scheduledArrival);
+    const platform = stop?.track ?? stop?.scheduledTrack ?? '';
+    return '<li><time>' + esc(clock(timeValue)) + '</time><span>' +
+      esc(name) + (platform ? ' · ' + esc('perron ' + platform) : '') +
+      '</span></li>';
+  }).join('') + '</ol>';
+}
+
+function renderStopTimeCard(row, direction, index) {
+  const event = stopTimeEvent(row, direction);
+  const place = row?.place ?? {};
+  const routeName = String(row?.displayName ??
+    [modeName(row?.mode), row?.routeShortName].filter(Boolean).join(' ') ??
+    'OV-rit');
+  const destination = stopTimeDestination(row);
+  const cancelled = row?.cancelled === true || row?.tripCancelled === true;
+  const platform = place?.track ?? place?.scheduledTrack ?? '';
+  const scheduledText = event.live && event.scheduled &&
+    clock(event.scheduled) !== clock(event.time)
+      ? '<div class="stop-time-meta">Dienstregeling: ' + esc(clock(event.scheduled)) + '</div>'
+      : '';
+  const status = cancelled
+    ? '<span class="stop-time-status is-cancelled">⚠ RIJDT NIET</span>'
+    : event.live
+      ? '<span class="stop-time-status is-live">REALTIME</span>'
+      : '<span class="stop-time-status">DIENSTREGELING</span>';
+  const stopLabel = direction === 'arrivals' ? 'Aankomst' : 'Vertrek';
+  return '<article class="stop-time-card' + (cancelled ? ' is-cancelled' : '') + '">' +
+    '<div class="stop-time-top"><div><div class="stop-time-route">' + esc(routeName) +
+      '</div><div class="stop-time-meta">' + esc(stopLabel + ' · ' + destination) +
+      (platform ? ' · ' + esc('perron ' + platform) : '') + '</div></div>' +
+    '<div><div class="stop-time-time">' + esc(clock(event.time)) + '</div>' + status + scheduledText + '</div></div>' +
+    '<details class="stop-time-details"><summary>Bestemming en haltes bekijken</summary>' +
+    '<div class="stop-time-meta">Richting/bestemming: ' + esc(destination) + '</div>' +
+    renderStopSequence(row, direction) +
+    '<div class="stop-time-meta">Rit-ID: ' + esc(row?.tripId ?? 'niet beschikbaar') +
+    (row?.agencyName ? ' · ' + esc(row.agencyName) : '') + '</div></details>' +
+    '</article>';
+}
+
+async function requestStopTimes({ direction = 'departures', n = 20 } = {}) {
+  const stopId = resolveTransitStop();
+  const query = new URLSearchParams({
+    stopId,
+    n: String(Math.min(50, Math.max(1, Number(n) || 20))),
+    arriveBy: String(direction === 'arrivals'),
+    direction: 'true',
+    fetchStop: 'true',
+    withScheduledSkippedStops: 'true',
+    language: 'nl'
+  });
+  const selectedWhen = $('boardWhen').value;
+  if (selectedWhen) {
+    const timestamp = new Date(selectedWhen);
+    if (!Number.isFinite(timestamp.getTime())) throw new Error('Kies een geldige datum en tijd.');
+    query.set('time', timestamp.toISOString());
+  }
+  return api('/api/stoptimes?' + query.toString(), {
+    signal: AbortSignal.timeout(20000)
+  });
+}
+
+function displayStopTimes(containerId, rows, direction, emptyText) {
+  const container = $(containerId);
+  if (!container) return;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    container.innerHTML = '<div class="stop-time-empty">' + esc(emptyText) + '</div>';
+    return;
+  }
+  container.innerHTML = '<div class="stop-time-list">' +
+    rows.map((row, index) => renderStopTimeCard(row, direction, index)).join('') +
+    '</div>';
 }
 
 function renderJourneyCard(journey, index, walkSettings) {
@@ -4610,6 +4813,70 @@ q.set('pedestrianSpeed', '1.5');
   } finally {
     $('planBtn').disabled = false;
     $('tightTransferBtn').disabled = false;
+  }
+};
+
+$('boardStopFind').onclick = () =>
+  findPlaces('boardStop', 'boardStopChoice', 'boardStopFindStatus');
+$('boardStopChoice').onchange = () => {
+  const option = $('boardStopChoice').selectedOptions[0];
+  if (option?.dataset.label) $('boardStop').value = option.dataset.label;
+};
+$('boardSearch').onclick = async () => {
+  const button = $('boardSearch');
+  button.disabled = true;
+  $('boardResults').innerHTML = '';
+  $('boardStatus').textContent = 'Vertrek- en aankomsttijden ophalen…';
+  try {
+    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
+    const data = await requestStopTimes({
+      direction,
+      n: $('boardLimit').value
+    });
+    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
+      : Array.isArray(data?.stop_times) ? data.stop_times : [];
+    const placeName = data?.place?.name ?? $('boardStop').value.trim();
+    $('boardStatus').textContent = rows.length
+      ? placeName + ' · ' + rows.length + ' ' +
+        (direction === 'arrivals' ? 'aankomsten' : 'vertrekken') +
+        ' opgehaald. Realtime staat alleen bij ritten waarvoor de bron dat bevestigt.'
+      : 'Geen tijden gevonden. Controleer de geselecteerde halte of probeer een andere tijd.';
+    displayStopTimes('boardResults', rows, direction,
+      'Geen vertrek- of aankomsttijden beschikbaar voor deze halte.');
+  } catch (error) {
+    $('boardStatus').textContent = error instanceof Error ? error.message : 'Haltevertrektijden konden niet worden opgehaald.';
+  } finally {
+    button.disabled = false;
+  }
+};
+$('lineSearch').onclick = async () => {
+  const button = $('lineSearch');
+  const requestedLine = $('lineNumber').value.trim();
+  if (!requestedLine) {
+    $('lineStatus').textContent = 'Vul eerst een lijnnummer in, bijvoorbeeld 5 of 28.';
+    return;
+  }
+  button.disabled = true;
+  $('lineResults').innerHTML = '';
+  $('lineStatus').textContent = 'Ritten en routehaltes ophalen…';
+  try {
+    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
+    const data = await requestStopTimes({ direction, n: $('lineLimit').value });
+    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
+      : Array.isArray(data?.stop_times) ? data.stop_times : [];
+    const matchingRows = rows.filter(row => stopTimeMatchesLine(row, requestedLine));
+    $('lineStatus').textContent = matchingRows.length
+      ? 'Lijn ' + requestedLine + ' · ' + matchingRows.length +
+        ' passende rit(ten) gevonden bij ' + (data?.place?.name ?? $('boardStop').value.trim()) +
+        '. De route toont de haltes die de dienstregelingbron heeft meegeleverd.'
+      : 'Geen rit voor lijn ' + requestedLine +
+        ' gevonden in deze lijst. Probeer een andere tijd of verhoog het aantal ritten dat wordt doorzocht.';
+    displayStopTimes('lineResults', matchingRows, direction,
+      'Geen passende ritten gevonden. Controleer het lijnnummer en de geselecteerde halte.');
+  } catch (error) {
+    $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn kon niet worden opgezocht.';
+  } finally {
+    button.disabled = false;
   }
 };
 
