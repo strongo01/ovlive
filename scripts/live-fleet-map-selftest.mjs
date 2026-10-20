@@ -35,8 +35,8 @@ assert.ok(script.includes("if (document.hidden && !manual) return;") &&
   "automatic refresh must pause while the browser tab is hidden");
 assert.ok(script.includes("const backoff = [20_000, 30_000, 45_000, 60_000]"),
   "repeated full failures must apply progressive retry backoff");
-assert.ok(script.includes('setOpacity(0.32)') === false,
-  "the global map must avoid turning every refresh into a per-marker stale rewrite");
+assert.ok(script.includes('setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35)'),
+  "last-known markers must visibly fade when their source is unavailable");
 assert.ok(script.includes("marker.setLatLng([vehicle.latitude, vehicle.longitude])"),
   "existing markers must be moved instead of rebuilding the entire Leaflet map");
 assert.ok(script.includes("routeName") && script.includes("routeId") &&
