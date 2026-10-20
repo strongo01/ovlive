@@ -286,15 +286,41 @@ export function normalizeNsTrainDetails(
     findScalar(trainEntries, /^(serie|model|materieel)$/);
   const trainType = typeEntry?.value ?? null;
 
-  const explicitUnitCount = trainEntries.find(entry =>
-    /aantal.*(bak|deel|rijtuig|unit|carriage|vehicle)/.test(entry.key)
-  );
+  const unitKeysByPriority = [
+    // Een echte lijst van de samengestelde trein is betrouwbaarder dan een
+    // aantalveld dat bij een individueel materieeldeel kan horen.
+    "materieeldelen",
+    "treindelen",
+    "delen",
+    "trainunits",
+    "units",
+    "carriages",
+    "rijtuigen",
+    "bakken"
+  ];
+  const unitArray = unitKeysByPriority
+    .map(key => trainEntries.find(entry =>
+      entry.key === key &&
+      Array.isArray(entry.value) &&
+      entry.value.length > 0
+    ))
+    .find((entry): entry is Entry => Boolean(entry));
+
   const listedUnits = trainEntries.find(entry =>
     /^(delen|bakken|rijtuigen|treindelen|materieeldelen|trainunits|carriages|units)$/.test(entry.key) &&
-    (Array.isArray(entry.value) || typeof entry.value === "number" ||
+    (typeof entry.value === "number" ||
       (typeof entry.value === "string" && /^\s*\d+\s*$/.test(entry.value)))
   );
-  const selectedUnits = explicitUnitCount ?? listedUnits;
+  const explicitUnitCount = trainEntries.find(entry =>
+    /aantal.*(bak|deel|rijtuig|unit|carriage|vehicle)/.test(entry.key) &&
+    (typeof entry.value === "number" ||
+      (typeof entry.value === "string" && /^\s*\d+\s*$/.test(entry.value)))
+  );
+
+  // Prioriteit: lijst van materieeldelen > expliciet aantal > algemeen veld.
+  // Bijvoorbeeld: een nested "aantalDelen: 1" kan op één deel slaan, terwijl
+  // de daadwerkelijke lijst van de volledige trein zes deelobjecten bevat.
+  const selectedUnits = unitArray ?? explicitUnitCount ?? listedUnits;
   const unitCount = selectedUnits ? countValue(selectedUnits.value) : null;
   // NS beschrijft de opbouw als treindelen; gebruik dat woord ook als het
   // bronveld intern een andere naam heeft (bijvoorbeeld aantalBakken).
