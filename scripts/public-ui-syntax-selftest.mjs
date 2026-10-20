@@ -1167,7 +1167,7 @@ const fallbackCard = lineCardContext.renderLineSearchCard({
 assert.ok(fallbackCard.includes("Rit-ID: rt-trip-73") &&
   fallbackCard.includes("Route-ID: rt-route-7"),
   "fallback line-search cards must show exact trip and route IDs when no vehicle number exists");
-assert.ok(fallbackCard.includes('<details class="line-search-card line-search-card-expandable">') &&
+assert.ok(fallbackCard.includes('<details class="line-search-card line-search-card-expandable" data-line-search-card-id=') &&
   fallbackCard.includes('<summary class="line-search-card-summary">') &&
   fallbackCard.includes("Bekijk ritdetails en volgende haltes") &&
   fallbackCard.includes('href="https://www.openstreetmap.org/?mlat=52.1153&mlon=5.1122#map=17/52.1153/5.1122"') &&
