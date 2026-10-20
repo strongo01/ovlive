@@ -796,6 +796,8 @@ export async function enrichNsTrainPlan(plan: any, env: NsEnv): Promise<any> {
         checkedAt: new Date().toISOString(),
         stationLookupSource,
         stationListError,
+        departureStationCode: fromCode,
+        arrivalStationCode: toCode,
         matchMethod: departureUsedJourney || arrivalUsedJourney
           ? "NS-reisdetails: treinnummer + stationcode + geplande tijd binnen 3 minuten"
           : "NS-treinnummer + stationcode + geplande tijd binnen 3 minuten",

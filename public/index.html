@@ -12,7 +12,24 @@
     h1{font-size:clamp(28px,5vw,42px);line-height:1.1;margin:0}p{color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px;margin:16px 0}
     label{display:block;font-size:13px;color:var(--muted);margin:0 0 6px}input,select,button{font:inherit;border-radius:10px;border:1px solid var(--line);padding:12px;background:#11161b;color:var(--text);width:100%}
     button{background:var(--accent);color:#241405;border:0;font-weight:750;cursor:pointer;margin-top:12px}
-    button.secondary{background:#303842;color:var(--text);margin:6px 0 8px}button.secondary[aria-pressed="true"]{background:rgba(251,146,60,.13);color:#fdba74;border:1px solid rgba(251,146,60,.45)}#tightTransferHelp{margin-top:0}.ns-train-details-button{margin:8px 0 0}.ns-train-details{margin-top:8px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.ns-train-details-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px;margin-bottom:8px}.ns-train-details-tile{padding:9px;border-radius:9px;background:rgba(127,127,127,.08);min-width:0}.ns-train-details-label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.ns-train-details-value{font-weight:750;overflow-wrap:anywhere}.ns-train-crowd-low{color:var(--green)}.ns-train-crowd-medium{color:var(--warning,#d97706)}.ns-train-crowd-high{color:var(--red)}.ns-train-facilities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.ns-train-facility{border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:12px}.ns-train-details-foot{font-size:11px;color:var(--muted);margin-top:8px}#tightTransferHelp{margin-top:0}.journey-tight-transfer-tag{display:inline-block;border-radius:7px;padding:3px 8px;font-size:11px;font-weight:750;color:#fcd34d;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3)}button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:var(--muted);font-size:13px}.status{padding:10px 12px;border-radius:10px;background:#222a32;margin:8px 0}.ok{color:var(--green)}.bad{color:var(--red)}
+    button.secondary{background:#303842;color:var(--text);margin:6px 0 8px}button.secondary[aria-pressed="true"]{background:rgba(251,146,60,.13);color:#fdba74;border:1px solid rgba(251,146,60,.45)}#tightTransferHelp{margin-top:0}.ns-train-details-button{margin:8px 0 0}.ns-train-details{margin-top:8px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.ns-train-details-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px;margin-bottom:8px}.ns-train-details-tile{padding:9px;border-radius:9px;background:rgba(127,127,127,.08);min-width:0}.ns-train-details-label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.ns-train-details-value{font-weight:750;overflow-wrap:anywhere}.ns-train-crowd-low{color:var(--green)}.ns-train-crowd-medium{color:var(--warning,#d97706)}.ns-train-crowd-high{color:var(--red)}.ns-train-facilities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.ns-train-facility{border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:12px}.ns-train-details-foot{font-size:11px;color:var(--muted);margin-top:8px}
+    .ns-train-layout-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+    .ns-train-layout-kicker{font-size:10px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);font-weight:800}
+    .ns-train-layout-title{font-size:17px;font-weight:850;line-height:1.25;margin-top:2px}
+    .ns-train-layout-stats{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+    .ns-train-layout-stat{border:1px solid var(--line);border-radius:9px;padding:5px 8px;font-size:12px;font-weight:800;white-space:nowrap}
+    .ns-train-consist{display:flex;align-items:flex-end;gap:3px;overflow-x:auto;padding:9px 2px 5px;margin:3px 0 11px;scrollbar-width:thin}
+    .ns-train-car{flex:0 0 58px;text-align:center;position:relative}
+    .ns-train-car-shell{height:34px;border:2px solid #a7b2c0;border-radius:7px 7px 4px 4px;background:linear-gradient(180deg,#dce4eb 0%,#aab7c5 100%);display:flex;align-items:center;justify-content:center;gap:3px;padding:4px;position:relative}
+    .ns-train-car-shell:before,.ns-train-car-shell:after{content:"";position:absolute;bottom:-5px;width:8px;height:4px;border-radius:2px;background:#8793a0}
+    .ns-train-car-shell:before{left:8px}.ns-train-car-shell:after{right:8px}
+    .ns-train-car-window{height:12px;flex:1;min-width:0;border-radius:2px;background:#334b60;border:1px solid #617c91}
+    .ns-train-car-label{display:block;font-size:10px;color:var(--muted);margin-top:8px;white-space:nowrap}
+    .ns-train-layout-crowd{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:800;background:rgba(127,127,127,.1);border:1px solid var(--line)}
+    .ns-train-layout-crowd:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
+    .ns-train-facility{font-weight:650}
+    .ns-train-details-section-title{font-size:12px;font-weight:800;margin:8px 0 5px}
+    #tightTransferHelp{margin-top:0}.journey-tight-transfer-tag{display:inline-block;border-radius:7px;padding:3px 8px;font-size:11px;font-weight:750;color:#fcd34d;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3)}button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:var(--muted);font-size:13px}.status{padding:10px 12px;border-radius:10px;background:#222a32;margin:8px 0}.ok{color:var(--green)}.bad{color:var(--red)}
     .journey{border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}.leg{padding:10px 0;border-bottom:1px solid var(--line)}.leg:last-child{border-bottom:0}.pill{font-size:12px;border-radius:999px;background:#2a3038;padding:3px 8px;display:inline-block;margin-right:6px}.source{font-size:12px;color:var(--muted);overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#dbe4ee;font-size:12px}
 
     .journey-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:10px 0;color:var(--muted);font-size:14px}
@@ -1594,57 +1611,81 @@ function renderNsTrainDetails(data) {
     return '<div class="status rt-unknown">NS-treininformatie is momenteel niet beschikbaar.</div>';
   }
 
-  const tiles = [];
-  const crowd = data.crowdForecast;
-  if (crowd && crowd.label) {
-    const crowdClass = crowd.level === 'high'
-      ? 'ns-train-crowd-high'
-      : crowd.level === 'medium'
-        ? 'ns-train-crowd-medium'
-        : crowd.level === 'low'
-          ? 'ns-train-crowd-low'
-          : '';
-    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Verwachte drukte</span><span class="ns-train-details-value ' + crowdClass + '">' + esc(crowd.label) + '</span></div>');
-  }
-  if (data.trainType) {
-    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Materieeltype</span><span class="ns-train-details-value">' + esc(data.trainType) + '</span></div>');
-  }
-  if (Number.isFinite(data.unitCount)) {
-    const unitLabel = data.unitLabel || 'treindelen';
-    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Samenstelling</span><span class="ns-train-details-value">' + esc(String(data.unitCount) + ' ' + unitLabel) + '</span></div>');
-  }
-  if (data.composition) {
-    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Treinsamenstelling</span><span class="ns-train-details-value">' + esc(data.composition) + '</span></div>');
-  }
-  if (Number.isFinite(data.lengthMeters)) {
-    const length = Number(data.lengthMeters).toLocaleString('nl-NL', { maximumFractionDigits: 1 });
-    tiles.push('<div class="ns-train-details-tile"><span class="ns-train-details-label">Treinlengte</span><span class="ns-train-details-value">' + esc(length + ' m') + '</span></div>');
-  }
+  const checkedAt = data.checkedAt && Number.isFinite(Date.parse(data.checkedAt))
+    ? new Date(data.checkedAt).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })
+    : null;
+  const unitCount = Number.isFinite(data.unitCount) && data.unitCount > 0
+    ? Math.min(20, Math.round(data.unitCount))
+    : null;
+  const unitLabel = data.unitLabel || 'treindelen';
+  const singularUnit = unitLabel === 'bakken' ? 'Bak'
+    : unitLabel === 'rijtuigen' ? 'Rijtuig' : 'Deel';
+  const compositionLabel = unitCount
+    ? unitCount + ' ' + unitLabel
+    : (data.composition || null);
+  const lengthLabel = Number.isFinite(data.lengthMeters)
+    ? Number(data.lengthMeters).toLocaleString('nl-NL', { maximumFractionDigits: 1 }) + ' m'
+    : null;
+
+  const stats = [];
+  if (compositionLabel) stats.push('<span class="ns-train-layout-stat">' + esc(compositionLabel) + '</span>');
+  if (lengthLabel) stats.push('<span class="ns-train-layout-stat">' + esc(lengthLabel) + '</span>');
+  const formation = unitCount
+    ? '<div class="ns-train-consist" role="img" aria-label="Schematische weergave van ' +
+      esc(String(unitCount)) + ' ' + esc(unitLabel) +
+      '; details per bak worden alleen getoond als NS die aanlevert.">' +
+      Array.from({ length: unitCount }, (_, index) =>
+        '<div class="ns-train-car"><div class="ns-train-car-shell">' +
+        '<span class="ns-train-car-window"></span><span class="ns-train-car-window"></span><span class="ns-train-car-window"></span>' +
+        '</div><span class="ns-train-car-label">' + esc(singularUnit + ' ' + (index + 1)) + '</span></div>'
+      ).join('') + '</div>'
+    : '';
+
+  const crowd = data.crowdForecast && data.crowdForecast.label
+    ? '<span class="ns-train-layout-crowd ' +
+      (data.crowdForecast.level === 'high' ? 'ns-train-crowd-high'
+        : data.crowdForecast.level === 'medium' ? 'ns-train-crowd-medium'
+        : data.crowdForecast.level === 'low' ? 'ns-train-crowd-low' : '') +
+      '">Verwachte drukte: ' + esc(data.crowdForecast.label) + '</span>'
+    : '';
 
   let facilitiesHtml = '';
   if (Array.isArray(data.facilities) && data.facilities.length) {
-    facilitiesHtml = '<div><strong>Voorzieningen die NS expliciet meldt</strong><div class="ns-train-facilities">' +
-      data.facilities.map(item => '<span class="ns-train-facility">' + (item.available ? '✓ ' : '✕ ') + esc(item.label) + (item.available ? '' : ' · niet aanwezig') + '</span>').join('') +
-      '</div></div>';
-  } else {
-    facilitiesHtml = '<div class="muted">De ontvangen ritgegevens bevestigen op dit moment geen specifieke voorzieningen.</div>';
+    facilitiesHtml = '<div class="ns-train-details-section-title">Voorzieningen</div>' +
+      '<div class="ns-train-facilities">' +
+      data.facilities.map(item =>
+        '<span class="ns-train-facility">' + (item.available ? '✓ ' : '✕ ') +
+        esc(item.label) + (item.available ? '' : ' · niet aanwezig') + '</span>'
+      ).join('') + '</div>';
   }
 
   const errorsHtml = Array.isArray(data.errors) && data.errors.length
-    ? '<div class="status rt-unknown"><strong>Niet alle informatie is beschikbaar.</strong><div class="rt-details">' + data.errors.map(esc).join(' · ') + '</div></div>'
+    ? '<div class="status rt-unknown"><strong>Niet alle informatie is beschikbaar.</strong><div class="rt-details">' +
+      data.errors.map(esc).join(' · ') + '</div></div>'
     : '';
-  const emptyHtml = !tiles.length
-    ? '<div class="status rt-unknown">' + esc(data.message || 'Voor deze rit zijn momenteel geen aanvullende samenstellingsgegevens beschikbaar.') + '</div>'
+  const hasUsefulDetails = Boolean(
+    unitCount || data.trainType || data.composition || lengthLabel || crowd ||
+    (Array.isArray(data.facilities) && data.facilities.length)
+  );
+  const emptyHtml = !hasUsefulDetails
+    ? '<div class="status rt-unknown">' +
+      esc(data.message || 'NS heeft voor deze rit geen bruikbare samenstellingsinformatie teruggegeven.') +
+      '</div>'
     : '';
-  const checkedAt = data.checkedAt && Number.isFinite(Date.parse(data.checkedAt))
-    ? new Date(data.checkedAt).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    : 'onbekend';
+  const title = data.trainType || data.composition || 'Treinsamenstelling';
+  const context = data.stationContextUsed && data.stationCode
+    ? ' · details bij station ' + esc(data.stationCode)
+    : '';
 
   return '<div class="ns-train-details">' +
-    '<div class="ns-train-details-grid">' + tiles.join('') + '</div>' +
+    '<div class="ns-train-layout-head"><div><div class="ns-train-layout-kicker">NS-treininformatie</div>' +
+    '<div class="ns-train-layout-title">' + esc(title) + '</div></div>' +
+    '<div class="ns-train-layout-stats">' + stats.join('') + '</div></div>' +
+    formation +
+    (crowd ? '<div style="margin:4px 0 10px">' + crowd + '</div>' : '') +
     facilitiesHtml + errorsHtml + emptyHtml +
-    '<div class="ns-train-details-foot">Bron: NS Virtual Train API · opgehaald om ' + esc(checkedAt) +
-    '. Drukte is een prognose; ontbrekende gegevens betekenen niet dat een trein leeg of zonder voorzieningen is.</div></div>';
+    (checkedAt ? '<div class="ns-train-details-foot">NS · bijgewerkt om ' + esc(checkedAt) + context + '</div>' : '') +
+    '</div>';
 }
 
 function bindNsTrainDetailsButtons(root = document) {
@@ -1660,8 +1701,8 @@ function bindNsTrainDetailsButtons(root = document) {
         output.hidden = !output.hidden;
         button.setAttribute('aria-expanded', String(!output.hidden));
         button.textContent = output.hidden
-          ? '🚆 Drukte & treininformatie bekijken'
-          : 'Verberg treininformatie';
+          ? '🚆 Treinsamenstelling & drukte'
+          : 'Treininformatie sluiten';
         return;
       }
       if (button.dataset.loading === 'true') return;
@@ -1679,6 +1720,8 @@ function bindNsTrainDetailsButtons(root = document) {
       button.textContent = 'Treininformatie ophalen…';
       try {
         const query = new URLSearchParams({ trainNumber });
+        const stationCode = String(button.dataset.stationCode || '').trim().toUpperCase();
+        if (/^[A-Z0-9]{2,6}$/.test(stationCode)) query.set('stationCode', stationCode);
         if (dateTime && Number.isFinite(Date.parse(dateTime))) query.set('dateTime', dateTime);
         const response = await fetch('/api/ns/train-details?' + query.toString(), {
           method: 'GET',
@@ -1693,7 +1736,7 @@ function bindNsTrainDetailsButtons(root = document) {
         output.hidden = false;
         button.dataset.loaded = 'true';
         button.setAttribute('aria-expanded', 'true');
-        button.textContent = 'Verberg treininformatie';
+        button.textContent = 'Treininformatie sluiten';
       } catch (error) {
         const message = error instanceof Error
           ? error.message
@@ -2841,7 +2884,8 @@ function renderLeg(leg, index = 0, journeyLegs = null) {
         <button type="button" class="secondary ns-train-details-button"
           data-train-number="${esc(nsTrainNumber)}"
           data-date-time="${esc(fromSchedule || '')}"
-          aria-expanded="false">🚆 Drukte &amp; treininformatie bekijken</button>
+          data-station-code="${esc(leg?.nsRealtime?.departureStationCode || '')}"
+          aria-expanded="false">🚆 Treinsamenstelling &amp; drukte</button>
         <div class="ns-train-details-output" hidden aria-live="polite"></div>
       </div>`
     : '';
