@@ -39,6 +39,8 @@ assert.ok(script.includes('setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok 
   "last-known markers must visibly fade when their source is unavailable");
 assert.ok(script.includes("marker.setLatLng([vehicle.latitude, vehicle.longitude])"),
   "existing markers must be moved instead of rebuilding the entire Leaflet map");
+assert.ok(script.includes("openovFeedNotFresh") && script.includes("last-known map points"),
+  "stale OpenOV feeds must not overwrite the last known map positions");
 assert.ok(script.includes("routeName") && script.includes("routeId") &&
   script.includes("vehiclePopup(vehicle)"),
   "vehicle popups must include available route and identity information");
