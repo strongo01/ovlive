@@ -3446,6 +3446,259 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
   }
 
+
+  if (url.pathname === "/api/line-search") {
+    const query = String(url.searchParams.get("q") ?? "").trim();
+    if (!query || query.length > 24 || !/^[A-Za-z0-9 -]+$/.test(query)) {
+      return json({ error: "Vul een geldig lijnnummer, voertuignummer of ritnummer in." }, 400, {
+        ...headers,
+        "cache-control": "no-store"
+      });
+    }
+
+    const limitValue = Number(url.searchParams.get("limit") ?? 30);
+    const limit = Number.isFinite(limitValue) ? Math.min(50, Math.max(1, Math.trunc(limitValue))) : 30;
+    const needle = query.toLocaleLowerCase("nl-NL");
+    const results = new Map<string, Record<string, any>>();
+    const warnings: string[] = [];
+    let ovapiAvailable = false;
+    let openovAvailable = false;
+
+    const addResult = (row: Record<string, any>) => {
+      const line = String(row.line ?? "").trim();
+      const destination = String(row.destination ?? "").trim();
+      const vehicleNumber = String(row.vehicleNumber ?? "").trim();
+      const tripNumber = String(row.tripNumber ?? "").trim();
+      const key = [
+        line.toLocaleLowerCase("nl-NL"),
+        destination.toLocaleLowerCase("nl-NL"),
+        vehicleNumber,
+        tripNumber,
+        String(row.tripId ?? "")
+      ].join("|");
+      const existing = results.get(key);
+      if (!existing || (Number(row.timestamp ?? 0) > Number(existing.timestamp ?? 0))) {
+        results.set(key, row);
+      }
+    };
+
+    // OVAPI provides public line names/destinations and live journey passes.
+    // Ask the API for details only for the exact public line number entered.
+    try {
+      const directoryResponse = await fetch("http://v0.ovapi.nl/line/", {
+        headers: {
+          "accept": "application/json",
+          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+        },
+        signal: AbortSignal.timeout(9000),
+        cf: { cacheEverything: true, cacheTtl: 60 }
+      });
+      if (!directoryResponse.ok) throw new Error("OVAPI gaf HTTP " + directoryResponse.status + " terug voor de lijnenlijst.");
+      const directory = await directoryResponse.json() as Record<string, any>;
+      ovapiAvailable = true;
+      const matchingLines = Object.entries(directory).filter(([, value]) => {
+        const meta = value?.Line && typeof value.Line === "object" ? value.Line : value;
+        const publicNumber = String(meta?.LinePublicNumber ?? "").trim();
+        return publicNumber.toLocaleLowerCase("nl-NL") === needle;
+      }).slice(0, 24);
+      if (matchingLines.length) {
+        const routeKeys = matchingLines.map(([key]) => key).filter(key => /^[A-Za-z0-9_-]+$/.test(key));
+        if (routeKeys.length) {
+          const detailsResponse = await fetch("http://v0.ovapi.nl/line/" + routeKeys.join(","), {
+            headers: {
+              "accept": "application/json",
+              "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+            },
+            signal: AbortSignal.timeout(9000),
+            cf: { cacheEverything: true, cacheTtl: 15 }
+          });
+          if (!detailsResponse.ok) throw new Error("OVAPI gaf HTTP " + detailsResponse.status + " terug voor de voertuigen op lijn " + query + ".");
+          const details = await detailsResponse.json() as Record<string, any>;
+          for (const [routeKey, routeData] of Object.entries(details)) {
+            const meta = routeData?.Line ?? directory[routeKey]?.Line ?? directory[routeKey] ?? {};
+            const line = String(meta?.LinePublicNumber ?? query).trim();
+            const actuals = routeData?.Actuals && typeof routeData.Actuals === "object"
+              ? Object.entries(routeData.Actuals)
+              : [];
+            for (const [actualId, actualValue] of actuals) {
+              if (!actualValue || typeof actualValue !== "object" || Array.isArray(actualValue)) continue;
+              const actual = actualValue as Record<string, any>;
+              const updatedAt = String(actual.LastUpdateTimeStamp ?? "");
+              const updatedAtMs = Date.parse(updatedAt);
+              const ageSeconds = Number.isFinite(updatedAtMs)
+                ? Math.round((Date.now() - updatedAtMs) / 1000)
+                : null;
+              // Ignore very old passes; an out-of-date observation is not a live vehicle.
+              if (ageSeconds !== null && (ageSeconds < -120 || ageSeconds > 600)) continue;
+              const destination = String(actual.DestinationName50 ?? meta.DestinationName50 ?? "").trim();
+              const journeyNumber = actual.JourneyNumber == null ? "" : String(actual.JourneyNumber).trim();
+              const vehicleNumber = String(
+                actual.VehicleNumber ?? actual.VehicleNumberOnTrip ?? actual.VehicleCode ?? actual.VehicleId ?? ""
+              ).trim();
+              const tripId = String(actualId ?? "");
+              const row: Record<string, any> = {
+                id: "ovapi|" + routeKey + "|" + (actual.OperationDate ?? "") + "|" + (journeyNumber || actualId),
+                line,
+                destination: destination || "Bestemming onbekend",
+                mode: String(actual.TransportType ?? meta.TransportType ?? ""),
+                vehicleNumber: vehicleNumber || null,
+                tripNumber: journeyNumber || null,
+                vehicleLabel: vehicleNumber
+                  ? "Voertuig met nummer " + vehicleNumber
+                  : journeyNumber
+                    ? "Voertuig met ritnummer " + journeyNumber
+                    : "Voertuig",
+                stop: String(actual.TimingPointName ?? ""),
+                stopTown: String(actual.TimingPointTown ?? ""),
+                status: String(actual.TripStopStatus ?? ""),
+                expectedTime: String(actual.ExpectedDepartureTime ?? actual.ExpectedArrivalTime ?? actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""),
+                updatedAt: updatedAt || null,
+                updateAgeSeconds: ageSeconds,
+                timestamp: Number.isFinite(updatedAtMs) ? Math.floor(updatedAtMs / 1000) : 0,
+                source: "OVAPI",
+                tripId,
+                matchKind: "line"
+              };
+              const unique = [
+                line,
+                destination,
+                actual.OperationDate ?? "",
+                actual.DataOwnerCode ?? meta.DataOwnerCode ?? "",
+                journeyNumber || actualId
+              ].join("|");
+              const existing = results.get(unique);
+              if (!existing || row.timestamp > Number(existing.timestamp ?? 0)) results.set(unique, row);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      warnings.push("OVAPI-lijngegevens niet beschikbaar: " + (error instanceof Error ? error.message : "onbekende fout"));
+    }
+
+    // Search OpenOV's current vehicle feed for matching vehicle IDs and trip IDs,
+    // so a search like "73" can also find vehicle 7305 or trip 7346 on another line.
+    try {
+      const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions");
+      if (!feed || feed.ok !== true || !Array.isArray(feed.entities)) {
+        throw new Error("De OpenOV-voertuigposities zijn momenteel niet beschikbaar.");
+      }
+      openovAvailable = true;
+      const matchedVehicles = (feed.entities as any[])
+        .filter((entity: any) => {
+          const vehicleId = String(entity?.vehicleId ?? "");
+          const tripId = String(entity?.tripId ?? "");
+          return vehicleId.toLocaleLowerCase("nl-NL").includes(needle) ||
+            tripId.toLocaleLowerCase("nl-NL").includes(needle);
+        })
+        .sort((a: any, b: any) => Number(b?.timestamp ?? 0) - Number(a?.timestamp ?? 0))
+        .slice(0, Math.min(20, limit));
+
+      // Keep upstream detail calls bounded; unknown IDs remain visible as unknown
+      // rather than being assigned a guessed public line or destination.
+      for (let index = 0; index < matchedVehicles.length; index += 4) {
+        const batch = matchedVehicles.slice(index, index + 4);
+        const enriched = await Promise.all(batch.map(async (entity: any) => {
+          const tripId = String(entity?.tripId ?? "").trim();
+          const vehicleId = String(entity?.vehicleId ?? "").trim();
+          let itinerary: any = null;
+          if (tripId) {
+            try {
+              const upstream = new URL(TRANSITOUS + "/trip");
+              upstream.searchParams.set("tripId", tripId);
+              upstream.searchParams.set("detailedLegs", "true");
+              upstream.searchParams.set("joinInterlinedLegs", "false");
+              upstream.searchParams.set("withScheduledSkippedStops", "true");
+              const response = await fetch(upstream, {
+                headers: {
+                  "accept": "application/json",
+                  "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+                },
+                signal: AbortSignal.timeout(6000),
+                cf: { cacheTtl: 120, cacheEverything: true }
+              });
+              if (response.ok) itinerary = await response.json();
+            } catch {
+              // A position is still useful when the schedule lookup is missing.
+            }
+          }
+          const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
+          const leg = legs.find((value: any) =>
+            String(value?.mode ?? "").toUpperCase() !== "WALK" &&
+            String(value?.mode ?? "").toUpperCase() !== "FOOT"
+          ) ?? legs[0] ?? {};
+          const displayLine = String(
+            leg?.routeShortName ?? leg?.tripShortName ?? leg?.displayName ?? ""
+          ).trim();
+          const line = displayLine || (String(leg?.mode ?? "").toUpperCase() === "TRAIN" ? "Trein" : "OV-voertuig");
+          const destination = String(
+            leg?.headsign ?? leg?.tripTo?.name ?? leg?.tripTo?.displayName ??
+            leg?.to?.name ?? leg?.destination?.name ?? itinerary?.to?.name ?? ""
+          ).trim() || "Bestemming onbekend";
+          const suffixMatch = tripId.match(/_nl-OpenOV_(.+)$/i);
+          const tripNumber = suffixMatch?.[1] ?? "";
+          const vehicleMatched = vehicleId.toLocaleLowerCase("nl-NL").includes(needle);
+          const vehicleLabel = vehicleMatched
+            ? "Voertuig met nummer " + vehicleId
+            : tripId.toLocaleLowerCase("nl-NL").includes(needle) && tripNumber
+              ? "Voertuig met ritnummer " + tripNumber
+              : "Voertuig";
+          const timestamp = Number(entity?.timestamp ?? 0);
+          return {
+            id: "openov|" + (tripId || "no-trip") + "|" + (vehicleId || "no-vehicle"),
+            line,
+            destination,
+            mode: String(leg?.mode ?? ""),
+            vehicleNumber: vehicleId || null,
+            tripNumber: tripNumber || null,
+            vehicleLabel,
+            stop: String(leg?.from?.name ?? ""),
+            status: "",
+            expectedTime: "",
+            updatedAt: timestamp > 0 ? new Date(timestamp * 1000).toISOString() : null,
+            updateAgeSeconds: timestamp > 0 ? Math.max(0, Math.round(Date.now() / 1000 - timestamp)) : null,
+            timestamp,
+            source: "OpenOV GTFS-Realtime",
+            tripId: tripId || null,
+            matchKind: vehicleMatched ? "vehicle" : "trip",
+            position: {
+              latitude: typeof entity?.latitude === "number" ? entity.latitude : null,
+              longitude: typeof entity?.longitude === "number" ? entity.longitude : null
+            }
+          } as Record<string, any>;
+        }));
+        for (const row of enriched) addResult(row);
+      }
+    } catch (error) {
+      warnings.push("OpenOV-voertuiggegevens niet beschikbaar: " + (error instanceof Error ? error.message : "onbekende fout"));
+    }
+
+    if (!ovapiAvailable && !openovAvailable) {
+      return json({
+        ok: false,
+        query,
+        error: "De lijn- en voertuigbronnen zijn momenteel niet bereikbaar.",
+        warnings
+      }, 502, { ...headers, "cache-control": "no-store" });
+    }
+
+    const sorted = [...results.values()].sort((a, b) => {
+      const lineMatch = (a.matchKind === "line" ? 0 : 1) - (b.matchKind === "line" ? 0 : 1);
+      if (lineMatch !== 0) return lineMatch;
+      return Number(b.timestamp ?? 0) - Number(a.timestamp ?? 0);
+    });
+    return json({
+      ok: true,
+      query,
+      source: "OVAPI-lijndata en OpenOV-voertuigposities; voertuigen worden alleen opgenomen met een gevonden ID of lijnmatch",
+      checkedAt: new Date().toISOString(),
+      resultCount: Math.min(limit, sorted.length),
+      results: sorted.slice(0, limit),
+      partial: warnings.length > 0,
+      warnings
+    }, 200, { ...headers, "cache-control": "no-store" });
+  }
+
   if (url.pathname === "/api/trip-shape") {
     const tripId = String(url.searchParams.get("tripId") ?? "").trim();
     if (!tripId || tripId.length > 256) {
@@ -3654,7 +3907,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     upstream.searchParams.set("stopId", stopId);
     upstream.searchParams.set("n", String(count));
 
-    const booleanParams = ["arriveBy", "direction", "fetchStop", "withScheduledSkippedStops"];
+    const booleanParams = ["arriveBy", "fetchStop", "withScheduledSkippedStops"];
     for (const key of booleanParams) {
       const value = url.searchParams.get(key);
       if (value === null) continue;
@@ -3662,6 +3915,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         return json({ error: `Ongeldige waarde voor ${key}; gebruik true of false.` }, 400, headers);
       }
       upstream.searchParams.set(key, value);
+    }
+
+    const requestedDirection = String(url.searchParams.get("direction") ?? "").trim().toUpperCase();
+    if (requestedDirection) {
+      if (requestedDirection !== "EARLIER" && requestedDirection !== "LATER") {
+        return json({ error: "Ongeldige waarde voor direction; gebruik EARLIER of LATER." }, 400, headers);
+      }
+      upstream.searchParams.set("direction", requestedDirection);
     }
 
     const requestedTime = url.searchParams.get("time");
