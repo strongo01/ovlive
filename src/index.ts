@@ -2934,6 +2934,7 @@ let liveMapOpenovMemoryCache: {
   value: LiveMapOpenovCachedBody;
 } | null = null;
 let liveMapOpenovInFlight: Promise<LiveMapOpenovCachedBody> | null = null;
+let liveMapOpenovInFlightStartedAtMs = 0;
 
 function defaultLiveMapOpenovCache(): Cache | null {
   if (typeof caches === "undefined") return null;
@@ -2993,8 +2994,19 @@ async function handleLiveMapOpenovApi(
   }
 
   if (liveMapOpenovInFlight) {
-    const shared = await liveMapOpenovInFlight;
-    return respondLiveMapOpenov(shared, headers, "single-flight");
+    const inflightAgeMs = now - liveMapOpenovInFlightStartedAtMs;
+    if (inflightAgeMs <= 18_000) {
+      const shared = await liveMapOpenovInFlight;
+      return respondLiveMapOpenov(shared, headers, "single-flight");
+    }
+
+    // Do not let a request which appears abandoned after a Worker/CPU failure
+    // block all later map refreshes in this isolate.
+    console.warn("[OVLIVE_LIVE_MAP_OPENOV_STALE_INFLIGHT]", JSON.stringify({
+      inflightAgeMs
+    }));
+    liveMapOpenovInFlight = null;
+    liveMapOpenovInFlightStartedAtMs = 0;
   }
 
   const task = (async (): Promise<LiveMapOpenovCachedBody> => {
@@ -3132,6 +3144,7 @@ async function handleLiveMapOpenovApi(
   })();
 
   liveMapOpenovInFlight = task;
+  liveMapOpenovInFlightStartedAtMs = Date.now();
   try {
     const value = await task;
     if (value.status === 200) {
@@ -3152,7 +3165,10 @@ async function handleLiveMapOpenovApi(
     }
     return respondLiveMapOpenov(value, headers, "miss");
   } finally {
-    if (liveMapOpenovInFlight === task) liveMapOpenovInFlight = null;
+    if (liveMapOpenovInFlight === task) {
+      liveMapOpenovInFlight = null;
+      liveMapOpenovInFlightStartedAtMs = 0;
+    }
   }
 }
 
