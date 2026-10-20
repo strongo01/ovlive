@@ -296,18 +296,24 @@ async function requestJson(url: URL, env: NsTrainDetailsEnv): Promise<any> {
 export async function fetchNsTrainDetails(
   trainNumber: string,
   dateTime: string | null | undefined,
-  env: NsTrainDetailsEnv
+  env: NsTrainDetailsEnv,
+  stationCode?: string | null
 ): Promise<NsTrainDetailsSummary> {
   const number = asText(trainNumber);
   if (!/^\d{1,6}$/.test(number)) throw new Error("NS_TRAIN_DETAILS_INVALID_TRAIN_NUMBER");
   const key = asText(env.NS_API_SUBSCRIPTION_KEY);
   if (!key) throw new Error("NS_TRAIN_DETAILS_KEY_MISSING");
+  const requestedStation = asText(stationCode).toUpperCase();
+  if (requestedStation && !/^[A-Z0-9]{2,6}$/.test(requestedStation)) {
+    throw new Error("NS_TRAIN_DETAILS_INVALID_STATION_CODE");
+  }
+  const stableStationCode = requestedStation || null;
 
   const parsedDate = dateTime ? Date.parse(dateTime) : Number.NaN;
   const stableDateTime = Number.isFinite(parsedDate)
     ? new Date(parsedDate).toISOString()
     : "";
-  const cacheKey = number + "|" + stableDateTime.slice(0, 16);
+  const cacheKey = number + "|" + stableDateTime.slice(0, 16) + "|" + (stableStationCode ?? "");
   const cached = detailsCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     detailsCache.delete(cacheKey);
@@ -317,13 +323,38 @@ export async function fetchNsTrainDetails(
   if (cached) detailsCache.delete(cacheKey);
 
   const promise = (async () => {
-    const trainUrl = new URL(NS_ROOT + "/trein/" + number);
-    trainUrl.searchParams.set("features", "zitplaats,platformitems,cta,drukte,druktev2");
-    if (stableDateTime) trainUrl.searchParams.set("dateTime", stableDateTime);
+    const makeTrainUrl = (withStation: boolean): URL => {
+      const path = NS_ROOT + "/trein/" + number +
+        (withStation && stableStationCode ? "/" + stableStationCode : "");
+      const trainUrl = new URL(path);
+      trainUrl.searchParams.set("features", "zitplaats,platformitems,cta,drukte,druktev2");
+      if (stableDateTime) trainUrl.searchParams.set("dateTime", stableDateTime);
+      return trainUrl;
+    };
+
+    let stationContextUsed = false;
+    const trainRequest = (async () => {
+      if (stableStationCode) {
+        try {
+          const result = await requestJson(makeTrainUrl(true), env);
+          stationContextUsed = true;
+          return result;
+        } catch (stationError) {
+          // Sommige ritten hebben geen station-specifieke details. Probeer dan
+          // de algemene ritgegevens, zodat samenstelling/lengte niet verloren gaan.
+          try {
+            return await requestJson(makeTrainUrl(false), env);
+          } catch {
+            throw stationError;
+          }
+        }
+      }
+      return requestJson(makeTrainUrl(false), env);
+    })();
 
     const crowdUrl = new URL(NS_ROOT + "/prognose/" + number);
     const [trainResult, crowdResult] = await Promise.allSettled([
-      requestJson(trainUrl, env),
+      trainRequest,
       requestJson(crowdUrl, env)
     ]);
 
@@ -343,13 +374,17 @@ export async function fetchNsTrainDetails(
       throw new Error(firstError);
     }
 
-    return normalizeNsTrainDetails(
-      trainData,
-      crowdData,
-      number,
-      new Date().toISOString(),
-      errors
-    );
+    return {
+      ...normalizeNsTrainDetails(
+        trainData,
+        crowdData,
+        number,
+        new Date().toISOString(),
+        errors
+      ),
+      stationCode: stableStationCode,
+      stationContextUsed: trainResult.status === "fulfilled" && stationContextUsed
+    };
   })();
 
   detailsCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, promise });
