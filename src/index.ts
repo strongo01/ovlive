@@ -136,6 +136,50 @@ function lineSearchDelaySeconds(expectedValue: unknown, targetValue: unknown): n
   return Math.round((expected - target) / 1000);
 }
 
+function normalizeOvapiJourneyStops(
+  rawStops: unknown,
+  currentStopCodeValue: unknown
+): { stops: Array<Record<string, any>>; numberOfCoaches: number | string | null } {
+  const stopsObject = rawStops && typeof rawStops === "object" && !Array.isArray(rawStops)
+    ? rawStops as Record<string, any>
+    : {};
+  const orderedStops = Object.entries(stopsObject)
+    .filter(([, stop]) => stop && typeof stop === "object" && !Array.isArray(stop))
+    .map(([key, stop]) => ({ key, ...(stop as Record<string, any>) }))
+    .sort((a, b) =>
+      Number(a.UserStopOrderNumber ?? a.StopSequence ?? a.key) -
+      Number(b.UserStopOrderNumber ?? b.StopSequence ?? b.key)
+    );
+  const currentStopCode = String(currentStopCodeValue ?? "").trim().toLocaleLowerCase("nl-NL");
+  const currentIndex = currentStopCode
+    ? orderedStops.findIndex((stop) => [
+        stop.TimingPointCode, stop.UserStopCode, stop.StopId
+      ].some((value) => String(value ?? "").trim().toLocaleLowerCase("nl-NL") === currentStopCode))
+    : -1;
+  const remainingStops = currentIndex >= 0
+    ? orderedStops.slice(currentIndex)
+    : orderedStops.filter((stop) => !["PASSED", "CANCEL", "CANCELLED"].includes(
+        String(stop.TripStopStatus ?? "").trim().toUpperCase()
+      ));
+  const stops = remainingStops.map((stop, index) => ({
+    name: String(stop.TimingPointName ?? stop.StopName ?? stop.Name ?? "").trim(),
+    userStopCode: String(stop.UserStopCode ?? stop.TimingPointCode ?? stop.StopId ?? "").trim(),
+    timingPointCode: String(stop.TimingPointCode ?? "").trim(),
+    expectedArrival: String(stop.ExpectedArrivalTime ?? "").trim() || null,
+    targetArrival: String(stop.TargetArrivalTime ?? "").trim() || null,
+    expectedDeparture: String(stop.ExpectedDepartureTime ?? "").trim() || null,
+    targetDeparture: String(stop.TargetDepartureTime ?? "").trim() || null,
+    status: String(stop.TripStopStatus ?? "").trim(),
+    stopOrder: Number(stop.UserStopOrderNumber ?? stop.StopSequence ?? index + 1),
+    isCurrent: currentIndex >= 0 && index === 0
+  })).filter((stop) => stop.name);
+  const coachValue = remainingStops.find((stop) => stop.NumberOfCoaches != null)?.NumberOfCoaches ??
+    orderedStops.find((stop) => stop.NumberOfCoaches != null)?.NumberOfCoaches ?? null;
+  const coaches = coachValue == null || String(coachValue).trim() === "" ? null :
+    Number.isFinite(Number(coachValue)) ? Number(coachValue) : String(coachValue).trim();
+  return { stops, numberOfCoaches: coaches };
+}
+
 function lineSearchTripIdMatches(value: unknown, query: unknown): boolean {
   const wanted = String(query ?? "").trim().toLocaleLowerCase("nl-NL");
   if (!wanted) return false;
@@ -3781,40 +3825,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
       for (const candidate of selectedCandidates) {
         const journey = journeysByKey[candidate.journeyKey];
-        const rawStops = journey?.Stops && typeof journey.Stops === "object" ? journey.Stops : {};
-        const orderedStops = Object.entries(rawStops)
-          .filter(([, stop]) => stop && typeof stop === "object" && !Array.isArray(stop))
-          .map(([key, stop]) => ({ key, ...(stop as Record<string, any>) }))
-          .sort((a, b) =>
-            Number(a.UserStopOrderNumber ?? a.StopSequence ?? a.key) -
-            Number(b.UserStopOrderNumber ?? b.StopSequence ?? b.key)
-          );
-        const currentStopCode = String(candidate.row.currentStopCode ?? "").trim().toLocaleLowerCase("nl-NL");
-        let currentIndex = currentStopCode
-          ? orderedStops.findIndex((stop) => [
-              stop.TimingPointCode, stop.UserStopCode, stop.StopId
-            ].some((value) => String(value ?? "").trim().toLocaleLowerCase("nl-NL") === currentStopCode))
-          : -1;
-        const remainingStops = currentIndex >= 0
-          ? orderedStops.slice(currentIndex)
-          : orderedStops.filter((stop) => !["PASSED", "CANCEL", "CANCELLED"].includes(
-              String(stop.TripStopStatus ?? "").trim().toUpperCase()
-            ));
-        candidate.row.stops = remainingStops.map((stop, index) => ({
-          name: String(stop.TimingPointName ?? stop.StopName ?? stop.Name ?? "").trim(),
-          userStopCode: String(stop.UserStopCode ?? stop.TimingPointCode ?? stop.StopId ?? "").trim(),
-          timingPointCode: String(stop.TimingPointCode ?? "").trim(),
-          expectedArrival: String(stop.ExpectedArrivalTime ?? "").trim() || null,
-          targetArrival: String(stop.TargetArrivalTime ?? "").trim() || null,
-          expectedDeparture: String(stop.ExpectedDepartureTime ?? "").trim() || null,
-          targetDeparture: String(stop.TargetDepartureTime ?? "").trim() || null,
-          status: String(stop.TripStopStatus ?? "").trim(),
-          stopOrder: Number(stop.UserStopOrderNumber ?? stop.StopSequence ?? index + 1),
-          isCurrent: currentIndex >= 0 && index === 0
-        })).filter((stop) => stop.name);
+        const normalizedStops = normalizeOvapiJourneyStops(
+          journey?.Stops,
+          candidate.row.currentStopCode
+        );
+        candidate.row.stops = normalizedStops.stops;
         if (candidate.row.numberOfCoaches == null) {
-          const coachStop = orderedStops.find((stop) => stop.NumberOfCoaches != null);
-          if (coachStop) candidate.row.numberOfCoaches = coachStop.NumberOfCoaches;
+          candidate.row.numberOfCoaches = normalizedStops.numberOfCoaches;
         }
         candidate.row.stopCount = candidate.row.stops.length;
         const existing = results.get(candidate.unique);
