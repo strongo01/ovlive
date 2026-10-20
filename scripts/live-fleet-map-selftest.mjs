@@ -44,6 +44,25 @@ assert.ok(script.includes("openovFeedNotFresh") && script.includes("last-known m
 assert.ok(script.includes("routeName") && script.includes("routeId") &&
   script.includes("vehiclePopup(vehicle)"),
   "vehicle popups must include available route and identity information");
+assert.ok(html.includes('id="liveFleetLocate"') &&
+  html.includes('id="liveFleetLocationStatus"') &&
+  html.includes('id="journey-live-locate-${index}"') &&
+  html.includes('id="journey-live-location-status-${index}"') &&
+  html.includes("Mijn locatie"),
+  "the general live map and individual journey maps must have a My Location button");
+assert.ok(script.includes("navigator.geolocation.getCurrentPosition") &&
+  script.includes("locationMarker") &&
+  script.includes("attachMyLocationButton"),
+  "the general map must locate the user and show a reusable location marker");
+assert.ok(script.includes("startDate: String(row.startDate") &&
+  script.includes("startTime: String(row.startTime") &&
+  script.includes('fetch("/api/trip-shape?"') &&
+  script.includes('color: "#ef4444"') &&
+  script.includes("showVehicleRoute(currentVehicle)"),
+  "tapping an exact OpenOV vehicle must load and draw its route in red");
+assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
+  script.includes("candidateTripId === identity.tripId"),
+  "the map must not guess a route from a line number or a different trip");
 
 assert.ok(worker.includes('url.pathname === "/api/live-map/openov"') &&
   worker.includes("handleLiveMapOpenovApi") &&
@@ -62,7 +81,8 @@ assert.ok(nsSource.includes("CACHE_TTL_MS = 5_000") &&
   "the NS upstream positions response must retain its isolate and edge cache");
 
 console.log("PASS: live fleet map script parses and is attached to the correct map panel");
-console.log("PASS: independent vehicle modes and line/vehicle popups are present");
+console.log("PASS: independent vehicle modes, exact-trip route popups, and red route lines are present");
+console.log("PASS: My Location controls work on the general map and individual journey maps");
 console.log("PASS: 20-second non-overlapping polling, hidden-tab pause, and failure backoff are present");
 console.log("PASS: OpenOV map feed uses selective decoding, short edge caching, and single-flight");
 console.log("PASS: NS all-position mode is explicit and remains cached");
