@@ -805,7 +805,7 @@ assert.ok(pageBatchStart >= 0 && pageBatchEnd > pageBatchStart,
 const pageBatchContext = {};
 new vm.Script(
   html.slice(pageBatchStart, pageBatchEnd).trim() +
-  "\\nthis.takeJourneyPageBatch = takeJourneyPageBatch;"
+  "\nthis.takeJourneyPageBatch = takeJourneyPageBatch;"
 ).runInNewContext(pageBatchContext);
 const laterQueue = { pendingNext: [1, 2, 3, 4, 5, 6, 7], pendingPrevious: [] };
 assert.deepEqual(Array.from(pageBatchContext.takeJourneyPageBatch(laterQueue, "next")), [1, 2, 3],
