@@ -444,7 +444,7 @@ const MAX_BODY_BYTES = 20 * 1024 * 1024;
 const MAX_ROUTE_PARAMS = new Set([
   "fromPlace", "toPlace", "time", "arriveBy", "realtimeMode", "transitModes",
   "maxTransfers", "maxTravelTime", "timetableView", "numItineraries",
-  "maxItineraries", "searchWindow", "preTransitModes", "postTransitModes",
+  "maxItineraries", "searchWindow", "pageCursor", "preTransitModes", "postTransitModes",
   "maxPreTransitTime", "maxPostTransitTime", "pedestrianSpeed",
   "minTransferTime", "additionalTransferTime", "transferTimeFactor",
   "language", "wheelchair"
