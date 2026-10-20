@@ -40,6 +40,12 @@ const OPENOV = {
 
 const TRANSITOUS = "https://api.transitous.org/api/v6";
 
+function normalizeLineSearchTripId(value: unknown): string {
+  // Transitous/OpenOV composite IDs can start with the service date and trip start time.
+  // Those timestamp digits must not be mistaken for a requested line/trip number.
+  return String(value ?? "").trim().replace(/^\d{8}_\d{2}:\d{2}_/, "");
+}
+
 // NOMINATIM_LOCAL_GEOCODER_V1
 // Cache en wachtrij voor lokale tests. De wachtrij geldt per Worker-isolate.
 const NOMINATIM_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -3587,9 +3593,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const matchedVehicles = (feed.entities as any[])
         .filter((entity: any) => {
           const vehicleId = String(entity?.vehicleId ?? "");
-          const tripId = String(entity?.tripId ?? "");
+          const tripIdForSearch = normalizeLineSearchTripId(entity?.tripId);
           return vehicleId.toLocaleLowerCase("nl-NL").includes(needle) ||
-            tripId.toLocaleLowerCase("nl-NL").includes(needle);
+            tripIdForSearch.toLocaleLowerCase("nl-NL").includes(needle);
         })
         .sort((a: any, b: any) => Number(b?.timestamp ?? 0) - Number(a?.timestamp ?? 0))
         .slice(0, Math.min(20, limit));
@@ -3639,7 +3645,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           const suffixMatch = tripId.match(/_nl-OpenOV_(.+)$/i);
           const tripNumber = suffixMatch?.[1] ?? "";
           const vehicleMatched = vehicleId.toLocaleLowerCase("nl-NL").includes(needle);
-          const tripMatched = tripId.toLocaleLowerCase("nl-NL").includes(needle);
+          const tripMatched = normalizeLineSearchTripId(tripId).toLocaleLowerCase("nl-NL").includes(needle);
           const vehicleLabel = vehicleMatched
             ? "Voertuig met nummer " + vehicleId
             : tripMatched
