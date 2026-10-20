@@ -139,7 +139,7 @@ function lineSearchDelaySeconds(expectedValue: unknown, targetValue: unknown): n
 function normalizeOvapiJourneyStops(
   rawStops: unknown,
   currentStopCodeValue: unknown
-): { stops: Array<Record<string, any>>; numberOfCoaches: number | string | null } {
+): { stops: Array<Record<string, any>>; numberOfCoaches: number | string | null; blockCode: string | null } {
   const stopsObject = rawStops && typeof rawStops === "object" && !Array.isArray(rawStops)
     ? rawStops as Record<string, any>
     : {};
@@ -177,7 +177,10 @@ function normalizeOvapiJourneyStops(
     orderedStops.find((stop) => stop.NumberOfCoaches != null)?.NumberOfCoaches ?? null;
   const coaches = coachValue == null || String(coachValue).trim() === "" ? null :
     Number.isFinite(Number(coachValue)) ? Number(coachValue) : String(coachValue).trim();
-  return { stops, numberOfCoaches: coaches };
+  const blockValue = remainingStops.find((stop) => stop.BlockCode != null)?.BlockCode ??
+    orderedStops.find((stop) => stop.BlockCode != null)?.BlockCode ?? null;
+  const blockCode = blockValue == null || String(blockValue).trim() === "" ? null : String(blockValue).trim();
+  return { stops, numberOfCoaches: coaches, blockCode };
 }
 
 function lineSearchTripIdMatches(value: unknown, query: unknown): boolean {
