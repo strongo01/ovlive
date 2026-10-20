@@ -3263,20 +3263,21 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (url.pathname === "/api/ns/vehicle-positions") {
+    const includeAllPositions = url.searchParams.get("all") === "1";
     const rawTrainNumbers = String(url.searchParams.get("trainNumbers") ?? "");
     const requestedTrainNumbers = [...new Set(
       rawTrainNumbers.split(",").map(value => value.trim()).filter(Boolean)
     )];
 
     if (
-      requestedTrainNumbers.length < 1 ||
+      (!includeAllPositions && requestedTrainNumbers.length < 1) ||
       requestedTrainNumbers.length > 20 ||
       requestedTrainNumbers.some(value => !/^\d{1,6}$/.test(value))
     ) {
       return json({
         ok: false,
         source: "NS Virtual Train API",
-        error: "Geef 1–20 geldige treinnummers op via trainNumbers, gescheiden door komma's."
+        error: "Geef 1–20 geldige treinnummers op, of gebruik all=1 voor de live kaart."
       }, 400, headers);
     }
 
@@ -3291,13 +3292,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     try {
       const feed = await fetchNsLiveVehiclePositions(env, url.origin);
       const requested = new Set(requestedTrainNumbers);
-      const positions = feed.positions.filter(position =>
-        requested.has(position.trainNumber)
-      );
+      const positions = includeAllPositions
+        ? feed.positions.slice(0, 2000)
+        : feed.positions.filter(position => requested.has(position.trainNumber));
       return json({
         ok: true,
         source: "NS Virtual Train API",
         checkedAt: feed.fetchedAt,
+        allPositions: includeAllPositions,
         positions
       }, 200, { ...headers, "cache-control": "no-store" });
     } catch (error) {
@@ -3319,7 +3321,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       console.warn("[OVLIVE_NS_VEHICLE_POSITIONS]", JSON.stringify({
         upstreamStatus,
         errorCode: detail.match(/NS_VIRTUAL_TRAIN_[A-Z_]+/)?.[0] ?? "unexpected_error",
-        requestedCount: requestedTrainNumbers.length
+        requestedCount: includeAllPositions ? null : requestedTrainNumbers.length,
+        includeAllPositions
       }));
       return json({
         ok: false,
