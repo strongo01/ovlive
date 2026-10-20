@@ -584,12 +584,13 @@ const journeySortAfterPrepare = html.indexOf("function journeySortMetrics(", pre
 assert.ok(walkingHelpersStart >= 0 && renderLegAfterWalkingHelpers > walkingHelpersStart &&
   prepareForBufferStart >= 0 && journeySortAfterPrepare > prepareForBufferStart,
   "walking duration and first-departure helpers must exist for deterministic tests");
-const walkingHelperContext = {};
+const walkingHelperContext = { plannedEndpointTime };
 new vm.Script(
   html.slice(walkingHelpersStart, renderLegAfterWalkingHelpers).trim() +
   "\nthis.walkingDurationSeconds = walkingDurationSeconds;" +
   "\nthis.walkingLegTimingAtSpeed = walkingLegTimingAtSpeed;" +
-  "\nthis.walkingConnectionStatus = walkingConnectionStatus;"
+  "\nthis.walkingConnectionStatus = walkingConnectionStatus;" +
+  "\nthis.journeyWalkingTransferIssue = journeyWalkingTransferIssue;"
 ).runInNewContext(walkingHelperContext);
 
 assert.equal(walkingHelperContext.normalizeWalkingSpeedKmh(2), 2,
@@ -743,5 +744,46 @@ assert.equal(
   "tight",
   "a connection with under one minute remaining must be marked tight"
 );
+
+// 392 m lopen aan 5 km/u duurt 282 seconden: vanaf 12:12 aankomst is de
+// tram om 12:15 dus onmogelijk. De tram om 12:21 is wél haalbaar.
+const transferTrainAtStation = {
+  mode: "TRAIN",
+  scheduledEndTime: "2026-10-20T10:12:00.000Z",
+  to: { scheduledArrival: "2026-10-20T10:12:00.000Z" }
+};
+const stationWalk = {
+  mode: "WALK",
+  distance: 392,
+  startTime: "2026-10-20T10:12:00.000Z",
+  endTime: "2026-10-20T10:15:00.000Z",
+  from: { departure: "2026-10-20T10:12:00.000Z" },
+  to: { arrival: "2026-10-20T10:15:00.000Z" }
+};
+const tooSoonTram = {
+  mode: "TRAM",
+  scheduledStartTime: "2026-10-20T10:15:00.000Z",
+  from: { scheduledDeparture: "2026-10-20T10:15:00.000Z" }
+};
+const nextTram = {
+  mode: "TRAM",
+  scheduledStartTime: "2026-10-20T10:21:00.000Z",
+  from: { scheduledDeparture: "2026-10-20T10:21:00.000Z" }
+};
+const impossibleWalkTransfer = walkingHelperContext.journeyWalkingTransferIssue(
+  [transferTrainAtStation, stationWalk, tooSoonTram], 5
+);
+assert.equal(impossibleWalkTransfer?.nextLegIndex, 2,
+  "a train-to-tram transfer requiring more walking time than scheduled must be rejected");
+assert.equal(impossibleWalkTransfer?.requiredWalkingSeconds, 282);
+assert.equal(impossibleWalkTransfer?.availableSeconds, 180);
+assert.equal(walkingHelperContext.journeyWalkingTransferIssue(
+  [transferTrainAtStation, stationWalk, nextTram], 5
+), null, "the next tram with enough walking time must remain a valid option");
+assert.ok(html.includes("journeyWalkingTransferIssue(sourceLegs, walkSettings.walkingSpeedKmh)"),
+  "unreachable walking transfers must be filtered before journey cards are rendered");
+assert.ok(html.includes("q.set('numItineraries', '10')"),
+  "the planner must request extra alternatives so a later service can replace a missed connection");
+console.log("PASS: impossible walking transfers are filtered and later tram alternatives remain eligible");
 console.log("PASS: all walking legs use the selected speed and check transfer feasibility");
 console.log("All public UI JavaScript checks passed.");
