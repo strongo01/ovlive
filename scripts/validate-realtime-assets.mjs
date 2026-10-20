@@ -67,6 +67,31 @@ async function main() {
   }
   addRequired(required, routeManifestPath);
 
+  const routeMetadataPath = "ndov-openov-route-crosswalk/route-metadata.json";
+  if (!byPath.has(routeMetadataPath)) {
+    throw new Error(
+      "OpenOV openbare lijnnamen ontbreken: public/" + routeMetadataPath +
+      ". Run npm run ndov:build-openov-route-metadata en voer de controle opnieuw uit."
+    );
+  }
+  const routeMetadata = await readJson(routeMetadataPath);
+  const publicRoutes = routeMetadata?.routes;
+  if (routeMetadata?.format !== 1 || !publicRoutes ||
+      typeof publicRoutes !== "object" || Array.isArray(publicRoutes)) {
+    throw new Error("OpenOV route-metadata heeft geen geldig routes-object of ondersteund formaat.");
+  }
+  const routeMetadataMissing = Object.keys(routes).filter((routeId) =>
+    !publicRoutes[String(routeId)] || typeof publicRoutes[String(routeId)] !== "object"
+  );
+  if (routeMetadataMissing.length) {
+    throw new Error(
+      "OpenOV route-metadata mist " + routeMetadataMissing.length +
+      " route-ID('s), bijvoorbeeld: " + routeMetadataMissing.slice(0, 8).join(", ") +
+      ". Run npm run ndov:build-openov-route-metadata en voer de controle opnieuw uit."
+    );
+  }
+  addRequired(required, routeMetadataPath);
+
   const routeShardNames = new Set();
   for (const [routeId, filenames] of Object.entries(routes)) {
     if (!Array.isArray(filenames) || filenames.length === 0) {
@@ -165,9 +190,12 @@ async function main() {
   if (tooLarge.length) throw new Error(tooLarge.length + " asset(s) zijn groter dan 25 MiB.");
   if (missingRequired.length) {
     const missingRouteFile = missingRequired.some((file) => file.startsWith("ndov-openov-route-crosswalk/routes/"));
-    const advice = missingRouteFile
-      ? "Run npm run ndov:build-openov-route-crosswalk met gtfs-openov-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit."
-      : "Run npm run ndov:build-crosswalk met gtfs-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit.";
+    const missingRouteMetadata = missingRequired.includes("ndov-openov-route-crosswalk/route-metadata.json");
+    const advice = missingRouteMetadata
+      ? "Run npm run ndov:build-openov-route-metadata met gtfs-openov-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit."
+      : missingRouteFile
+        ? "Run npm run ndov:build-openov-route-crosswalk met gtfs-openov-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit."
+        : "Run npm run ndov:build-crosswalk met gtfs-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit.";
     throw new Error(missingRequired.length + " verplichte realtime-asset(s) ontbreken. Deployment afgebroken om een Worker zonder NDOV-koppelingen te voorkomen. " + advice);
   }
 
