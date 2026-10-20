@@ -1069,7 +1069,7 @@ assert.ok(normalizeJourneyStopsStart >= 0 && normalizeJourneyStopsEnd > normaliz
 const normalizeJourneyStopsSource = workerSource
   .slice(normalizeJourneyStopsStart, normalizeJourneyStopsEnd)
   .replace(
-    "function normalizeOvapiJourneyStops(\n  rawStops: unknown,\n  currentStopCodeValue: unknown\n): { stops: Array<Record<string, any>>; numberOfCoaches: number | string | null }",
+    "function normalizeOvapiJourneyStops(\n  rawStops: unknown,\n  currentStopCodeValue: unknown\n): { stops: Array<Record<string, any>>; numberOfCoaches: number | string | null; blockCode: string | null }",
     "function normalizeOvapiJourneyStops(rawStops, currentStopCodeValue)"
   )
   .replaceAll(" as Record<string, any>", "");
@@ -1086,7 +1086,7 @@ const normalizedJourney = journeyStopContext.normalizeOvapiJourneyStops({
     UserStopOrderNumber: 2, TimingPointName: "Station Leidsche Rijn (F)",
     TimingPointCode: "30000001", UserStopCode: "3924355",
     ExpectedArrivalTime: "2026-10-20T15:58:31", TripStopStatus: "DRIVING",
-    NumberOfCoaches: 1
+    NumberOfCoaches: 1, BlockCode: "80728"
   },
   "3": {
     UserStopOrderNumber: 3, TimingPointName: "Thomas à Kempisplantsoen",
@@ -1111,6 +1111,8 @@ assert.deepEqual(
 );
 assert.equal(normalizedJourney.numberOfCoaches, 1,
   "coach count must be read from the actual journey-stop data");
+assert.equal(normalizedJourney.blockCode, "80728",
+  "block/omloop number must be retained from actual journey-stop data");
 
 const delayStart = workerSource.indexOf("function lineSearchDelaySeconds(");
 const delayEnd = workerSource.indexOf("\nfunction normalizeOvapiJourneyStops(", delayStart);
@@ -1124,7 +1126,7 @@ new vm.Script(delaySource + "\nthis.lineSearchDelaySeconds = lineSearchDelaySeco
 assert.equal(delayContext.lineSearchDelaySeconds("2026-10-20T16:01:00", "2026-10-20T16:01:00"), 0);
 assert.equal(delayContext.lineSearchDelaySeconds("2026-10-20T16:03:00", "2026-10-20T16:01:00"), 120);
 
-assert.ok(workerSource.includes('fetch("http://v0.ovapi.nl/journey/" + journeyKeys.join(","))') &&
+assert.ok(workerSource.includes('fetch("http://v0.ovapi.nl/journey/" + journeyKeys.join(","), {') &&
   workerSource.includes("NumberOfCoaches") &&
   workerSource.includes("actual.BlockCode") &&
   workerSource.includes('https://ovzoeker.nl/voertuig/'),
