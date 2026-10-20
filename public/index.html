@@ -4169,7 +4169,7 @@ function lineSearchDelayText(value) {
 
 function lineSearchStopEta(stop, nowMs = Date.now()) {
   const status = String(stop?.status ?? '').trim().toUpperCase();
-  if (stop?.isCurrent || ['ARRIVED', 'ONSTOP', 'ATSTOP'].includes(status)) return 'Bij halte';
+  if (stop?.isAtStop || ['ARRIVED', 'ONSTOP', 'ATSTOP'].includes(status)) return 'Bij halte';
   if (['CANCEL', 'CANCELLED'].includes(status)) return 'Rijdt niet';
   const value = stop?.expectedArrival ?? stop?.expectedDeparture ??
     stop?.targetArrival ?? stop?.targetDeparture ?? null;
