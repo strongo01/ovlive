@@ -916,9 +916,9 @@ assert.ok(workerSource.includes('url.pathname === "/api/line-search"') &&
   workerSource.includes('getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")') &&
   workerSource.includes('TRANSITOUS + "/trip"'),
   "the standalone line-search API must combine public line metadata with current vehicle/trip identities");
-assert.ok(html.includes("function displayStopBoardMetadata(data)") &&
+assert.ok(html.includes("function renderStopBoardMetadata(data)") &&
   html.includes("Halte-ID: ") &&
-  html.includes("<th>Lijn</th><th>Richting</th>") &&
+  html.includes("<th>Lijn</th><th>Richting</th><th>") &&
   html.includes("Verwachte aankomsttijd"),
   "the stop board must display available stop metadata and a timetable-style arrivals/departures table");
 
