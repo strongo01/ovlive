@@ -3948,8 +3948,6 @@ function stopTimeMatchesLine(row, query) {
   ].map(value => String(value ?? ''));
   const tokens = candidates.flatMap(value => String(value ?? '').toLocaleLowerCase('nl-NL').split(/[^a-z0-9]+/i));
   return tokens.includes(target);
-  const boundary = new RegExp('(^|[^\\p{L}\\p{N}])' + escaped + '(?=$|[^\\p{L}\\p{N}])', 'iu');
-  return candidates.some(value => boundary.test(value));
 }
 
 function renderStopSequence(row, direction) {
