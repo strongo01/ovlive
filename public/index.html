@@ -4014,6 +4014,25 @@ function filterNewPageJourneys(state, candidates, walkingSpeedKmh) {
   }
   return result;
 }
+function orderJourneyPageByDeparture(journeys, walkSettings = window.__ovliveActiveWalkSettings) {
+  if (!Array.isArray(journeys)) return [];
+  const settings = walkSettings ?? {
+    firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds(),
+    walkingSpeedKmh: selectedWalkingSpeedKmh()
+  };
+  const departureTime = journey => {
+    const sourceLegs = journeySourceLegs(journey);
+    const prepared = prepareJourneyLegsForDisplay(
+      journey, sourceLegs,
+      settings.firstArrivalBufferSeconds,
+      settings.walkingSpeedKmh
+    );
+    const metrics = journeySortMetrics(journey, prepared.legs, prepared.adjustedJourneyStart);
+    return Number.isFinite(metrics.departureMs) ? metrics.departureMs : Number.POSITIVE_INFINITY;
+  };
+  return journeys.slice().sort((left, right) => departureTime(left) - departureTime(right));
+}
+
 
 function updateJourneyPageControls(message = '') {
   const state = window.__ovliveJourneyPageState;
@@ -4096,7 +4115,10 @@ async function loadMoreJourneys(direction) {
           : [];
       const walkingSpeed = window.__ovliveActiveWalkSettings?.walkingSpeedKmh ??
         selectedWalkingSpeedKmh();
-      const validPageJourneys = filterNewPageJourneys(state, pageJourneys, walkingSpeed);
+      const validPageJourneys = orderJourneyPageByDeparture(
+        filterNewPageJourneys(state, pageJourneys, walkingSpeed),
+        window.__ovliveActiveWalkSettings
+      );
       if (direction === 'previous') state.pendingPrevious.push(...validPageJourneys);
       else state.pendingNext.push(...validPageJourneys);
       pageAttempts += 1;
@@ -4526,8 +4548,13 @@ q.set('pedestrianSpeed', '1.5');
       : '';
 
     window.__ovliveTrackingJourneys = [];
-    const initialDisplayedCandidates = validItineraryCandidates.slice(0, 10);
-    const initiallyQueuedCandidates = validItineraryCandidates.slice(10).map(item => item.journey);
+    const departureOrderedCandidates = orderJourneyPageByDeparture(
+      validItineraryCandidates, walkSettings
+    );
+    const initialDisplayedCandidates = departureOrderedCandidates.slice(0, JOURNEY_INITIAL_PAGE_SIZE);
+    const initiallyQueuedCandidates = departureOrderedCandidates
+      .slice(JOURNEY_INITIAL_PAGE_SIZE)
+      .map(item => item.journey);
     const cards = initialDisplayedCandidates.map(({ journey }, index) =>
       renderJourneyCard(journey, index, walkSettings)
     ).join('');
