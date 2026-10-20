@@ -48,6 +48,7 @@ assert.ok(script.includes("routeName") && script.includes("routeId") &&
 assert.ok(worker.includes('url.pathname === "/api/live-map/openov"') &&
   worker.includes("handleLiveMapOpenovApi") &&
   worker.includes("decodeOpenovVehiclePositions(bytes)") &&
+  worker.includes("Avoid sorting the entire national feed") &&
   worker.includes("LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000") &&
   worker.includes("liveMapOpenovInFlight") &&
   worker.includes("OVLIVE_LIVE_MAP_OPENOV_STALE_INFLIGHT"),
