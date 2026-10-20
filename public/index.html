@@ -2696,6 +2696,62 @@ function walkingConnectionStatus(arrivalTime, departureTime) {
   };
 }
 
+// Verwerp een reis vóór we die tonen als de gekozen loopsnelheid de overstap
+// onmogelijk maakt. Zo kan een later alternatief (bijv. de volgende tram) uit
+// de extra dienstregelingsopties worden gekozen in plaats van een waarschuwing
+// te tonen op een reis die de reiziger nooit kan halen.
+function journeyWalkingTransferIssue(legs, walkingSpeedKmh = selectedWalkingSpeedKmh()) {
+  const items = Array.isArray(legs) ? legs : [];
+  const nonTransitModes = new Set(['WALK', 'WAIT', 'TRANSFER']);
+  const transitLegs = [];
+  items.forEach((leg, index) => {
+    if (!nonTransitModes.has(String(leg?.mode ?? '').toUpperCase())) {
+      transitLegs.push({ leg, index });
+    }
+  });
+
+  for (let transferIndex = 1; transferIndex < transitLegs.length; transferIndex += 1) {
+    const previous = transitLegs[transferIndex - 1];
+    const next = transitLegs[transferIndex];
+    const previousArrivalMs = Date.parse(plannedEndpointTime(previous.leg, 'arrival') || '');
+    const nextDepartureMs = Date.parse(plannedEndpointTime(next.leg, 'departure') || '');
+    if (!Number.isFinite(previousArrivalMs) || !Number.isFinite(nextDepartureMs)) continue;
+
+    let walkingSeconds = 0;
+    let hasWalkingLeg = false;
+    let walkingDurationUnknown = false;
+    for (let index = previous.index + 1; index < next.index; index += 1) {
+      const leg = items[index];
+      if (String(leg?.mode ?? '').toUpperCase() !== 'WALK') continue;
+      hasWalkingLeg = true;
+      const distance = Number(leg?.distance);
+      const durationSeconds = Number.isFinite(distance) && distance > 0
+        ? walkingDurationSeconds(distance, walkingSpeedKmh)
+        : null;
+      if (!Number.isFinite(durationSeconds)) {
+        walkingDurationUnknown = true;
+        break;
+      }
+      walkingSeconds += durationSeconds;
+    }
+
+    if (!hasWalkingLeg || walkingDurationUnknown) continue;
+    const availableSeconds = (nextDepartureMs - previousArrivalMs) / 1000;
+    if (availableSeconds < walkingSeconds) {
+      return {
+        previousLegIndex: previous.index,
+        nextLegIndex: next.index,
+        previousArrival: new Date(previousArrivalMs).toISOString(),
+        nextDeparture: new Date(nextDepartureMs).toISOString(),
+        requiredWalkingSeconds: walkingSeconds,
+        availableSeconds: Math.round(availableSeconds)
+      };
+    }
+  }
+
+  return null;
+}
+
 function renderLeg(leg, index = 0, journeyLegs = null) {
   const title = lineTitle(leg);
   const fromName = leg.from?.name || leg.origin?.name || 'Onbekende halte';
@@ -3575,7 +3631,9 @@ $('planBtn').onclick = async () => {
     q.set('maxPostTransitTime', walkingLimit);
 q.set('pedestrianSpeed', '1.5');
 
-    q.set('numItineraries', '5');
+    // Vraag extra opties op zodat we onhaalbare loop-overstappen kunnen wegfilteren
+    // en een latere bus/tram kunnen tonen in plaats van de snelste onhaalbare route.
+    q.set('numItineraries', '10');
     q.set('deferRealtime', '1');
 
     let data = await api('/api/plan?' + q, {
@@ -3786,19 +3844,25 @@ q.set('pedestrianSpeed', '1.5');
       return {
         journey,
         sourceLegs,
-        chronologyIssue: journeyChronologyIssue(sourceLegs)
+        chronologyIssue: journeyChronologyIssue(sourceLegs),
+        walkingTransferIssue: journeyWalkingTransferIssue(sourceLegs, walkSettings.walkingSpeedKmh)
       };
     });
     const invalidChronologyCount = itineraryCandidates
       .filter(item => item.chronologyIssue)
       .length;
+    const invalidWalkingTransferCount = itineraryCandidates
+      .filter(item => !item.chronologyIssue && item.walkingTransferIssue)
+      .length;
     const validItineraryCandidates = itineraryCandidates
-      .filter(item => !item.chronologyIssue);
+      .filter(item => !item.chronologyIssue && !item.walkingTransferIssue);
 
-    // Render pas na initialisatie van de kandidaatverzamelingen; eerder lezen
-    // veroorzaakt een Temporal Dead Zone-fout en breekt de hele reisplanner.
-    const itineraryStatus = `${validItineraryCandidates.length} bruikbare reisopties gevonden` +
+    // Alleen routes waarvan de haltes in de beschikbare tijd bereikbaar zijn
+    // worden getoond. Transitous is gevraagd om extra opties (10 i.p.v. 5);
+    // daardoor kan een latere tram de plaats innemen van een onhaalbare aansluiting.
+    const itineraryStatus = `${validItineraryCandidates.length} haalbare reisopties gevonden` +
       (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
+      (invalidWalkingTransferCount ? ` · ${invalidWalkingTransferCount} onhaalbare loop-overstap(pen) verborgen` : '') +
       '.';
     $('planStatus').textContent = meta?.status === 'deferred'
       ? `${itineraryStatus} Realtimecontrole wordt direct gestart…`
@@ -3817,8 +3881,15 @@ q.set('pedestrianSpeed', '1.5');
 
     if (validItineraryCandidates.length === 0) {
       $('journeys').innerHTML =
-        (invalidChronologyCount
-          ? `<div class="status rt-unknown"><strong>Geen veilige reisoptie weergegeven.</strong><div class="rt-details">Transitous leverde ${invalidChronologyCount} reisoptie(s) met een onmogelijke tijdvolgorde: een volgend OV-deel vertrekt vóór aankomst van het vorige deel. Deze opties zijn verborgen om een gemiste bus of trein te voorkomen.</div></div>`
+        (invalidChronologyCount || invalidWalkingTransferCount
+          ? `<div class="status rt-unknown"><strong>Geen haalbare reisoptie gevonden.</strong><div class="rt-details">` +
+            (invalidWalkingTransferCount
+              ? `Transitous leverde ${invalidWalkingTransferCount} route(s) waarbij de loopafstand niet binnen de beschikbare overstaptijd past. Die worden verborgen; OVLive heeft ook extra reisopties opgevraagd.`
+              : '') +
+            (invalidChronologyCount
+              ? ` ${invalidChronologyCount} route(s) hadden daarnaast een onmogelijke tijdvolgorde.`
+              : '') +
+            ` Probeer een eerdere vertrektijd of een hogere loopsnelheid als er geen alternatief beschikbaar is.</div></div>`
           : '<p>Er zijn geen bruikbare reisopties ontvangen.</p>') +
         renderAlerts(data.openovAlerts || []);
       return;
@@ -3826,6 +3897,9 @@ q.set('pedestrianSpeed', '1.5');
 
     const chronologyWarningHtml = invalidChronologyCount
       ? `<div class="status rt-unknown"><strong>${invalidChronologyCount} reisoptie(s) verborgen.</strong><div class="rt-details">Transitous gaf een tijdvolgorde terug die niet aansluit: een OV-deel vertrekt voordat je bij de halte kunt zijn. Deze opties worden niet getoond.</div></div>`
+      : '';
+    const walkingTransferWarningHtml = invalidWalkingTransferCount
+      ? `<div class="status rt-unknown"><strong>${invalidWalkingTransferCount} onhaalbare loop-overstap(pen) verborgen.</strong><div class="rt-details">OVLive toont geen route waarvoor je sneller moet lopen dan je ingestelde loopsnelheid toelaat. Er zijn extra reisopties opgevraagd zodat een latere tram of bus kan worden gekozen.</div></div>`
       : '';
 
     window.__ovliveTrackingJourneys = [];
@@ -3962,6 +4036,7 @@ q.set('pedestrianSpeed', '1.5');
 
     $('journeys').innerHTML =
       chronologyWarningHtml +
+      walkingTransferWarningHtml +
       `<div class="results-heading"><h3>Reisopties</h3><span>Tik op een reis voor details</span></div>` +
       `<div class="results-toolbar">
         <label class="results-sort-control" for="journeySort"><span>Sorteren op</span>
