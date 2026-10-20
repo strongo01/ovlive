@@ -4025,70 +4025,6 @@ function displayStopTimes(containerId, rows, direction, emptyText) {
     '</div>';
 }
 
-$('boardStopFind').onclick = () =>
-  findPlaces('boardStop', 'boardStopChoice', 'boardStopFindStatus');
-$('boardStopChoice').onchange = () => {
-  const option = $('boardStopChoice').selectedOptions[0];
-  if (option?.dataset.label) $('boardStop').value = option.dataset.label;
-};
-$('boardSearch').onclick = async () => {
-  const button = $('boardSearch');
-  button.disabled = true;
-  $('boardResults').innerHTML = '';
-  $('boardStatus').textContent = 'Vertrek- en aankomsttijden ophalen…';
-  try {
-    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
-    const data = await requestStopTimes({
-      direction,
-      n: $('boardLimit').value
-    });
-    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
-      : Array.isArray(data?.stop_times) ? data.stop_times : [];
-    const placeName = data?.place?.name ?? $('boardStop').value.trim();
-    $('boardStatus').textContent = rows.length
-      ? placeName + ' · ' + rows.length + ' ' +
-        (direction === 'arrivals' ? 'aankomsten' : 'vertrekken') +
-        ' opgehaald. Realtime staat alleen bij ritten waarvoor de bron dat bevestigt.'
-      : 'Geen tijden gevonden. Controleer de geselecteerde halte of probeer een andere tijd.';
-    displayStopTimes('boardResults', rows, direction,
-      'Geen vertrek- of aankomsttijden beschikbaar voor deze halte.');
-  } catch (error) {
-    $('boardStatus').textContent = error instanceof Error ? error.message : 'Haltevertrektijden konden niet worden opgehaald.';
-  } finally {
-    button.disabled = false;
-  }
-};
-$('lineSearch').onclick = async () => {
-  const button = $('lineSearch');
-  const requestedLine = $('lineNumber').value.trim();
-  if (!requestedLine) {
-    $('lineStatus').textContent = 'Vul eerst een lijnnummer in, bijvoorbeeld 5 of 28.';
-    return;
-  }
-  button.disabled = true;
-  $('lineResults').innerHTML = '';
-  $('lineStatus').textContent = 'Ritten en routehaltes ophalen…';
-  try {
-    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
-    const data = await requestStopTimes({ direction, n: $('lineLimit').value });
-    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
-      : Array.isArray(data?.stop_times) ? data.stop_times : [];
-    const matchingRows = rows.filter(row => stopTimeMatchesLine(row, requestedLine));
-    $('lineStatus').textContent = matchingRows.length
-      ? 'Lijn ' + requestedLine + ' · ' + matchingRows.length +
-        ' passende rit(ten) gevonden bij ' + (data?.place?.name ?? $('boardStop').value.trim()) +
-        '. De route toont de haltes die de dienstregelingbron heeft meegeleverd.'
-      : 'Geen rit voor lijn ' + requestedLine +
-        ' gevonden in deze lijst. Probeer een andere tijd of verhoog het aantal ritten dat wordt doorzocht.';
-    displayStopTimes('lineResults', matchingRows, direction,
-      'Geen passende ritten gevonden. Controleer het lijnnummer en de geselecteerde halte.');
-  } catch (error) {
-    $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn kon niet worden opgezocht.';
-  } finally {
-    button.disabled = false;
-  }
-};
-
 function renderJourneyCard(journey, index, walkSettings) {
   const sourceLegs = journeySourceLegs(journey);
 
@@ -4877,6 +4813,70 @@ q.set('pedestrianSpeed', '1.5');
   } finally {
     $('planBtn').disabled = false;
     $('tightTransferBtn').disabled = false;
+  }
+};
+
+$('boardStopFind').onclick = () =>
+  findPlaces('boardStop', 'boardStopChoice', 'boardStopFindStatus');
+$('boardStopChoice').onchange = () => {
+  const option = $('boardStopChoice').selectedOptions[0];
+  if (option?.dataset.label) $('boardStop').value = option.dataset.label;
+};
+$('boardSearch').onclick = async () => {
+  const button = $('boardSearch');
+  button.disabled = true;
+  $('boardResults').innerHTML = '';
+  $('boardStatus').textContent = 'Vertrek- en aankomsttijden ophalen…';
+  try {
+    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
+    const data = await requestStopTimes({
+      direction,
+      n: $('boardLimit').value
+    });
+    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
+      : Array.isArray(data?.stop_times) ? data.stop_times : [];
+    const placeName = data?.place?.name ?? $('boardStop').value.trim();
+    $('boardStatus').textContent = rows.length
+      ? placeName + ' · ' + rows.length + ' ' +
+        (direction === 'arrivals' ? 'aankomsten' : 'vertrekken') +
+        ' opgehaald. Realtime staat alleen bij ritten waarvoor de bron dat bevestigt.'
+      : 'Geen tijden gevonden. Controleer de geselecteerde halte of probeer een andere tijd.';
+    displayStopTimes('boardResults', rows, direction,
+      'Geen vertrek- of aankomsttijden beschikbaar voor deze halte.');
+  } catch (error) {
+    $('boardStatus').textContent = error instanceof Error ? error.message : 'Haltevertrektijden konden niet worden opgehaald.';
+  } finally {
+    button.disabled = false;
+  }
+};
+$('lineSearch').onclick = async () => {
+  const button = $('lineSearch');
+  const requestedLine = $('lineNumber').value.trim();
+  if (!requestedLine) {
+    $('lineStatus').textContent = 'Vul eerst een lijnnummer in, bijvoorbeeld 5 of 28.';
+    return;
+  }
+  button.disabled = true;
+  $('lineResults').innerHTML = '';
+  $('lineStatus').textContent = 'Ritten en routehaltes ophalen…';
+  try {
+    const direction = $('boardDirection').value === 'arrivals' ? 'arrivals' : 'departures';
+    const data = await requestStopTimes({ direction, n: $('lineLimit').value });
+    const rows = Array.isArray(data?.stopTimes) ? data.stopTimes
+      : Array.isArray(data?.stop_times) ? data.stop_times : [];
+    const matchingRows = rows.filter(row => stopTimeMatchesLine(row, requestedLine));
+    $('lineStatus').textContent = matchingRows.length
+      ? 'Lijn ' + requestedLine + ' · ' + matchingRows.length +
+        ' passende rit(ten) gevonden bij ' + (data?.place?.name ?? $('boardStop').value.trim()) +
+        '. De route toont de haltes die de dienstregelingbron heeft meegeleverd.'
+      : 'Geen rit voor lijn ' + requestedLine +
+        ' gevonden in deze lijst. Probeer een andere tijd of verhoog het aantal ritten dat wordt doorzocht.';
+    displayStopTimes('lineResults', matchingRows, direction,
+      'Geen passende ritten gevonden. Controleer het lijnnummer en de geselecteerde halte.');
+  } catch (error) {
+    $('lineStatus').textContent = error instanceof Error ? error.message : 'De lijn kon niet worden opgezocht.';
+  } finally {
+    button.disabled = false;
   }
 };
 
