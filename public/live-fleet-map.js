@@ -297,13 +297,14 @@
             (vehicle.vehicleId ? " · " + vehicle.vehicleId : "")
         });
         marker.bindPopup(vehiclePopup(vehicle));
+        marker.setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35);
         marker.addTo(state.layer);
         state.markers.set(vehicle.key, marker);
       } else {
         marker.setLatLng([vehicle.latitude, vehicle.longitude]);
         marker.setIcon(markerIcon(window.L, vehicle.mode));
         marker.setPopupContent(vehiclePopup(vehicle));
-        marker.setOpacity(1);
+        marker.setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35);
       }
     }
   }
@@ -424,6 +425,8 @@
         " · cache " + (state.sourceStatus.openov.cache || "onbekend")
       : "OpenOV niet actueel/bevestigd";
     const nsStatus = state.sourceStatus.ns.ok ? "NS beschikbaar" : "NS niet actueel/beschikbaar";
+    const openovIsStale = state.sourceStatus.openov.ok &&
+      state.sourceStatus.openov.freshness !== "fresh";
     const message = allVisible.size + " zichtbare voertuigen · " + modeCountText(allVisible) +
       " · gecontroleerd " + currentCheckedAt +
       " · " + openovStatus + " · " + nsStatus +
@@ -436,7 +439,7 @@
       setStatus(hasOldData ? message : "Beide voertuigbronnen zijn mislukt: " + problems.join(" | "), hasOldData ? "warning" : "error");
     } else {
       state.failureStreak = 0;
-      setStatus(message, problems.length || metadataMissing ? "warning" : "live");
+      setStatus(message, problems.length || metadataMissing || openovIsStale ? "warning" : "live");
       state.lastSuccessfulRefreshAt = Date.now();
     }
 
