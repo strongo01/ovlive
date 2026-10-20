@@ -156,9 +156,11 @@ function normalizeOvapiJourneyStops(
         stop.TimingPointCode, stop.UserStopCode, stop.StopId
       ].some((value) => String(value ?? "").trim().toLocaleLowerCase("nl-NL") === currentStopCode))
     : -1;
-  const remainingStops = currentIndex >= 0
+  const remainingStops = (currentIndex >= 0
     ? orderedStops.slice(currentIndex)
     : orderedStops.filter((stop) => !["PASSED", "CANCEL", "CANCELLED"].includes(
+        String(stop.TripStopStatus ?? "").trim().toUpperCase()
+      ))).filter((stop) => !["CANCEL", "CANCELLED"].includes(
         String(stop.TripStopStatus ?? "").trim().toUpperCase()
       ));
   const stops = remainingStops.map((stop, index) => ({
