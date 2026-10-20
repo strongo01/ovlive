@@ -246,8 +246,8 @@ assert.ok(html.includes('data-tracking-index="' + dollar + '{index}"'),
 assert.ok(html.includes('kind: "vehiclePositions"'),
   "the live map must keep OpenOV vehicle positions as a fallback");
 assert.ok(html.includes('/api/ns/vehicle-positions?') &&
-  html.includes('features=trein') === false,
-  "the live map must call a separate backend endpoint for NS train positions");
+  html.includes('selectExactLiveNsVehiclePosition(leg, payload.positions, checkedAt)'),
+  "the live map must call the separate backend endpoint and exactly match train numbers");
 assert.ok(html.includes('selectExactLiveNdovVehiclePosition(leg, now)'),
   "the live map must first use fresh exact-matched NDOV KV6 positions");
 assert.ok(html.includes("LIVE_VEHICLE_MAX_AGE_SECONDS = 30"),
