@@ -1217,3 +1217,19 @@ console.log("PASS: line-search fallback cards preserve exact vehicle, trip and r
 console.log("PASS: stop board separates live observations from scheduled times and displays a timetable table");
 console.log("PASS: standalone line search matches public line numbers, vehicle numbers and trip numbers without a selected stop");
 console.log("All public UI JavaScript checks passed.");
+
+const lineSearchStart = workerSource.indexOf('if (url.pathname === "/api/line-search")');
+const lineSearchEnd = workerSource.indexOf('if (url.pathname === "/api/trip-shape")', lineSearchStart);
+const lineSearchSource = workerSource.slice(lineSearchStart, lineSearchEnd);
+assert.ok(lineSearchStart >= 0 && lineSearchEnd > lineSearchStart,
+  "the public line-search API handler must remain inspectable");
+assert.ok(!lineSearchSource.includes(".slice(0, 24)") &&
+  lineSearchSource.includes("const MAX_OVAPI_LINE_SEARCH_ROUTES = 160;"),
+  "exact public-line lookup must not stop after the first 24 route variants");
+assert.ok(lineSearchSource.includes("const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;") &&
+  lineSearchSource.includes("const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;") &&
+  lineSearchSource.includes('batch.join(",")'),
+  "OVAPI line variants must be fetched in bounded batches");
+assert.ok(lineSearchSource.includes("OVAPI-lijnbatch ") &&
+  lineSearchSource.includes("warnings.push"),
+  "individual OVAPI batch failures must be reported without hiding successful batches");

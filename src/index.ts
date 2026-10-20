@@ -3696,20 +3696,63 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         const meta = value?.Line && typeof value.Line === "object" ? value.Line : value;
         const publicNumber = String(meta?.LinePublicNumber ?? "").trim();
         return publicNumber.toLocaleLowerCase("nl-NL") === needle;
-      }).slice(0, 24);
+      });
       if (matchingLines.length) {
-        const routeKeys = matchingLines.map(([key]) => key).filter(key => /^[A-Za-z0-9_-]+$/.test(key));
+        // Veel Nederlandse vervoerders gebruiken hetzelfde openbare lijnnummer.
+        // Onderzoek daarom veel meer dan de eerste 24 routes, in begrensde batches.
+        const allRouteKeys = [...new Set(
+          matchingLines.map(([key]) => key).filter(key => /^[A-Za-z0-9_-]+$/.test(key))
+        )];
+        const MAX_OVAPI_LINE_SEARCH_ROUTES = 160;
+        const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;
+        const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;
+        const routeKeys = allRouteKeys.slice(0, MAX_OVAPI_LINE_SEARCH_ROUTES);
+        if (allRouteKeys.length > routeKeys.length) {
+          warnings.push("OVAPI: er zijn " + allRouteKeys.length + " routevarianten voor lijn " + query +
+            "; vanwege een limiet zijn de eerste " + MAX_OVAPI_LINE_SEARCH_ROUTES + " gecontroleerd.");
+        }
         if (routeKeys.length) {
-          const detailsResponse = await fetch("http://v0.ovapi.nl/line/" + routeKeys.join(","), {
-            headers: {
-              "accept": "application/json",
-              "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
-            },
-            signal: AbortSignal.timeout(9000),
-            cf: { cacheEverything: true, cacheTtl: 15 }
-          });
-          if (!detailsResponse.ok) throw new Error("OVAPI gaf HTTP " + detailsResponse.status + " terug voor de voertuigen op lijn " + query + ".");
-          const details = await detailsResponse.json() as Record<string, any>;
+          const routeBatches: string[][] = [];
+          for (let index = 0; index < routeKeys.length; index += OVAPI_LINE_SEARCH_BATCH_SIZE) {
+            routeBatches.push(routeKeys.slice(index, index + OVAPI_LINE_SEARCH_BATCH_SIZE));
+          }
+          const details: Record<string, any> = {};
+          for (let batchIndex = 0; batchIndex < routeBatches.length; batchIndex += OVAPI_LINE_SEARCH_BATCH_CONCURRENCY) {
+            const batchResults = await Promise.all(routeBatches
+              .slice(batchIndex, batchIndex + OVAPI_LINE_SEARCH_BATCH_CONCURRENCY)
+              .map(async (batch) => {
+                try {
+                  const detailsResponse = await fetch("http://v0.ovapi.nl/line/" + batch.join(","), {
+                    headers: {
+                      "accept": "application/json",
+                      "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+                    },
+                    signal: AbortSignal.timeout(9000),
+                    cf: { cacheEverything: true, cacheTtl: 15 }
+                  });
+                  if (!detailsResponse.ok) {
+                    throw new Error("HTTP " + detailsResponse.status);
+                  }
+                  return {
+                    data: await detailsResponse.json() as Record<string, any>,
+                    error: ""
+                  };
+                } catch (error) {
+                  return {
+                    data: null,
+                    error: error instanceof Error ? error.message : "onbekende fout"
+                  };
+                }
+              }));
+            for (let index = 0; index < batchResults.length; index++) {
+              const batchResult = batchResults[index];
+              if (!batchResult.data) {
+                warnings.push("OVAPI-lijnbatch " + (batchIndex + index + 1) + " niet beschikbaar: " + batchResult.error);
+                continue;
+              }
+              Object.assign(details, batchResult.data);
+            }
+          }
           for (const [routeKey, routeData] of Object.entries(details)) {
             const meta = routeData?.Line ?? directory[routeKey]?.Line ?? directory[routeKey] ?? {};
             const line = String(meta?.LinePublicNumber ?? query).trim();
