@@ -940,6 +940,9 @@ assert.equal(timestampPrefixedTripId.toLocaleLowerCase("nl-NL").includes("11"), 
 assert.equal(timestampPrefixedTripId.includes("392830208"), true,
   "searching by the actual trip-number suffix must still match");
 assert.equal(normalizeTripIdContext.normalizeLineSearchTripId("nl-OpenOV_392830208"), "nl-OpenOV_392830208");
+assert.ok(workerSource.includes("const tripIdForSearch = normalizeLineSearchTripId(entity?.tripId);") &&
+  workerSource.includes('tripIdForSearch.toLocaleLowerCase("nl-NL").includes(needle)'),
+  "the actual OpenOV search filter must use the normalized trip ID");
 assert.ok(html.includes("function renderStopBoardMetadata(data)") &&
   html.includes("Halte-ID: ") &&
   html.includes("<th>Lijn</th><th>Richting</th><th>") &&
