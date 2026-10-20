@@ -119,6 +119,9 @@
     .results-sort-control{display:flex;align-items:center;gap:8px;margin:0;color:var(--muted);font-size:12px;white-space:nowrap}
     #journeySort{width:auto;min-width:230px;max-width:100%;padding:9px 11px;margin:0;font-size:14px}
     .journey-results-list{display:flex;flex-direction:column;gap:0}
+    .journey-page-controls{display:flex;justify-content:center;margin:12px 0}
+    .journey-page-controls button{width:auto;min-width:min(100%,320px);max-width:100%;margin:0}
+    .journey-page-status{text-align:center;margin:7px 0 12px;color:var(--muted);font-size:12px}
     @media(max-width:600px){.results-toolbar{align-items:stretch;flex-direction:column;gap:8px}.results-sort-control{align-items:stretch;justify-content:space-between;white-space:normal}#journeySort{width:100%;min-width:0}}
     .journey-card{border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(255,255,255,.035),rgba(255,255,255,.012));margin:10px 0;overflow:hidden;transition:border-color .15s,background .15s}
     .journey-card:hover{border-color:#596575}
@@ -3819,7 +3822,374 @@ if (walkingSpeedInput && walkingSpeedValue) {
   updateWalkingSpeedReadout();
 }
 
+function renderJourneyCard(journey, index, walkSettings) {
+  const sourceLegs = journeySourceLegs(journey);
+
+      const { legs, adjustedJourneyStart } = prepareJourneyLegsForDisplay(
+        journey,
+        sourceLegs,
+        walkSettings.firstArrivalBufferSeconds,
+        walkSettings.walkingSpeedKmh
+      );
+      const sortMetrics = journeySortMetrics(journey, legs, adjustedJourneyStart);
+      const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
+      const first = legs[0];
+      const last = legs[legs.length - 1];
+
+      const departure = adjustedJourneyStart ||
+        journey.startTime ||
+        first?.from?.departure ||
+        first?.startTime;
+
+      const recalculatedLastWalk = String(last?.mode ?? '').toUpperCase() === 'WALK' &&
+        last?.walkingDurationRecalculated === true;
+      const arrival = (recalculatedLastWalk ? (last?.endTime || last?.to?.arrival) : null) ||
+        journey.endTime || last?.to?.arrival || last?.endTime;
+
+      const transfers = Math.max(0, transitLegs.length - 1);
+
+      const durationMs = Date.parse(arrival || '') - Date.parse(departure || '');
+      const durationMinutes = Number.isFinite(durationMs) && durationMs >= 0
+        ? Math.round(durationMs / 60000)
+        : null;
+      const durationText = durationMinutes === null
+        ? 'Reisduur onbekend'
+        : durationMinutes >= 60
+          ? `${Math.floor(durationMinutes / 60)} u ${durationMinutes % 60} min`
+          : `${durationMinutes} min`;
+      const firstLeg = legs[0];
+      const lastLeg = legs[legs.length - 1];
+      const originName = firstLeg?.from?.name || firstLeg?.origin?.name || 'Vertrekpunt';
+      const destinationName = lastLeg?.to?.name || lastLeg?.destination?.name || 'Bestemming';
+      const routeLabels = transitLegs.map(leg => lineTitle(leg)).filter(Boolean);
+      const routeTags = routeLabels.slice(0, 3)
+        .map(label => `<span class="journey-line-tag">${esc(label)}</span>`)
+        .join('');
+      const extraRouteCount = Math.max(0, routeLabels.length - 3);
+      const hasCancelledLeg = transitLegs.some(leg =>
+        leg.cancelled === true ||
+        leg.ndovRealtime?.status === 'cancelled' ||
+        leg.openovRealtime?.status === 'cancelled' ||
+        leg.nsRealtime?.status === 'cancelled'
+      );
+      const firstTransitLeg = transitLegs[0];
+      const firstScheduledDeparture = firstTransitLeg
+        ? plannedEndpointTime(firstTransitLeg, 'departure')
+        : departure;
+      const firstDeparturePrediction = firstTransitLeg
+        ? timelineRealtimePrediction(firstTransitLeg, 'departure', firstScheduledDeparture)
+        : null;
+      window.__ovliveDisplayedItineraryKeys[index] = itineraryRealtimeKey(journey);
+      window.__ovliveTrackingJourneys[index] = { legs: legs.map(trackingLegCopy) };
+      const tightTransferBadge = journey.ovliveTightTransferCandidate === true
+        ? '<span class="journey-tight-transfer-tag">⚡ Krappe overstap</span>'
+        : '';
+      const tightTransferWarningHtml = journey.ovliveTightTransferCandidate === true
+        ? '<div class="status rt-warning"><strong>⚡ Krappe overstap — risicovol</strong><div class="rt-details">Deze aansluiting is gevonden op basis van de dienstregeling zonder realtime vertragingen mee te nemen bij de routekeuze. Er is maximaal 2 minuten vrije overstaptijd na eventueel lopen; bij vertraging of een perronwissel kun je de aansluiting missen.</div></div>'
+        : '';
+      const trackingPanel = `<section class="live-follow" aria-label="Live voertuigkaart en halteverwachtingen">
+        <div class="live-follow-heading"><h4>Live voertuig volgen</h4><span class="live-follow-caption">Echte voertuigposities · automatische controle elke 10 sec</span></div>
+        <div id="journey-live-status-${index}" class="live-follow-status" role="status" aria-live="polite">Open deze reis om de livekaart te laden.</div>
+        <div id="journey-live-map-${index}" class="live-map" aria-label="Kaart met route, haltes en laatst gemelde voertuigposities"></div>
+        <div class="live-map-attribution">Kaartgegevens © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a> · kaartweergave door Leaflet</div>
+        <div class="live-follow-legend"><span><i class="live-legend-line"></i>Volledige lijnroute</span><span><i class="live-legend-segment"></i>Jouw traject</span><span><i class="live-legend-dot"></i>Live voertuigpositie</span></div>
+        <h5 class="live-stop-heading">Haltes en verwachte tijden</h5>
+        <p class="muted" style="font-size:11px;margin:0 0 5px">Een verwachte tijd staat alleen als realtime wanneer de bron en ritkoppeling dit ondersteunen. Anders is de tijd gepland of afkomstig van de routeplanner.</p>
+        <div id="journey-live-stops-${index}" class="live-stop-timeline">${renderLiveJourneyStopTimeline(legs)}</div>
+      </section>`;
+      let realtimeBadge = '';
+      if (hasCancelledLeg) {
+        realtimeBadge = '<span class="journey-alert-tag">⚠ Uitval gemeld — controleer details</span>';
+      } else if (firstDeparturePrediction) {
+        const scheduledMs = Date.parse(firstScheduledDeparture || '');
+        const predictedMs = Date.parse(firstDeparturePrediction.time || '');
+        const diffMinutes = Number.isFinite(scheduledMs) && Number.isFinite(predictedMs)
+          ? Math.round((predictedMs - scheduledMs) / 60000)
+          : null;
+        if (diffMinutes !== null && diffMinutes >= 1) {
+          realtimeBadge = `<span class="journey-live-tag">Vertrek +${diffMinutes} min</span>`;
+        } else if (diffMinutes !== null && diffMinutes <= -1) {
+          realtimeBadge = `<span class="journey-live-tag">Vertrek ${diffMinutes} min</span>`;
+        } else {
+          realtimeBadge = '<span class="journey-live-tag">Realtimevertrek beschikbaar</span>';
+        }
+      }
+
+      return `<details class="journey-card" data-tracking-index="${index}" data-itinerary-key="${esc(itineraryRealtimeKey(journey))}" data-transit-trip-ids="${esc(JSON.stringify(transitLegs.map(confirmedTripIdentityKey).filter(Boolean)))}" data-sort-departure-ms="${sortMetrics.departureMs ?? ''}" data-sort-arrival-ms="${sortMetrics.arrivalMs ?? ''}" data-sort-duration-ms="${sortMetrics.durationMs ?? ''}" data-sort-transfers="${sortMetrics.transfers}" data-sort-transfer-wait-seconds="${sortMetrics.transferWaitSeconds ?? ''}">
+        <summary class="journey-card-summary" aria-label="Bekijk details van reis ${index + 1}">
+          <div class="journey-card-top">
+            <span class="journey-number">REIS ${index + 1}</span>
+            <span class="journey-scan-info">${transitLegs.length} OV-rit${transitLegs.length === 1 ? '' : 'ten'}</span>
+            <span class="journey-toggle"><span class="journey-toggle-closed">Bekijk details ↓</span><span class="journey-toggle-open">Verberg details ↑</span></span>
+          </div>
+          <div class="journey-time-grid">
+            <div class="journey-time-block">
+              <span class="journey-time-label">VERTREK</span>
+              <span class="journey-big-time">${esc(clock(departure))}</span>
+              <span class="journey-endpoint" title="${esc(originName)}">${esc(originName)}</span>
+            </div>
+            <span class="journey-middle-arrow" aria-hidden="true">→</span>
+            <div class="journey-time-block">
+              <span class="journey-time-label">AANKOMST</span>
+              <span class="journey-big-time">${esc(clock(arrival))}</span>
+              <span class="journey-endpoint" title="${esc(destinationName)}">${esc(destinationName)}</span>
+            </div>
+          </div>
+          <div class="journey-card-bottom">
+            <span class="journey-meta">${esc(durationText)}</span>
+            <span class="journey-meta">·</span>
+            <span class="journey-meta">${transfers === 0 ? 'Rechtstreeks' : `${transfers} overstap${transfers === 1 ? '' : 'pen'}`}</span>
+            <span class="journey-realtime-summary">${realtimeBadge}</span>${tightTransferBadge}
+          </div>
+          <div class="journey-route-tags">
+            ${routeTags || '<span class="journey-line-tag">OV-route</span>'}
+            ${extraRouteCount ? `<span class="journey-line-tag">+${extraRouteCount} extra reisdelen</span>` : ''}
+          </div>
+        </summary>
+        <div class="journey-detail-body">
+          ${tightTransferWarningHtml}${trackingPanel}
+          <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Realtime alleen waar bevestigd</span></div>
+          <div class="journey-leg-details">${legs.map((leg, legIndex) => renderLeg(leg, legIndex, legs)).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}</div>
+        </div>
+      </details>`;
+
+}
+
+
+const JOURNEY_INITIAL_PAGE_SIZE = 10;
+const JOURNEY_PAGE_BATCH_SIZE = 3;
+
+function createJourneyPageState(query, basePlan, displayedJourneys, cursors = {}, pendingNext = []) {
+  const displayed = Array.isArray(displayedJourneys) ? displayedJourneys.slice() : [];
+  const queuedNext = Array.isArray(pendingNext) ? pendingNext.slice() : [];
+  return {
+    query: query instanceof URLSearchParams ? query.toString() : String(query ?? ''),
+    basePlan,
+    cursors: {
+      previous: String(cursors?.previous ?? ''),
+      next: String(cursors?.next ?? '')
+    },
+    pendingPrevious: [],
+    pendingNext: queuedNext,
+    displayedKeys: new Set(displayed.map(itineraryRealtimeKey).filter(Boolean)),
+    displayedJourneys: displayed,
+    nextTrackingIndex: displayed.length,
+    inFlight: false,
+    loadingDirection: '',
+    controller: null,
+    timeoutTimer: null,
+    message: ''
+  };
+}
+
+function takeJourneyPageBatch(state, direction, batchSize = JOURNEY_PAGE_BATCH_SIZE) {
+  if (!state || !Number.isInteger(batchSize) || batchSize < 1) return [];
+  const queue = direction === 'previous'
+    ? state.pendingPrevious
+    : direction === 'next'
+      ? state.pendingNext
+      : null;
+  if (!Array.isArray(queue) || queue.length === 0) return [];
+  if (direction === 'previous') {
+    return queue.splice(Math.max(0, queue.length - batchSize), Math.min(batchSize, queue.length));
+  }
+  return queue.splice(0, batchSize);
+}
+
+function filterNewPageJourneys(state, candidates, walkingSpeedKmh) {
+  if (!state || !Array.isArray(candidates)) return [];
+  const seen = new Set([
+    ...(state.displayedKeys instanceof Set ? state.displayedKeys : []),
+    ...(state.pendingPrevious || []).map(itineraryRealtimeKey),
+    ...(state.pendingNext || []).map(itineraryRealtimeKey)
+  ]);
+  const result = [];
+  for (const journey of candidates) {
+    const key = itineraryRealtimeKey(journey);
+    if (!key || seen.has(key)) continue;
+    const legs = journeySourceLegs(journey);
+    if (journeyChronologyIssue(legs) ||
+        journeyWalkingTransferIssue(legs, walkingSpeedKmh)) continue;
+    seen.add(key);
+    result.push(journey);
+  }
+  return result;
+}
+function orderJourneyPageByDeparture(journeys, walkSettings = window.__ovliveActiveWalkSettings) {
+  if (!Array.isArray(journeys)) return [];
+  const settings = walkSettings ?? {
+    firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds(),
+    walkingSpeedKmh: selectedWalkingSpeedKmh()
+  };
+  const departureTime = journey => {
+    const sourceLegs = journeySourceLegs(journey);
+    const prepared = prepareJourneyLegsForDisplay(
+      journey, sourceLegs,
+      settings.firstArrivalBufferSeconds,
+      settings.walkingSpeedKmh
+    );
+    const metrics = journeySortMetrics(journey, prepared.legs, prepared.adjustedJourneyStart);
+    return Number.isFinite(metrics.departureMs) ? metrics.departureMs : Number.POSITIVE_INFINITY;
+  };
+  return journeys.slice().sort((left, right) => departureTime(left) - departureTime(right));
+}
+
+
+function updateJourneyPageControls(message = '') {
+  const state = window.__ovliveJourneyPageState;
+  const status = document.getElementById('journey-page-status');
+  const hasState = Boolean(state);
+  document.querySelectorAll('.journey-page-button').forEach(button => {
+    const direction = String(button.dataset.pageDirection || '');
+    const queue = direction === 'previous'
+      ? state?.pendingPrevious
+      : state?.pendingNext;
+    const cursor = direction === 'previous'
+      ? state?.cursors?.previous
+      : state?.cursors?.next;
+    button.disabled = !hasState || Boolean(state.inFlight) ||
+      (!(Array.isArray(queue) && queue.length > 0) && !cursor);
+    if (state?.inFlight && state.loadingDirection === direction) {
+      button.textContent = 'Reizen laden…';
+    } else {
+      button.textContent = direction === 'previous'
+        ? '↑ Laad 3 eerdere reizen'
+        : 'Laad 3 latere reizen ↓';
+    }
+  });
+  if (status) {
+    const visibleCardCount = document.querySelectorAll('.journey-results-list details.journey-card').length;
+    const baseMessage = hasState
+      ? `${visibleCardCount || state.displayedJourneys.length} reizen weergegeven. Per klik worden maximaal 3 reizen toegevoegd.`
+      : '';
+    status.textContent = message || state?.message || baseMessage;
+  }
+}
+
+function initializeJourneyPagination(query, basePlan, displayedJourneys, cursors, pendingNext = []) {
+  if (window.__ovliveJourneyPageState?.controller) {
+    window.__ovliveJourneyPageState.controller.abort();
+  }
+  window.__ovliveJourneyPageState = createJourneyPageState(
+    query, basePlan, displayedJourneys, cursors, pendingNext
+  );
+  document.querySelectorAll('.journey-page-button').forEach(button => {
+    button.addEventListener('click', () => {
+      void loadMoreJourneys(String(button.dataset.pageDirection || ''));
+    });
+  });
+  updateJourneyPageControls();
+}
+
+async function loadMoreJourneys(direction) {
+  const state = window.__ovliveJourneyPageState;
+  if (!state || state.inFlight ||
+      (direction !== 'previous' && direction !== 'next')) return;
+
+  state.inFlight = true;
+  state.loadingDirection = direction;
+  state.message = direction === 'previous'
+    ? 'Eerdere reizen ophalen…'
+    : 'Latere reizen ophalen…';
+  updateJourneyPageControls();
+
+  const controller = new AbortController();
+  state.controller = controller;
+  state.timeoutTimer = window.setTimeout(() => controller.abort(), 30000);
+  try {
+    const queue = direction === 'previous' ? state.pendingPrevious : state.pendingNext;
+    let pageAttempts = 0;
+    while (queue.length < JOURNEY_PAGE_BATCH_SIZE &&
+           state.cursors[direction] && pageAttempts < 2) {
+      const pageQuery = new URLSearchParams(state.query);
+      // Keep the original routing parameters unchanged; Transitous' cursor
+      // moves the timetable window backward or forward from the last page.
+      pageQuery.set('pageCursor', state.cursors[direction]);
+      const pageData = await api('/api/plan?' + pageQuery.toString(), {
+        signal: controller.signal
+      });
+      if (window.__ovliveJourneyPageState !== state) return;
+
+      state.cursors.previous = String(pageData?.previousPageCursor ?? '');
+      state.cursors.next = String(pageData?.nextPageCursor ?? '');
+      const pageJourneys = Array.isArray(pageData?.itineraries)
+        ? pageData.itineraries
+        : Array.isArray(pageData?.journeys)
+          ? pageData.journeys
+          : [];
+      const walkingSpeed = window.__ovliveActiveWalkSettings?.walkingSpeedKmh ??
+        selectedWalkingSpeedKmh();
+      const validPageJourneys = orderJourneyPageByDeparture(
+        filterNewPageJourneys(state, pageJourneys, walkingSpeed),
+        window.__ovliveActiveWalkSettings
+      );
+      if (direction === 'previous') state.pendingPrevious.unshift(...validPageJourneys);
+      else state.pendingNext.push(...validPageJourneys);
+      pageAttempts += 1;
+    }
+
+    if (window.__ovliveJourneyPageState !== state) return;
+    const batch = takeJourneyPageBatch(state, direction);
+    if (batch.length === 0) {
+      state.message = state.cursors[direction]
+        ? 'Op deze pagina zijn geen extra haalbare reizen gevonden. Tik nogmaals om verder te zoeken.'
+        : direction === 'previous'
+          ? 'Er zijn geen eerdere reizen meer gevonden.'
+          : 'Er zijn geen latere reizen meer gevonden.';
+      return;
+    }
+
+    for (const journey of batch) {
+      const key = itineraryRealtimeKey(journey);
+      if (key) state.displayedKeys.add(key);
+    }
+    state.displayedJourneys = direction === 'previous'
+      ? [...batch, ...state.displayedJourneys]
+      : [...state.displayedJourneys, ...batch];
+
+    const walkingSettings = window.__ovliveActiveWalkSettings ?? {
+      firstArrivalBufferSeconds: selectedFirstVehicleBufferSeconds(),
+      walkingSpeedKmh: selectedWalkingSpeedKmh()
+    };
+    const cardsHtml = batch.map(journey =>
+      renderJourneyCard(journey, state.nextTrackingIndex++, walkingSettings)
+    ).join('');
+    const list = document.querySelector('.journey-results-list');
+    if (!list) return;
+    list.insertAdjacentHTML(direction === 'previous' ? 'afterbegin' : 'beforeend', cardsHtml);
+    bindLiveJourneyCards();
+    bindNsTrainDetailsButtons(list);
+
+    const sortControl = document.getElementById('journeySort');
+    sortJourneyCards(sortControl?.value || 'departure');
+
+    // Rebuild the realtime baseline with all currently visible itineraries.
+    // The refresher still processes at most eight per request in rotating batches.
+    state.basePlan = { ...state.basePlan, itineraries: state.displayedJourneys };
+    startLivePlanRealtimeRefresh(state.basePlan);
+    state.message = `${batch.length} extra ${batch.length === 1 ? 'reis' : 'reizen'} geladen.`;
+  } catch (error) {
+    if (window.__ovliveJourneyPageState !== state ||
+        (error instanceof Error && error.name === 'AbortError')) return;
+    state.message = 'Extra reizen laden is mislukt: ' +
+      (error instanceof Error ? error.message : 'Onbekende fout');
+  } finally {
+    if (window.__ovliveJourneyPageState === state) {
+      state.inFlight = false;
+      state.loadingDirection = '';
+      state.controller = null;
+      if (state.timeoutTimer) window.clearTimeout(state.timeoutTimer);
+      state.timeoutTimer = null;
+      updateJourneyPageControls(state.message);
+    }
+  }
+}
+
 $('planBtn').onclick = async () => {
+  const previousPageState = window.__ovliveJourneyPageState;
+  if (previousPageState?.controller) previousPageState.controller.abort();
+  if (previousPageState?.timeoutTimer) window.clearTimeout(previousPageState.timeoutTimer);
+  window.__ovliveJourneyPageState = null;
   stopLivePlanRealtimeRefresh();
   stopAllLiveJourneyTracking();
   window.__ovliveTrackingJourneys = [];
@@ -3901,13 +4271,17 @@ q.set('pedestrianSpeed', '1.5');
     // ritten niet door een kleine standaardlijst gemist. De resultaten blijven
     // begrensd; realtimecontrole wordt in kleine groepen uitgevoerd.
     q.set('searchWindow', '7200');
-    q.set('numItineraries', '24');
-    q.set('maxItineraries', '24');
+    q.set('numItineraries', '10');
+    q.set('maxItineraries', '10');
     q.set('deferRealtime', '1');
 
     let data = await api('/api/plan?' + q, {
       signal: AbortSignal.timeout(30000)
     });
+    const initialPageCursors = {
+      previous: String(data?.previousPageCursor ?? ''),
+      next: String(data?.nextPageCursor ?? '')
+    };
     let journeys = Array.isArray(data.itineraries)
       ? data.itineraries
       : Array.isArray(data.journeys)
@@ -4133,7 +4507,10 @@ q.set('pedestrianSpeed', '1.5');
     // Alleen routes waarvan de haltes in de beschikbare tijd bereikbaar zijn
     // worden getoond. Transitous is gevraagd om meer opties over een periode
     // van twee uur, zodat onhaalbare routes niet de hele lijst verdringen.
-    const itineraryStatus = `${validItineraryCandidates.length} haalbare reisopties gevonden` +
+    const itineraryStatus = `${Math.min(validItineraryCandidates.length, 10)} reisopties getoond` +
+      (validItineraryCandidates.length > 10
+        ? ` · ${validItineraryCandidates.length - 10} extra route(s) klaar om bij te laden`
+        : '') +
       (invalidChronologyCount ? ` · ${invalidChronologyCount} onveilige tijdvolgorde verborgen` : '') +
       (invalidWalkingTransferCount ? ` · ${invalidWalkingTransferCount} onhaalbare loop-overstap(pen) verborgen` : '') +
       '.';
@@ -4178,136 +4555,16 @@ q.set('pedestrianSpeed', '1.5');
       : '';
 
     window.__ovliveTrackingJourneys = [];
-    const cards = validItineraryCandidates.map(({ journey, sourceLegs }, index) => {
-
-      const { legs, adjustedJourneyStart } = prepareJourneyLegsForDisplay(
-        journey,
-        sourceLegs,
-        walkSettings.firstArrivalBufferSeconds,
-        walkSettings.walkingSpeedKmh
-      );
-      const sortMetrics = journeySortMetrics(journey, legs, adjustedJourneyStart);
-      const transitLegs = legs.filter(leg => leg.mode !== 'WALK');
-      const first = legs[0];
-      const last = legs[legs.length - 1];
-
-      const departure = adjustedJourneyStart ||
-        journey.startTime ||
-        first?.from?.departure ||
-        first?.startTime;
-
-      const recalculatedLastWalk = String(last?.mode ?? '').toUpperCase() === 'WALK' &&
-        last?.walkingDurationRecalculated === true;
-      const arrival = (recalculatedLastWalk ? (last?.endTime || last?.to?.arrival) : null) ||
-        journey.endTime || last?.to?.arrival || last?.endTime;
-
-      const transfers = Math.max(0, transitLegs.length - 1);
-
-      const durationMs = Date.parse(arrival || '') - Date.parse(departure || '');
-      const durationMinutes = Number.isFinite(durationMs) && durationMs >= 0
-        ? Math.round(durationMs / 60000)
-        : null;
-      const durationText = durationMinutes === null
-        ? 'Reisduur onbekend'
-        : durationMinutes >= 60
-          ? `${Math.floor(durationMinutes / 60)} u ${durationMinutes % 60} min`
-          : `${durationMinutes} min`;
-      const firstLeg = legs[0];
-      const lastLeg = legs[legs.length - 1];
-      const originName = firstLeg?.from?.name || firstLeg?.origin?.name || 'Vertrekpunt';
-      const destinationName = lastLeg?.to?.name || lastLeg?.destination?.name || 'Bestemming';
-      const routeLabels = transitLegs.map(leg => lineTitle(leg)).filter(Boolean);
-      const routeTags = routeLabels.slice(0, 3)
-        .map(label => `<span class="journey-line-tag">${esc(label)}</span>`)
-        .join('');
-      const extraRouteCount = Math.max(0, routeLabels.length - 3);
-      const hasCancelledLeg = transitLegs.some(leg =>
-        leg.cancelled === true ||
-        leg.ndovRealtime?.status === 'cancelled' ||
-        leg.openovRealtime?.status === 'cancelled' ||
-        leg.nsRealtime?.status === 'cancelled'
-      );
-      const firstTransitLeg = transitLegs[0];
-      const firstScheduledDeparture = firstTransitLeg
-        ? plannedEndpointTime(firstTransitLeg, 'departure')
-        : departure;
-      const firstDeparturePrediction = firstTransitLeg
-        ? timelineRealtimePrediction(firstTransitLeg, 'departure', firstScheduledDeparture)
-        : null;
-      window.__ovliveDisplayedItineraryKeys[index] = itineraryRealtimeKey(journey);
-      window.__ovliveTrackingJourneys[index] = { legs: legs.map(trackingLegCopy) };
-      const tightTransferBadge = journey.ovliveTightTransferCandidate === true
-        ? '<span class="journey-tight-transfer-tag">⚡ Krappe overstap</span>'
-        : '';
-      const tightTransferWarningHtml = journey.ovliveTightTransferCandidate === true
-        ? '<div class="status rt-warning"><strong>⚡ Krappe overstap — risicovol</strong><div class="rt-details">Deze aansluiting is gevonden op basis van de dienstregeling zonder realtime vertragingen mee te nemen bij de routekeuze. Er is maximaal 2 minuten vrije overstaptijd na eventueel lopen; bij vertraging of een perronwissel kun je de aansluiting missen.</div></div>'
-        : '';
-      const trackingPanel = `<section class="live-follow" aria-label="Live voertuigkaart en halteverwachtingen">
-        <div class="live-follow-heading"><h4>Live voertuig volgen</h4><span class="live-follow-caption">Echte voertuigposities · automatische controle elke 10 sec</span></div>
-        <div id="journey-live-status-${index}" class="live-follow-status" role="status" aria-live="polite">Open deze reis om de livekaart te laden.</div>
-        <div id="journey-live-map-${index}" class="live-map" aria-label="Kaart met route, haltes en laatst gemelde voertuigposities"></div>
-        <div class="live-map-attribution">Kaartgegevens © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-bijdragers</a> · kaartweergave door Leaflet</div>
-        <div class="live-follow-legend"><span><i class="live-legend-line"></i>Volledige lijnroute</span><span><i class="live-legend-segment"></i>Jouw traject</span><span><i class="live-legend-dot"></i>Live voertuigpositie</span></div>
-        <h5 class="live-stop-heading">Haltes en verwachte tijden</h5>
-        <p class="muted" style="font-size:11px;margin:0 0 5px">Een verwachte tijd staat alleen als realtime wanneer de bron en ritkoppeling dit ondersteunen. Anders is de tijd gepland of afkomstig van de routeplanner.</p>
-        <div id="journey-live-stops-${index}" class="live-stop-timeline">${renderLiveJourneyStopTimeline(legs)}</div>
-      </section>`;
-      let realtimeBadge = '';
-      if (hasCancelledLeg) {
-        realtimeBadge = '<span class="journey-alert-tag">⚠ Uitval gemeld — controleer details</span>';
-      } else if (firstDeparturePrediction) {
-        const scheduledMs = Date.parse(firstScheduledDeparture || '');
-        const predictedMs = Date.parse(firstDeparturePrediction.time || '');
-        const diffMinutes = Number.isFinite(scheduledMs) && Number.isFinite(predictedMs)
-          ? Math.round((predictedMs - scheduledMs) / 60000)
-          : null;
-        if (diffMinutes !== null && diffMinutes >= 1) {
-          realtimeBadge = `<span class="journey-live-tag">Vertrek +${diffMinutes} min</span>`;
-        } else if (diffMinutes !== null && diffMinutes <= -1) {
-          realtimeBadge = `<span class="journey-live-tag">Vertrek ${diffMinutes} min</span>`;
-        } else {
-          realtimeBadge = '<span class="journey-live-tag">Realtimevertrek beschikbaar</span>';
-        }
-      }
-
-      return `<details class="journey-card" data-tracking-index="${index}" data-itinerary-key="${esc(itineraryRealtimeKey(journey))}" data-transit-trip-ids="${esc(JSON.stringify(transitLegs.map(confirmedTripIdentityKey).filter(Boolean)))}" data-sort-departure-ms="${sortMetrics.departureMs ?? ''}" data-sort-arrival-ms="${sortMetrics.arrivalMs ?? ''}" data-sort-duration-ms="${sortMetrics.durationMs ?? ''}" data-sort-transfers="${sortMetrics.transfers}" data-sort-transfer-wait-seconds="${sortMetrics.transferWaitSeconds ?? ''}">
-        <summary class="journey-card-summary" aria-label="Bekijk details van reis ${index + 1}">
-          <div class="journey-card-top">
-            <span class="journey-number">REIS ${index + 1}</span>
-            <span class="journey-scan-info">${transitLegs.length} OV-rit${transitLegs.length === 1 ? '' : 'ten'}</span>
-            <span class="journey-toggle"><span class="journey-toggle-closed">Bekijk details ↓</span><span class="journey-toggle-open">Verberg details ↑</span></span>
-          </div>
-          <div class="journey-time-grid">
-            <div class="journey-time-block">
-              <span class="journey-time-label">VERTREK</span>
-              <span class="journey-big-time">${esc(clock(departure))}</span>
-              <span class="journey-endpoint" title="${esc(originName)}">${esc(originName)}</span>
-            </div>
-            <span class="journey-middle-arrow" aria-hidden="true">→</span>
-            <div class="journey-time-block">
-              <span class="journey-time-label">AANKOMST</span>
-              <span class="journey-big-time">${esc(clock(arrival))}</span>
-              <span class="journey-endpoint" title="${esc(destinationName)}">${esc(destinationName)}</span>
-            </div>
-          </div>
-          <div class="journey-card-bottom">
-            <span class="journey-meta">${esc(durationText)}</span>
-            <span class="journey-meta">·</span>
-            <span class="journey-meta">${transfers === 0 ? 'Rechtstreeks' : `${transfers} overstap${transfers === 1 ? '' : 'pen'}`}</span>
-            <span class="journey-realtime-summary">${realtimeBadge}</span>${tightTransferBadge}
-          </div>
-          <div class="journey-route-tags">
-            ${routeTags || '<span class="journey-line-tag">OV-route</span>'}
-            ${extraRouteCount ? `<span class="journey-line-tag">+${extraRouteCount} extra reisdelen</span>` : ''}
-          </div>
-        </summary>
-        <div class="journey-detail-body">
-          ${tightTransferWarningHtml}${trackingPanel}
-          <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Realtime alleen waar bevestigd</span></div>
-          <div class="journey-leg-details">${legs.map((leg, legIndex) => renderLeg(leg, legIndex, legs)).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}</div>
-        </div>
-      </details>`;
-    }).join('');
+    const departureOrderedCandidates = orderJourneyPageByDeparture(
+      validItineraryCandidates, walkSettings
+    );
+    const initialDisplayedCandidates = departureOrderedCandidates.slice(0, JOURNEY_INITIAL_PAGE_SIZE);
+    const initiallyQueuedCandidates = departureOrderedCandidates
+      .slice(JOURNEY_INITIAL_PAGE_SIZE)
+      .map(item => item.journey);
+    const cards = initialDisplayedCandidates.map(({ journey }, index) =>
+      renderJourneyCard(journey, index, walkSettings)
+    ).join('');
 
     $('journeys').innerHTML =
       chronologyWarningHtml +
@@ -4325,7 +4582,10 @@ q.set('pedestrianSpeed', '1.5');
         </label>
         <span class="muted" id="live-refresh-status" role="status">Automatische realtime-update start na zoeken.</span>
       </div>` +
+      `<div class="journey-page-controls"><button type="button" class="secondary journey-page-button" data-page-direction="previous">↑ Laad 3 eerdere reizen</button></div>` +
       `<div class="journey-results-list">${cards}</div>` +
+      `<div class="journey-page-controls"><button type="button" class="secondary journey-page-button" data-page-direction="next">Laad 3 latere reizen ↓</button></div>` +
+      `<p class="journey-page-status" id="journey-page-status" role="status" aria-live="polite"></p>` +
       `<div id="cancelled-trips-container" aria-live="polite"></div>` +
       renderAlerts(data.openovAlerts || []) +
       `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted" id="realtime-plan-diagnostic-status">${esc(diagnosticPlanStatus)}</p><div id="realtime-feed-info">${feedInfo}</div>${renderRealtimeLegend()}</div></details>`;
@@ -4336,6 +4596,10 @@ q.set('pedestrianSpeed', '1.5');
       journeySort.addEventListener('change', () => sortJourneyCards(journeySort.value));
     }
     sortJourneyCards(journeySort?.value || 'departure');
+    initializeJourneyPagination(
+      q, data, initialDisplayedCandidates.map(item => item.journey),
+      initialPageCursors, initiallyQueuedCandidates
+    );
     startLivePlanRealtimeRefresh(data);
     loadCancelledTripSupplement(q, cancelledTripLookupId);
     $('journeys').scrollIntoView({ behavior: 'smooth', block: 'start' });
