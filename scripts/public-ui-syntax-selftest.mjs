@@ -897,7 +897,7 @@ assert.ok(html.includes('id="stopTimesPanel"') &&
   html.includes('id="lineSearch"'),
   "the UI must expose a stop board and a separate standalone line/vehicle search");
 assert.ok(html.indexOf('id="lineSearchPanel"') > html.indexOf('</section>', html.indexOf('id="stopTimesPanel"')) &&
-  html.includes("api('/api/line-search?' + query.toString()"),
+  html.includes("api('/api/line-search?' + params.toString()"),
   "line search must be outside the stop panel and call its own API");
 assert.ok(html.includes("fetchStop: 'true'") &&
   html.includes("arriveBy: String(direction === 'arrivals')") &&
