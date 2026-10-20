@@ -38,6 +38,12 @@
     routeMetadata: null,
     routeMetadataFailed: false,
     routeMetadataPromise: null,
+    routeLayer: null,
+    selectedRouteKey: null,
+    routeStatus: "",
+    routeRequestToken: 0,
+    routeGeometryCache: new Map(),
+    locationMarker: null,
     refreshing: false,
     timer: null,
     failureStreak: 0,
@@ -178,6 +184,9 @@
         vehicleId,
         tripId,
         routeId,
+        startDate: String(row.startDate ?? "").trim(),
+        startTime: String(row.startTime ?? "").trim(),
+        directionId: row.directionId ?? null,
         routeName: String(routeInfo?.routeShortName || routeInfo?.routeLongName || "").trim(),
         agencyName: String(routeInfo?.agencyName || "").trim(),
         routeType: routeInfo?.routeType == null ? null : String(routeInfo.routeType),
@@ -214,6 +223,9 @@
         vehicleId: trainNumber,
         trainNumber,
         tripId: row.ritId || "",
+        routeId: row.routeId || "",
+        startDate: row.startDate || "",
+        startTime: row.startTime || "",
         routeName: "Trein " + trainNumber,
         agencyName: "NS",
         trainType: row.trainType || "",
@@ -244,7 +256,246 @@
     return merged;
   }
 
+  function vehicleRouteIdentity(vehicle) {
+    const routeId = normalizedId(vehicle?.routeId);
+    const rawTripId = String(vehicle?.tripId ?? "").trim();
+    if (!rawTripId || !routeId) return null;
+
+    // Transitous uses an exact service-date/start-time trip ID. Never fall back
+    // to line-only matching: that could draw a different vehicle's route.
+    if (/^\d{8}_\d{2}:\d{2}(?::\d{2})?_nl-OpenOV_.+$/i.test(rawTripId)) {
+      return { tripId: rawTripId, routeId };
+    }
+    if (vehicle.sourceKey !== "openov") return null;
+
+    const startDate = String(vehicle.startDate ?? "").replace(/\D/g, "");
+    const rawStartTime = String(vehicle.startTime ?? "").trim();
+    if (!/^\d{8}$/.test(startDate) ||
+        !/^\d{1,2}:\d{2}(?::\d{2})?$/.test(rawStartTime)) return null;
+
+    const timeParts = rawStartTime.split(":");
+    timeParts[0] = timeParts[0].padStart(2, "0");
+    const tripId = normalizedId(rawTripId);
+    if (!tripId) return null;
+    return { tripId: startDate + "_" + timeParts.join(":") + "_nl-OpenOV_" + tripId, routeId };
+  }
+
+  function routeModeMatches(vehicleMode, candidateMode) {
+    const mode = String(candidateMode ?? "").trim().toUpperCase();
+    const accepted = {
+      bus: ["BUS", "COACH"],
+      tram: ["TRAM"],
+      metro: ["METRO", "SUBWAY"],
+      ferry: ["FERRY"],
+      train: ["RAIL", "TRAIN", "REGIONAL_RAIL", "LONG_DISTANCE", "HIGH_SPEED_RAIL",
+        "HIGHSPEED_RAIL", "NIGHT_RAIL", "REGIONAL_FAST_RAIL", "SUBURBAN"]
+    };
+    return (accepted[vehicleMode] || []).includes(mode);
+  }
+
+  function routeCoordinates(geometry) {
+    const validPoint = point => Array.isArray(point) && point.length >= 2 &&
+      Number.isFinite(point[0]) && Number.isFinite(point[1]) &&
+      Math.abs(point[0]) <= 90 && Math.abs(point[1]) <= 180;
+
+    if (Array.isArray(geometry)) {
+      return geometry.map(point => {
+        if (Array.isArray(point) && point.length >= 2) return [Number(point[1]), Number(point[0])];
+        if (point && typeof point === "object") {
+          return [
+            Number(point.latitude ?? point.lat),
+            Number(point.longitude ?? point.lon ?? point.lng)
+          ];
+        }
+        return null;
+      }).filter(validPoint);
+    }
+    if (geometry?.type === "LineString" && Array.isArray(geometry.coordinates)) {
+      return geometry.coordinates.map(point => [Number(point[1]), Number(point[0])]).filter(validPoint);
+    }
+
+    const encoded = typeof geometry === "string" ? geometry : geometry?.points;
+    if (typeof encoded !== "string" || encoded.length === 0 || encoded.length > 250_000) return [];
+    const rawPrecision = typeof geometry === "object" && geometry?.precision != null
+      ? Number(geometry.precision) : 6;
+    const precision = Number.isInteger(rawPrecision) && rawPrecision >= 0 && rawPrecision <= 7
+      ? rawPrecision : 6;
+    const factor = 10 ** precision;
+    const result = [];
+    let index = 0;
+    let latitude = 0;
+    let longitude = 0;
+
+    function readDelta() {
+      let value = 0;
+      let shift = 0;
+      let byte;
+      do {
+        if (index >= encoded.length || shift > 30) return null;
+        byte = encoded.charCodeAt(index++) - 63;
+        if (byte < 0 || byte > 63) return null;
+        value |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      return (value & 1) ? ~(value >> 1) : (value >> 1);
+    }
+
+    while (index < encoded.length && result.length < 30_000) {
+      const latDelta = readDelta();
+      const lonDelta = latDelta === null ? null : readDelta();
+      if (latDelta === null || lonDelta === null) return [];
+      latitude += latDelta;
+      longitude += lonDelta;
+      const point = [latitude / factor, longitude / factor];
+      if (!validPoint(point)) return [];
+      result.push(point);
+    }
+    return result;
+  }
+
+  async function loadVehicleRouteGeometry(vehicle) {
+    const identity = vehicleRouteIdentity(vehicle);
+    if (!identity) {
+      throw new Error(vehicle.sourceKey === "ns"
+        ? "Voor deze trein ontbreekt een exacte rit- en routekoppeling; ik teken geen vermoedelijke route."
+        : "Deze voertuigpositie bevat geen volledige rit-ID met startdatum en starttijd.");
+    }
+
+    const cacheKey = identity.tripId + "|" + identity.routeId;
+    if (state.routeGeometryCache.has(cacheKey)) {
+      return state.routeGeometryCache.get(cacheKey);
+    }
+
+    const task = (async () => {
+      const params = new URLSearchParams({ tripId: identity.tripId });
+      const response = await fetch("/api/trip-shape?" + params.toString(), {
+        cache: "default",
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(10_000)
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload?.ok !== true || !Array.isArray(payload.legs)) {
+        throw new Error(payload?.error || ("De ritroute kon niet worden opgehaald (HTTP " + response.status + ")."));
+      }
+
+      const geometries = payload.legs
+        .filter(candidate => {
+          const candidateRouteId = normalizedId(candidate?.routeId);
+          const candidateTripId = String(candidate?.tripId ?? "").trim();
+          return candidateRouteId === identity.routeId &&
+            (!candidateTripId || candidateTripId === identity.tripId) &&
+            routeModeMatches(vehicle.mode, candidate?.mode);
+        })
+        .map(candidate => routeCoordinates(candidate.legGeometry))
+        .filter(points => points.length > 1);
+      if (!geometries.length) {
+        throw new Error("Voor deze exacte rit is geen passende routevorm gevonden.");
+      }
+      return geometries;
+    })();
+
+    state.routeGeometryCache.set(cacheKey, task);
+    try {
+      return await task;
+    } catch (error) {
+      if (state.routeGeometryCache.get(cacheKey) === task) state.routeGeometryCache.delete(cacheKey);
+      throw error;
+    }
+  }
+
+  function refreshVehiclePopup(key) {
+    const marker = state.markers.get(key);
+    const vehicle = marker?.__ovliveVehicle;
+    if (marker && vehicle) marker.setPopupContent(vehiclePopup(vehicle));
+  }
+
+  async function showVehicleRoute(vehicle) {
+    if (!state.map || !state.routeLayer || !vehicle?.key) return;
+    const token = ++state.routeRequestToken;
+    state.selectedRouteKey = vehicle.key;
+    state.routeStatus = "Route wordt opgehaald…";
+    state.routeLayer.clearLayers();
+    refreshVehiclePopup(vehicle.key);
+
+    try {
+      const geometries = await loadVehicleRouteGeometry(vehicle);
+      if (token !== state.routeRequestToken || state.selectedRouteKey !== vehicle.key) return;
+      for (const points of geometries) {
+        window.L.polyline(points, {
+          color: "#ef4444",
+          weight: 5,
+          opacity: 0.96,
+          lineCap: "round",
+          lineJoin: "round",
+          interactive: false
+        }).addTo(state.routeLayer);
+      }
+      const bounds = state.routeLayer.getBounds();
+      if (bounds.isValid()) {
+        state.map.fitBounds(bounds, { padding: [28, 28], maxZoom: 13 });
+      }
+      state.routeStatus = "🔴 Rode lijn = route van deze specifieke rit volgens de dienstregeling.";
+    } catch (error) {
+      if (token !== state.routeRequestToken || state.selectedRouteKey !== vehicle.key) return;
+      state.routeStatus = error instanceof Error ? error.message : "De ritroute kon niet worden getoond.";
+    }
+    refreshVehiclePopup(vehicle.key);
+  }
+
+  function attachMyLocationButton(map, mapState, button, statusElement) {
+    if (!map || !button || !statusElement) return;
+    button.addEventListener("click", () => {
+      if (!navigator.geolocation) {
+        statusElement.textContent = "Je browser biedt geen locatietoegang.";
+        return;
+      }
+      if (button.disabled) return;
+      button.disabled = true;
+      const originalText = button.textContent || "📍 Mijn locatie";
+      button.textContent = "📍 Locatie zoeken…";
+      statusElement.textContent = "Je locatie wordt opgevraagd. Je browser kan om toestemming vragen.";
+
+      navigator.geolocation.getCurrentPosition(position => {
+        const point = [Number(position.coords.latitude), Number(position.coords.longitude)];
+        if (!point.every(Number.isFinite) || Math.abs(point[0]) > 90 || Math.abs(point[1]) > 180) {
+          statusElement.textContent = "De browser gaf geen geldige locatie terug.";
+        } else {
+          if (mapState.locationMarker) {
+            mapState.locationMarker.setLatLng(point);
+          } else {
+            mapState.locationMarker = window.L.circleMarker(point, {
+              radius: 8,
+              color: "#ffffff",
+              weight: 3,
+              fillColor: "#2563eb",
+              fillOpacity: 1
+            }).addTo(map);
+            mapState.locationMarker.bindPopup("📍 Mijn locatie");
+          }
+          map.setView(point, 15, { animate: true });
+          statusElement.textContent = "📍 Locatie gevonden; de kaart is naar jouw locatie verplaatst.";
+        }
+        button.disabled = false;
+        button.textContent = originalText;
+      }, error => {
+        statusElement.textContent = error?.code === 1
+          ? "Locatietoegang geweigerd. Geef OVLive toestemming in je browserinstellingen."
+          : error?.code === 2
+            ? "Je locatie kon niet worden bepaald. Controleer je locatievoorzieningen."
+            : "Locatie ophalen duurde te lang. Probeer het opnieuw.";
+        button.disabled = false;
+        button.textContent = originalText;
+      }, { enableHighAccuracy: true, timeout: 12_000, maximumAge: 15_000 });
+    });
+  }
+
   function vehiclePopup(vehicle) {
+    const routeIdentity = vehicleRouteIdentity(vehicle);
+    const routeStatus = state.selectedRouteKey === vehicle.key
+      ? (state.routeStatus || "Ritroute geselecteerd.")
+      : routeIdentity
+        ? "Tik op dit voertuig om de route als rode lijn te tonen."
+        : "Geen exacte ritkoppeling beschikbaar; er wordt geen vermoedelijke lijn getekend.";
     const meta = [
       vehicle.agencyName ? "<div>Vervoerder: " + escapeHtml(vehicle.agencyName) + "</div>" : "",
       vehicle.vehicleId ? "<div>Voertuig: " + escapeHtml(vehicle.vehicleId) + "</div>" : "",
@@ -258,7 +509,7 @@
       "<div>Bron: " + escapeHtml(vehicle.source) + "</div>",
       "<div>Positietijd: " + escapeHtml(vehicle.observedAt ? formatClock(vehicle.observedAt) : "niet afzonderlijk gemeld") + "</div>",
       "<div>Leeftijd: " + escapeHtml(vehicle.ageSeconds) + " sec</div>",
-      "<div class=\"muted\">De volledige gereden route volgt in een volgende stap.</div>"
+      "<div class=\"live-fleet-route-status\" role=\"status\">" + escapeHtml(routeStatus) + "</div>"
     ].join("");
     const heading = vehicle.routeName || vehicle.routeId || vehicle.routeName === "" && vehicle.mode === "train"
       ? (vehicle.routeName || "Lijn onbekend")
@@ -281,6 +532,13 @@
     const vehicles = visibleVehicles();
     const visibleIds = new Set(vehicles.keys());
 
+    if (state.selectedRouteKey && !visibleIds.has(state.selectedRouteKey)) {
+      state.selectedRouteKey = null;
+      state.routeStatus = "";
+      state.routeRequestToken += 1;
+      state.routeLayer?.clearLayers();
+    }
+
     for (const [key, marker] of state.markers.entries()) {
       if (!visibleIds.has(key)) {
         state.layer.removeLayer(marker);
@@ -296,11 +554,17 @@
           title: (vehicle.routeName || MODES[vehicle.mode]?.label || "OV-voertuig") +
             (vehicle.vehicleId ? " · " + vehicle.vehicleId : "")
         });
+        marker.__ovliveVehicle = vehicle;
         marker.bindPopup(vehiclePopup(vehicle));
+        marker.on("click", () => {
+          const currentVehicle = marker.__ovliveVehicle;
+          if (currentVehicle) void showVehicleRoute(currentVehicle);
+        });
         marker.setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35);
         marker.addTo(state.layer);
         state.markers.set(vehicle.key, marker);
       } else {
+        marker.__ovliveVehicle = vehicle;
         marker.setLatLng([vehicle.latitude, vehicle.longitude]);
         marker.setIcon(markerIcon(window.L, vehicle.mode));
         marker.setPopupContent(vehiclePopup(vehicle));
@@ -480,6 +744,13 @@
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
       }).addTo(state.map);
       state.layer = L.layerGroup().addTo(state.map);
+      state.routeLayer = L.layerGroup().addTo(state.map);
+      attachMyLocationButton(
+        state.map,
+        state,
+        $("liveFleetLocate"),
+        $("liveFleetLocationStatus")
+      );
 
       panel.querySelectorAll("[data-live-fleet-mode]").forEach((input) => {
         input.addEventListener("change", renderMarkers);
