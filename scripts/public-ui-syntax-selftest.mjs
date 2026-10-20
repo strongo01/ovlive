@@ -137,7 +137,7 @@ console.log("PASS: large OpenOV trip/train feeds are cached longer while vehicle
 // before their declarations, which would abort the planner at runtime.
 const invalidChronologyDeclaration = html.indexOf("const invalidChronologyCount = itineraryCandidates");
 const validItineraryDeclaration = html.indexOf("const validItineraryCandidates = itineraryCandidates");
-const itinerarySummaryReference = html.indexOf("`${validItineraryCandidates.length} bruikbare reisopties gevonden`");
+const itinerarySummaryReference = html.indexOf("`${validItineraryCandidates.length} haalbare reisopties gevonden`");
 assert.ok(invalidChronologyDeclaration >= 0 && validItineraryDeclaration > invalidChronologyDeclaration,
   "itinerary candidate counts must be initialized before rendering the summary");
 assert.ok(itinerarySummaryReference > invalidChronologyDeclaration &&
