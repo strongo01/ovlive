@@ -141,7 +141,7 @@ function crowdLabel(value: unknown): NsTrainDetailsSummary["crowdForecast"] {
 function formatCrowdFromEntries(entries: Entry[]): NsTrainDetailsSummary["crowdForecast"] {
   const found = findScalar(
     entries,
-    /crowdforecast|crowdlevel|crowdstatus|drukteprognose|verwachtedrukte|drukte|occupancystatus/
+    /crowdforecast|crowdlevel|crowdstatus|drukteprognose|verwachtedrukte|drukte|occupancystatus|prognose/
   );
   return found ? crowdLabel(found.value) : null;
 }
