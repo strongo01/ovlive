@@ -916,6 +916,33 @@ assert.ok(workerSource.includes('url.pathname === "/api/line-search"') &&
   workerSource.includes('getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")') &&
   workerSource.includes('TRANSITOUS + "/trip"'),
   "the standalone line-search API must combine public line metadata with current vehicle/trip identities");
+assert.ok(workerSource.includes('const routeId = String(entity?.routeId ?? "").trim();') &&
+  workerSource.includes("routeId: routeId || null") &&
+  workerSource.includes('"Lijn onbekend"') &&
+  workerSource.includes('Rit-ID " + (tripNumber || tripId)'),
+  "OpenOV results must retain exact route/trip identifiers when schedule enrichment is unavailable");
+
+const normalizeTripIdStart = workerSource.indexOf("function normalizeLineSearchTripId(value: unknown): string {");
+const normalizeTripIdEnd = workerSource.indexOf("\n}", normalizeTripIdStart) + 2;
+assert.ok(normalizeTripIdStart >= 0 && normalizeTripIdEnd > normalizeTripIdStart,
+  "the line-search trip-ID normalizer must remain independently testable");
+const normalizeTripIdContext = {};
+const normalizeTripIdSource = workerSource.slice(normalizeTripIdStart, normalizeTripIdEnd)
+  .replace("function normalizeLineSearchTripId(value: unknown): string", "function normalizeLineSearchTripId(value)");
+new vm.Script(normalizeTripIdSource + "\nthis.normalizeLineSearchTripId = normalizeLineSearchTripId;")
+  .runInNewContext(normalizeTripIdContext);
+const timestampPrefixedTripId = normalizeTripIdContext.normalizeLineSearchTripId(
+  "20261020_15:11_nl-OpenOV_392830208"
+);
+assert.equal(timestampPrefixedTripId, "nl-OpenOV_392830208");
+assert.equal(timestampPrefixedTripId.toLocaleLowerCase("nl-NL").includes("11"), false,
+  "searching for line 11 must not match the :11 in a date/time prefix");
+assert.equal(timestampPrefixedTripId.includes("392830208"), true,
+  "searching by the actual trip-number suffix must still match");
+assert.equal(normalizeTripIdContext.normalizeLineSearchTripId("nl-OpenOV_392830208"), "nl-OpenOV_392830208");
+assert.ok(workerSource.includes("const tripIdForSearch = normalizeLineSearchTripId(entity?.tripId);") &&
+  workerSource.includes('tripIdForSearch.toLocaleLowerCase("nl-NL").includes(needle)'),
+  "the actual OpenOV search filter must use the normalized trip ID");
 assert.ok(html.includes("function renderStopBoardMetadata(data)") &&
   html.includes("Halte-ID: ") &&
   html.includes("<th>Lijn</th><th>Richting</th><th>") &&
@@ -973,6 +1000,26 @@ assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "73", dest
 assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "500", vehicleNumber: "7305" }, "73"), true);
 assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "3", tripNumber: "73" }, "73"), true);
 assert.equal(lineSearchMatcherContext.lineSearchMatchesRecord({ line: "77", destination: "Bilthoven" }, "73"), false);
+
+const lineCardStart = html.indexOf("function renderLineSearchCard(row) {");
+const lineCardEnd = html.indexOf("\nfunction displayLineSearchResults(", lineCardStart);
+assert.ok(lineCardStart >= 0 && lineCardEnd > lineCardStart,
+  "the line-search card renderer must remain independently testable");
+const lineCardContext = { esc: value => String(value ?? "") };
+new vm.Script(
+  html.slice(lineCardStart, lineCardEnd).trim() +
+  "\nthis.renderLineSearchCard = renderLineSearchCard;"
+).runInNewContext(lineCardContext);
+const fallbackCard = lineCardContext.renderLineSearchCard({
+  line: "Lijn onbekend", destination: "Bestemming onbekend",
+  vehicleNumber: "7305", tripId: "rt-trip-73", routeId: "rt-route-7",
+  vehicleLabel: "Voertuig met nummer 7305", source: "OpenOV GTFS-Realtime"
+});
+assert.ok(fallbackCard.includes("Voertuig-ID: 7305") &&
+  fallbackCard.includes("Rit-ID: rt-trip-73") &&
+  fallbackCard.includes("Route-ID: rt-route-7"),
+  "fallback line-search cards must show exact vehicle, trip and route IDs");
+console.log("PASS: line-search fallback cards preserve exact vehicle, trip and route identifiers");
 console.log("PASS: stop board separates live observations from scheduled times and displays a timetable table");
 console.log("PASS: standalone line search matches public line numbers, vehicle numbers and trip numbers without a selected stop");
 console.log("All public UI JavaScript checks passed.");
