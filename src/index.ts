@@ -3641,11 +3641,48 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (url.pathname === "/api/stoptimes") {
-    const stopId = url.searchParams.get("stopId");
-    if (!stopId || stopId.length > 200) return json({ error: "Geef een geldige stopId op." }, 400, headers);
+    const stopId = String(url.searchParams.get("stopId") ?? "").trim();
+    if (!stopId || stopId.length > 200) {
+      return json({ error: "Geef een geldige Transitous-stop-ID op." }, 400, headers);
+    }
+
+    const requestedCount = Number(url.searchParams.get("n") ?? 20);
+    const count = Number.isFinite(requestedCount)
+      ? Math.min(50, Math.max(1, Math.trunc(requestedCount)))
+      : 20;
     const upstream = new URL(`${TRANSITOUS}/stoptimes`);
     upstream.searchParams.set("stopId", stopId);
-    upstream.searchParams.set("n", String(Math.min(50, Math.max(1, Number(url.searchParams.get("n") ?? 20)))));
+    upstream.searchParams.set("n", String(count));
+
+    const booleanParams = ["arriveBy", "direction", "fetchStop", "withScheduledSkippedStops"];
+    for (const key of booleanParams) {
+      const value = url.searchParams.get(key);
+      if (value === null) continue;
+      if (value !== "true" && value !== "false") {
+        return json({ error: `Ongeldige waarde voor ${key}; gebruik true of false.` }, 400, headers);
+      }
+      upstream.searchParams.set(key, value);
+    }
+
+    const requestedTime = url.searchParams.get("time");
+    if (requestedTime) {
+      if (requestedTime.length > 64 || !Number.isFinite(Date.parse(requestedTime))) {
+        return json({ error: "Geef een geldige datum en tijd op." }, 400, headers);
+      }
+      upstream.searchParams.set("time", requestedTime);
+    }
+
+    const pageCursor = url.searchParams.get("pageCursor");
+    if (pageCursor !== null) {
+      if (!pageCursor.trim() || pageCursor.length > 512) {
+        return json({ error: "Ongeldige of te lange pagina-cursor." }, 400, headers);
+      }
+      upstream.searchParams.set("pageCursor", pageCursor);
+    }
+
+    const language = String(url.searchParams.get("language") ?? "nl").trim().slice(0, 20);
+    if (language) upstream.searchParams.set("language", language);
+
     try {
       const response = await fetch(upstream, {
         headers: {
@@ -3656,10 +3693,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       });
       return new Response(await response.text(), {
         status: response.status,
-        headers: { ...headers, "content-type": "application/json", "cache-control": "no-store" }
+        headers: {
+          ...headers,
+          "content-type": response.headers.get("content-type") ?? "application/json",
+          "cache-control": "no-store"
+        }
       });
     } catch (error) {
-      return json({ error: "Realtime vertrektijden tijdelijk niet beschikbaar." }, 502, headers);
+      return json({
+        error: "Haltevertrektijden tijdelijk niet beschikbaar.",
+        detail: error instanceof Error ? error.message : "Onbekende fout"
+      }, 502, headers);
     }
   }
 
