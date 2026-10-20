@@ -3731,13 +3731,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               const operatorName = openovAgencyNameForLine(routeMetadata, line, operatorCode) ||
                 String(actual.OperatorName ?? meta.OperatorName ?? operatorCode ?? "").trim();
               const mode = String(actual.TransportType ?? meta.TransportType ?? "").trim();
-              const expectedTime = String(
-                actual.ExpectedDepartureTime ?? actual.ExpectedArrivalTime ??
-                actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
-              ).trim();
+              const expectedDepartureTime = String(actual.ExpectedDepartureTime ?? "").trim();
+              const expectedArrivalTime = String(actual.ExpectedArrivalTime ?? "").trim();
               const targetTime = String(
-                actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
+                expectedDepartureTime
+                  ? actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
+                  : expectedArrivalTime
+                    ? actual.TargetArrivalTime ?? actual.TargetDepartureTime ?? ""
+                    : actual.TargetDepartureTime ?? actual.TargetArrivalTime ?? ""
               ).trim();
+              const expectedTime = expectedDepartureTime || expectedArrivalTime || targetTime;
               const tripId = String(actualId ?? "");
               const currentStopCode = String(actual.UserStopCode ?? actual.TimingPointCode ?? "").trim();
               const permalink = operatorCode && vehicleNumber &&
@@ -3833,8 +3836,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           candidate.row.currentStopCode
         );
         candidate.row.stops = normalizedStops.stops;
-        if (candidate.row.numberOfCoaches == null) {
+        if (candidate.row.numberOfCoaches == null || String(candidate.row.numberOfCoaches).trim() === "") {
           candidate.row.numberOfCoaches = normalizedStops.numberOfCoaches;
+        }
+        if (candidate.row.blockCode == null || String(candidate.row.blockCode).trim() === "") {
+          candidate.row.blockCode = normalizedStops.blockCode;
         }
         candidate.row.stopCount = candidate.row.stops.length;
         const existing = results.get(candidate.unique);
