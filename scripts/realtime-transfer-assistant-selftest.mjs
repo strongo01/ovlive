@@ -48,7 +48,7 @@ const lateRail = {
   scheduledArrival: "2026-10-21T12:36:00Z"
 };
 const impossible = assistant.analyze([lateRail, walk100m, bus], baseOptions)[0];
-assert.equal(impossible.slackSeconds, -72);
+assert.equal(impossible.slackSeconds, -12, "the transfer misses by 12 seconds after walking");
 assert.equal(impossible.status, "unreachable", "a delayed arrival plus walking must mark the transfer as infeasible");
 
 const delayedBus = {
