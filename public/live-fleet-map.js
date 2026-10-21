@@ -67,6 +67,38 @@
     return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
   }
 
+  // MOTIS can return the same GTFS trip ID either with or without its
+  // service-date/start-time wrapper. Normalize only that wrapper; keep the
+  // underlying trip ID and, when present on both sides, its service instance.
+  function tripIdPartsForShape(value) {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    const match = raw.match(/^(\\d{8})_(\\d{1,2}:\\d{2}(?::\\d{2})?)_(.+)$/i);
+    if (!match) return { tripId: normalizedId(raw), serviceKey: null };
+
+    const [, serviceDate, rawTime, rawTripId] = match;
+    const [rawHour, minute, rawSecond] = rawTime.split(":");
+    const hour = rawHour.padStart(2, "0");
+    const second = String(rawSecond ?? "00").padStart(2, "0");
+    return {
+      tripId: normalizedId(rawTripId),
+      serviceKey: serviceDate + "_" + hour + ":" + minute + ":" + second
+    };
+  }
+
+  function tripIdMatchesForShape(candidateValue, requestedValue) {
+    const candidate = tripIdPartsForShape(candidateValue);
+    const requested = tripIdPartsForShape(requestedValue);
+    if (!candidate || !requested || !candidate.tripId ||
+        candidate.tripId !== requested.tripId) return false;
+
+    // A composite ID on either side is still useful when the other side only
+    // exposes the base GTFS trip ID. If both expose service-instance details,
+    // however, the date and start time must match exactly.
+    return !candidate.serviceKey || !requested.serviceKey ||
+      candidate.serviceKey === requested.serviceKey;
+  }
+
   function formatClock(value) {
     const milliseconds = typeof value === "number"
       ? (value > 1e12 ? value : value * 1000)
@@ -378,18 +410,34 @@
         throw new Error(payload?.error || ("De ritroute kon niet worden opgehaald (HTTP " + response.status + ")."));
       }
 
-      const geometries = payload.legs
-        .filter(candidate => {
-          const candidateRouteId = normalizedId(candidate?.routeId);
-          const candidateTripId = String(candidate?.tripId ?? "").trim();
-          return candidateRouteId === identity.routeId &&
-            (!candidateTripId || candidateTripId === identity.tripId) &&
-            routeModeMatches(vehicle.mode, candidate?.mode);
-        })
-        .map(candidate => routeCoordinates(candidate.legGeometry))
-        .filter(points => points.length > 1);
+      const candidates = payload.legs
+        .map(candidate => ({
+          candidateRouteId: normalizedId(candidate?.routeId),
+          candidateTripId: String(candidate?.tripId ?? "").trim(),
+          points: routeCoordinates(candidate?.legGeometry),
+          modeMatches: routeModeMatches(vehicle.mode, candidate?.mode)
+        }))
+        .filter(candidate => candidate.modeMatches && candidate.points.length > 1);
+
+      // Prefer a complete route + trip match. The /trip endpoint was queried
+      // with this exact vehicle trip ID, so MOTIS may safely be trusted when
+      // its returned leg exposes that same trip under another route ID alias.
+      // An explicit, different trip ID is never accepted as a route fallback.
+      const exactRouteAndTrip = candidates.filter(candidate =>
+        candidate.candidateRouteId === identity.routeId &&
+        (!candidate.candidateTripId ||
+          tripIdMatchesForShape(candidate.candidateTripId, identity.tripId))
+      );
+      const exactTrip = candidates.filter(candidate =>
+        candidate.candidateTripId &&
+        tripIdMatchesForShape(candidate.candidateTripId, identity.tripId)
+      );
+      const geometries = (exactRouteAndTrip.length ? exactRouteAndTrip : exactTrip)
+        .map(candidate => candidate.points);
       if (!geometries.length) {
-        throw new Error("Voor deze exacte rit is geen passende routevorm gevonden.");
+        throw new Error(payload.legs.length
+          ? "Transitous gaf routevormen terug, maar geen passende routevorm voor deze rit-ID en vervoersmodus."
+          : "Transitous heeft voor deze exacte rit geen routevorm teruggegeven.");
       }
       return geometries;
     })();
