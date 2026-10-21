@@ -57,7 +57,7 @@ assert.ok(script.includes("navigator.geolocation.getCurrentPosition") &&
 assert.ok(script.includes("startDate: String(row.startDate") &&
   script.includes("startTime: String(row.startTime") &&
   script.includes('fetch("/api/trip-shape?"') &&
-  script.includes('color: "#ef4444"') &&
+  script.includes('addLine(item.split.remaining, "#ef4444"') &&
   script.includes("showVehicleRoute(currentVehicle)"),
   "tapping an exact OpenOV vehicle must load and draw its route in red");
 assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
@@ -65,6 +65,32 @@ assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("const exactRouteAndTrip") &&
   script.includes("const exactTrip"),
   "the map must use normalized exact-trip matching and must not fall back to line-only matches");
+
+assert.ok(script.includes("state.routeLayer = L.featureGroup().addTo(state.map)") &&
+  script.includes("state.routeLayer.getBounds()"),
+  "the drawn route layer must support Leaflet getBounds()");
+assert.ok(script.includes('addLine(item.split.passed, "#9ca3af"') &&
+  script.includes('addLine(item.split.remaining, "#ef4444"') &&
+  script.includes('distanceMeters <= 1_500'),
+  "the route progress must shade the travelled segment grey only when the GPS point is close enough");
+
+const splitStart = script.indexOf("  function splitRouteAtPosition(points, vehiclePoint) {");
+const splitEnd = script.indexOf("  async function loadVehicleRouteGeometry(vehicle) {", splitStart);
+assert.ok(splitStart >= 0 && splitEnd > splitStart,
+  "the travelled-route split helper must exist independently of the DOM");
+const splitContext = vm.createContext({});
+new vm.Script(script.slice(splitStart, splitEnd) +
+  "\nglobalThis.splitRouteAtPosition = splitRouteAtPosition;").runInContext(splitContext);
+const progress = splitContext.splitRouteAtPosition(
+  [[52.0, 5.0], [52.01, 5.0], [52.02, 5.0]],
+  [52.015, 5.0001]
+);
+assert.ok(progress.distanceMeters < 20, "the GPS point should snap to the nearby route segment");
+assert.equal(progress.passed.length, 3, "the already-travelled prefix should end at the snapped position");
+assert.equal(progress.remaining.length, 2, "the remaining route should begin at the snapped position");
+assert.ok(Math.abs(progress.passed.at(-1)[0] - progress.remaining[0][0]) < 1e-8 &&
+  Math.abs(progress.passed.at(-1)[1] - progress.remaining[0][1]) < 1e-8,
+  "the grey and red segments must meet at the same snapped point");
 
 const helperStart = script.indexOf("  function normalizedId(value) {");
 const helperEnd = script.indexOf("  function formatClock(value) {", helperStart);
