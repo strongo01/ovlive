@@ -9,6 +9,8 @@ const blocks = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)]
   .filter((block) => block.source.length > 0);
 
 assert.ok(blocks.length > 0, "public/index.html must contain at least one inline JavaScript block");
+assert.ok(html.includes('<script src="/device-rate-limit.js"></script>'),
+  "the browser rate-limit helper must load before the application scripts");
 
 for (const block of blocks) {
   try {
