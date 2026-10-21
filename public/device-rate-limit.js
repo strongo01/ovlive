@@ -38,9 +38,20 @@
     }
   }
 
-  const deviceId = readOrCreate(window.localStorage) ||
-    readOrCreate(window.sessionStorage) ||
-    createId();
+  let deviceId = null;
+  try {
+    deviceId = readOrCreate(window.localStorage);
+  } catch {
+    // Some privacy modes deny even access to the storage object.
+  }
+  if (!deviceId) {
+    try {
+      deviceId = readOrCreate(window.sessionStorage);
+    } catch {
+      // The in-memory fallback below keeps the app usable without storage.
+    }
+  }
+  if (!deviceId) deviceId = createId();
 
   const nativeFetch = window.fetch.bind(window);
   window.fetch = function ovliveRateLimitedFetch(input, init) {
