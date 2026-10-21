@@ -30,6 +30,8 @@ interface Env {
   GEOAPIFY_API_KEY?: string;
   API_RATE_LIMITER?: ApiRateLimitBinding;
   PLAN_RATE_LIMITER?: ApiRateLimitBinding;
+  DEVICE_API_RATE_LIMITER?: ApiRateLimitBinding;
+  DEVICE_PLAN_RATE_LIMITER?: ApiRateLimitBinding;
 }
 
 const OPENOV = {
