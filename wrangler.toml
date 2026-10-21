@@ -16,14 +16,14 @@ APP_CONTACT = "newstapper@outlook.com"
 # TEMPORARY CONTROLLED NDOV SOAK TEST
 NDOV_AUTOCOLLECT = "true"
 
-# Publieke API-bescherming: limieten per client-IP en Cloudflare-locatie.
-# Deze limieten zijn aanvullend; ze vervangen geen Cloudflare WAF-monitoring.
+# Publieke API-bescherming. Browser-ID-limieten verbeteren eerlijk delen van een IP;
+# ruimere IP-limieten blijven als extra vangnet tegen misbruik bestaan.
 [[ratelimits]]
 name = "API_RATE_LIMITER"
 namespace_id = "202610140001"
 
   [ratelimits.simple]
-  limit = 60
+  limit = 1200
   period = 60
 
 [[ratelimits]]
@@ -31,7 +31,23 @@ name = "PLAN_RATE_LIMITER"
 namespace_id = "202610140002"
 
   [ratelimits.simple]
-  limit = 10
+  limit = 200
+  period = 60
+
+[[ratelimits]]
+name = "DEVICE_API_RATE_LIMITER"
+namespace_id = "202610210003"
+
+  [ratelimits.simple]
+  limit = 300
+  period = 60
+
+[[ratelimits]]
+name = "DEVICE_PLAN_RATE_LIMITER"
+namespace_id = "202610210004"
+
+  [ratelimits.simple]
+  limit = 50
   period = 60
 
 # Lokale NDOV-diagnosebridge. Deze endpoints accepteren alleen loopback-hosts.
