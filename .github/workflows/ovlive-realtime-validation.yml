@@ -91,7 +91,7 @@ jobs:
         run: npm run api:rate-limit-selftest
 
       - name: Public UI JavaScript syntax
-        run: node scripts/public-ui-syntax-selftest.mjs
+        run: node --check public/device-rate-limit.js && node scripts/public-ui-syntax-selftest.mjs
 
       - name: Realtime transfer assistant regression tests
         run: npm run transfer-assistant:selftest
