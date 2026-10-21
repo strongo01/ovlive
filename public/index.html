@@ -277,7 +277,30 @@
     .live-legend-segment{display:inline-block;width:16px;height:4px;background:#22c55e;border-radius:3px}
     @media(max-width:600px){.live-follow{padding:9px}.live-map{height:245px}.live-stop-row{gap:6px}.live-stop-times{font-size:11px}.live-stop-times strong{font-size:13px}}
 
-</style>
+
+    .realtime-transfer-assistant{margin:12px 0 16px;padding:13px;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:12px;background:rgba(251,146,60,.045)}
+    .transfer-assistant-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:15px;font-weight:850;margin:0 0 5px}
+    .transfer-assistant-intro,.transfer-assistant-note{font-size:12px;line-height:1.5;color:var(--muted);margin:5px 0 9px}
+    .transfer-advice-item{border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0;background:rgba(127,127,127,.035)}
+    .transfer-advice-item.is-missed,.transfer-advice-item.is-cancelled{border-color:rgba(252,165,165,.55)}
+    .transfer-advice-item.is-tight{border-color:rgba(250,204,21,.45)}
+    .transfer-advice-item.is-ok{border-color:rgba(134,239,172,.3)}
+    .transfer-advice-title{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;font-weight:850;font-size:13px}
+    .transfer-advice-stop{color:var(--muted);font-weight:500;font-size:12px;margin-top:2px}
+    .transfer-advice-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:7px;margin-top:9px}
+    .transfer-advice-fact{padding:7px 8px;border-radius:8px;background:rgba(127,127,127,.09);min-width:0;font-size:12px}
+    .transfer-advice-fact strong{display:block;font-size:13px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+    .transfer-advice-fact small{display:block;color:var(--muted);font-size:10px;line-height:1.35;margin-top:2px}
+    .transfer-advice-message{font-size:12px;line-height:1.45;margin:9px 0 0}
+    .transfer-advice-message.is-missed,.transfer-advice-message.is-cancelled{color:var(--red)}
+    .transfer-advice-message.is-tight{color:#facc15}
+    .transfer-advice-message.is-ok{color:var(--green)}
+    .transfer-alternative{border-top:1px solid var(--line);margin-top:9px;padding-top:8px}
+    .transfer-alternative button{width:auto;max-width:100%;margin:4px 0 0;padding:8px 10px;font-size:12px;background:#303842;color:var(--text)}
+    .transfer-assistant-basis{display:inline-block;border:1px solid var(--line);border-radius:7px;padding:2px 6px;font-size:10px;color:var(--muted);font-weight:700}
+    @media(max-width:600px){.realtime-transfer-assistant{padding:10px}.transfer-advice-facts{grid-template-columns:1fr 1fr}}
+
+  </style>
 </head>
 <body>
 <main>
@@ -485,6 +508,7 @@
 
   <footer class="source">Bronnen: <a href="https://openov.nl/" target="_blank" rel="noreferrer">openOV</a> · <a href="https://transitous.org/sources/" target="_blank" rel="noreferrer">Transitous-bronnen</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap</a>. Realtime-data is best-effort en kan ontbreken of verouderd zijn.</footer>
 </main>
+<script src="/realtime-transfer-assistant.js"></script>
 <script>
 // OVLIVE_OPENOV_CONFIDENCE_HOTFIX_V1
 const $ = id => document.getElementById(id);
@@ -542,8 +566,10 @@ $('tightTransferBtn').addEventListener('click', () => {
   button.setAttribute('aria-pressed', String(enabled));
   button.textContent = enabled ? '⚡ Krappe overstappen: aan' : '⚡ Krappe overstappen: uit';
   $('tightTransferHelp').textContent = enabled
-    ? 'Ingeschakeld: OVLive zoekt aanvullend op de dienstregeling, zonder realtime vertragingen mee te nemen bij het vinden van routes. Aansluitingen met maximaal 2 minuten vrije overstaptijd worden gemarkeerd als riskant.'
-    : 'Optioneel: zoek ook op de dienstregeling naar aansluitingen met maximaal 2 minuten vrije overstaptijd. Die overstappen zijn riskant; realtime-informatie blijft apart zichtbaar.';
+    ? 'Ingeschakeld: zoek extra dienstregelingsroutes met maximaal 2 minuten vrije overstaptijd. De slimme assistent beoordeelt ze daarna met looptijd en beschikbare realtimeprognoses.'
+    : 'Optioneel: zoek ook extra routes met maximaal 2 minuten vrije overstaptijd. De assistent blijft zichtbare overstappen op looptijd en realtimeprognoses controleren.';
+  if (window.__ovliveHasPlanResults === true) window.__ovliveTightToggleNeedsSearch = true;
+  refreshRealtimeTransferAssistants();
 });
 $('fromFind').onclick = () => findPlaces('from','fromChoice','planStatus');
 $('toFind').onclick = () => findPlaces('to','toChoice','planStatus');
@@ -3658,6 +3684,254 @@ function journeyHasTightTransfer(journey, walkingSpeedKmh = selectedWalkingSpeed
   return journeyTightTransferSlackSeconds(journey, walkingSpeedKmh) !== null;
 }
 
+function transferAssistantDurationText(value) {
+  if (!Number.isFinite(Number(value))) return "onbekend";
+  const seconds = Math.round(Number(value));
+  const absolute = Math.abs(seconds);
+  const minutes = Math.floor(absolute / 60);
+  const remainder = absolute % 60;
+  const duration = minutes > 0
+    ? minutes + " min" + (remainder ? " " + remainder + " sec" : "")
+    : remainder + " sec";
+  return seconds < 0 ? duration + " tekort" : duration;
+}
+
+function transferAssistantOptions(nowMs = Date.now()) {
+  const settings = window.__ovliveActiveWalkSettings ?? {
+    walkingSpeedKmh: selectedWalkingSpeedKmh()
+  };
+  return {
+    nowMs,
+    walkingSpeedKmh: settings.walkingSpeedKmh,
+    plannedEndpointTime,
+    timelineRealtimePrediction,
+    walkingDurationSeconds
+  };
+}
+
+function transferAssistantSameRouteEndpoints(leftLegs, rightLegs) {
+  const nonTransit = new Set(["WALK", "WAIT", "TRANSFER"]);
+  const left = (Array.isArray(leftLegs) ? leftLegs : []).filter(leg =>
+    !nonTransit.has(String(leg?.mode ?? "").toUpperCase())
+  );
+  const right = (Array.isArray(rightLegs) ? rightLegs : []).filter(leg =>
+    !nonTransit.has(String(leg?.mode ?? "").toUpperCase())
+  );
+  if (!left.length || !right.length) return false;
+  const assistant = window.OVLiveRealtimeTransferAssistant;
+  return Boolean(assistant &&
+    assistant.samePlace(left[0]?.from, right[0]?.from) &&
+    assistant.samePlace(left[left.length - 1]?.to, right[right.length - 1]?.to));
+}
+
+function findRealtimeTransferAlternative(currentTrackingIndex, transfer, options) {
+  const assistant = window.OVLiveRealtimeTransferAssistant;
+  const current = window.__ovliveTrackingJourneys?.[currentTrackingIndex];
+  if (!assistant || !current?.legs || !transfer?.nextLeg?.from ||
+      !Number.isFinite(transfer.departureMs)) return null;
+  const routes = window.__ovliveTrackingJourneys ?? [];
+  const candidates = [];
+  const nowMs = options.nowMs;
+
+  for (let index = 0; index < routes.length; index += 1) {
+    if (index === currentTrackingIndex) continue;
+    const route = routes[index];
+    if (!Array.isArray(route?.legs) ||
+        !transferAssistantSameRouteEndpoints(current.legs, route.legs)) continue;
+
+    const assessments = assistant.analyze(route.legs, options);
+    for (const candidate of assessments) {
+      if (candidate.status !== "feasible" ||
+          !Number.isFinite(candidate.slackSeconds) ||
+          candidate.slackSeconds <= 120 ||
+          !assistant.samePlace(transfer.nextLeg.from, candidate.nextLeg?.from)) continue;
+      if (!Number.isFinite(candidate.departureMs) ||
+          candidate.departureMs <= Math.max(transfer.departureMs + 15000, nowMs)) continue;
+      candidates.push({
+        trackingIndex: index,
+        transfer: candidate,
+        line: lineTitle(candidate.nextLeg)
+      });
+    }
+  }
+
+  candidates.sort((left, right) =>
+    left.transfer.departureMs - right.transfer.departureMs ||
+    right.transfer.slackSeconds - left.transfer.slackSeconds
+  );
+  return candidates[0] ?? null;
+}
+
+function renderRealtimeTransferAssistant(legs, trackingIndex, tightTransferCandidate = false) {
+  const assistant = window.OVLiveRealtimeTransferAssistant;
+  if (!assistant) {
+    return '<section class="realtime-transfer-assistant"><div class="transfer-assistant-heading">🧠 Slimme realtime-overstapassistent</div><p class="transfer-assistant-note">De overstapanalyse is niet geladen; de reisplanner blijft werken.</p></section>';
+  }
+
+  const options = transferAssistantOptions();
+  const transfers = assistant.analyze(legs, options);
+  const settingsButton = $("tightTransferBtn");
+  const selectedTightOption = settingsButton?.getAttribute("aria-pressed") === "true";
+  const searchTightOption = window.__ovliveActiveTightTransferSearch === true;
+  const optionChanged = window.__ovliveTightToggleNeedsSearch === true;
+
+  if (!transfers.length) {
+    return '<section class="realtime-transfer-assistant"><div class="transfer-assistant-heading">🧠 Slimme realtime-overstapassistent</div><p class="transfer-assistant-note">Deze route heeft geen overstap tussen OV-ritten om te beoordelen.</p></section>';
+  }
+
+  const notes = [];
+  if (optionChanged || selectedTightOption !== searchTightOption) {
+    notes.push("De instelling ‘Krappe overstappen’ is gewijzigd sinds deze routes zijn opgehaald. Klik op ‘Zoek reizen’ om de extra routezoektocht opnieuw uit te voeren.");
+  } else if (searchTightOption) {
+    notes.push("De extra zoekronde voor krappe overstappen is gebruikt. Elke aansluiting hieronder wordt apart op looptijd en beschikbare realtimeprognoses beoordeeld.");
+  } else {
+    notes.push("Zet ‘Krappe overstappen’ aan en zoek opnieuw om extra dienstregelingsroutes met weinig overstaptijd mee te nemen.");
+  }
+  notes.push("De beoordeling wordt bijgewerkt wanneer de bestaande realtimecontrole nieuwe gegevens ontvangt. Geen verse, exacte prognose betekent niet dat een rit op tijd is.");
+
+  const transferHtml = transfers.map(transfer => {
+    let state = "is-unknown";
+    let label = "Niet betrouwbaar te beoordelen";
+    let message = "";
+    if (transfer.status === "cancelled") {
+      state = "is-cancelled";
+      label = "⛔ Rituitval gemeld";
+      message = "Een van de ritdelen heeft een expliciete annulering. Reken niet op deze aansluiting; bekijk een andere reisoptie.";
+    } else if (transfer.status === "unreachable") {
+      state = "is-missed";
+      label = "❌ Aansluiting lijkt niet haalbaar";
+      if (transfer.timeBasis === "realtime") {
+        message = "Op basis van de beschikbare realtimeverwachtingen is er niet genoeg tijd om aan te komen, te lopen en in te stappen.";
+      } else if (transfer.timeBasis === "partial-realtime") {
+        message = "De gedeeltelijke realtime-informatie wijst erop dat de looptijd niet meer in de resterende tijd past. Eén van de tijden is nog volgens de dienstregeling.";
+      } else {
+        message = "De beschikbare tijden laten onvoldoende ruimte zien. Dit is alleen een dienstregelingsberekening, geen bevestigde live-inschatting.";
+      }
+    } else if (transfer.status === "tight") {
+      state = "is-tight";
+      label = "⚠ Krappe overstap";
+      message = "Er blijft maar " + transferAssistantDurationText(transfer.slackSeconds) +
+        " over na het berekende lopen. Ga direct naar de juiste halte of het juiste perron; een perronwissel of instaptijd kan extra tijd kosten.";
+    } else if (transfer.status === "feasible") {
+      state = "is-ok";
+      label = "✓ Tijd lijkt haalbaar";
+      message = "Er blijft " + transferAssistantDurationText(transfer.slackSeconds) +
+        " over na de berekende looptijd. Dit is een inschatting, geen garantie; controleer het vertrekbord.";
+    } else {
+      message = transfer.walkingKnown
+        ? "De aankomst- of vertrektijd ontbreekt, waardoor OVLive de aansluiting niet betrouwbaar kan beoordelen."
+        : "De route bevat geen betrouwbare looptijd voor deze haltewissel. OVLive neemt geen nul seconden lopen aan en noemt de aansluiting daarom niet haalbaar.";
+    }
+
+    const arrivalSource = transfer.arrivalPrediction
+      ? "realtime · " + transfer.arrivalPrediction.source
+      : "dienstregeling · live niet bevestigd";
+    const departureSource = transfer.departurePrediction
+      ? "realtime · " + transfer.departurePrediction.source
+      : "dienstregeling · live niet bevestigd";
+    const walkingLabel = transfer.walkingKnown
+      ? transferAssistantDurationText(transfer.walkingSeconds)
+      : "onbekend";
+    let walkingDetail = "";
+    if (!transfer.walkingKnown) {
+      walkingDetail = "Geen bruikbaar loopdeel met afstand/tijd en geen exacte gelijke halte-ID.";
+    } else if (!transfer.hasWalkingLeg) {
+      walkingDetail = "Geen apart loopdeel in de route; beide ritdelen verwijzen naar dezelfde halte.";
+    } else if (Number.isFinite(transfer.walkingDistanceMeters)) {
+      const speed = Number(options.walkingSpeedKmh);
+      walkingDetail = Math.round(transfer.walkingDistanceMeters) + " m · " +
+        speed.toLocaleString("nl-NL", { maximumFractionDigits: 1 }) + " km/u";
+    } else {
+      walkingDetail = "Gebaseerd op de beschikbare looptijd in de route.";
+    }
+
+    const title = lineTitle(transfer.previousLeg) + " → " + lineTitle(transfer.nextLeg);
+    const stopName = transfer.stop?.name ?? transfer.stop?.displayName ?? "Overstaphalte niet opgegeven";
+    const slack = Number.isFinite(transfer.slackSeconds)
+      ? transferAssistantDurationText(transfer.slackSeconds)
+      : "onbekend";
+    let alternativeHtml = "";
+    if (transfer.status === "unreachable" || transfer.status === "tight") {
+      const alternative = findRealtimeTransferAlternative(trackingIndex, transfer, options);
+      if (alternative) {
+        alternativeHtml = '<div class="transfer-alternative"><div class="transfer-assistant-note">Andere getoonde reisoptie heeft op dezelfde overstaphalte meer dan twee minuten ruimte na het lopen.</div><button type="button" data-transfer-alt-index="' +
+          alternative.trackingIndex + '">Bekijk alternatief: ' + esc(alternative.line) +
+          ' · vertrek ' + esc(clock(alternative.transfer.departureTime)) + '</button></div>';
+      } else if (transfer.status === "unreachable") {
+        alternativeHtml = '<div class="transfer-alternative"><div class="transfer-assistant-note">' +
+          (searchTightOption
+            ? "Geen duidelijk haalbare latere aansluiting gevonden in de nu getoonde routes. Laad extra reizen of controleer andere reisopties."
+            : "Geen duidelijk haalbare latere aansluiting gevonden in de nu getoonde routes. Zet ‘Krappe overstappen’ aan en zoek opnieuw voor extra alternatieven.") +
+          '</div></div>';
+      }
+    }
+
+    const basis = transfer.timeBasis === "realtime"
+      ? "2 live tijden"
+      : transfer.timeBasis === "partial-realtime"
+        ? "1 live tijd"
+        : "alleen dienstregeling";
+    const tightSearchLabel = tightTransferCandidate
+      ? '<span class="transfer-assistant-basis">extra krappe-routezoektocht</span>'
+      : "";
+
+    return '<article class="transfer-advice-item ' + state + '">' +
+      '<div class="transfer-advice-title"><div>' + esc(title) +
+        '<div class="transfer-advice-stop">' + esc(stopName) + '</div></div>' +
+        '<span class="transfer-assistant-basis">' + esc(label) + '</span></div>' +
+      '<div class="transfer-advice-facts">' +
+        '<div class="transfer-advice-fact">🚆 Aankomst<strong>' + esc(clock(transfer.arrivalTime)) +
+          '</strong><small>' + esc(arrivalSource) + '</small></div>' +
+        '<div class="transfer-advice-fact">🚶 Berekende looptijd<strong>' + esc(walkingLabel) +
+          '</strong><small>' + esc(walkingDetail) + '</small></div>' +
+        '<div class="transfer-advice-fact">🚌 Volgend vertrek<strong>' + esc(clock(transfer.departureTime)) +
+          '</strong><small>' + esc(departureSource) + '</small></div>' +
+        '<div class="transfer-advice-fact">⏱ Ruimte ná het lopen<strong>' + esc(slack) +
+          '</strong><small>' + esc(basis) + '</small></div>' +
+      '</div>' +
+      '<p class="transfer-advice-message ' + state + '">' + esc(message) + '</p>' +
+      tightSearchLabel + alternativeHtml +
+    '</article>';
+  }).join("");
+
+  return '<section class="realtime-transfer-assistant" aria-label="Slimme realtime-overstapassistent">' +
+    '<div class="transfer-assistant-heading">🧠 Slimme realtime-overstapassistent</div>' +
+    '<p class="transfer-assistant-intro">OVLive vergelijkt aankomst, looptijd en het volgende vertrek. De analyse gebruikt de ingestelde loopsnelheid (' +
+      Number(options.walkingSpeedKmh).toLocaleString("nl-NL", { maximumFractionDigits: 1 }) +
+      ' km/u) en wordt met de bestaande realtimecontrole ververst.</p>' +
+    transferHtml +
+    '<p class="transfer-assistant-note">' + notes.map(esc).join(" ") +
+      ' Realtimevertragingen worden niet gebruikt om een onbetrouwbare halteprognose als bevestigd te behandelen.</p>' +
+  '</section>';
+}
+
+function refreshRealtimeTransferAssistants() {
+  const assistant = window.OVLiveRealtimeTransferAssistant;
+  const root = $("journeys");
+  if (!assistant || !root) return;
+  root.querySelectorAll("[data-transfer-assistant-panel]").forEach(panel => {
+    const trackingIndex = Number(panel.getAttribute("data-tracking-index"));
+    const route = window.__ovliveTrackingJourneys?.[trackingIndex];
+    if (!Number.isInteger(trackingIndex) || !Array.isArray(route?.legs)) return;
+    panel.innerHTML = renderRealtimeTransferAssistant(
+      route.legs, trackingIndex, route.tightTransferCandidate === true
+    );
+  });
+}
+
+$("journeys")?.addEventListener("click", event => {
+  const button = event.target?.closest?.("button[data-transfer-alt-index]");
+  if (!button) return;
+  const trackingIndex = Number(button.getAttribute("data-transfer-alt-index"));
+  if (!Number.isInteger(trackingIndex)) return;
+  const target = document.querySelector(
+    'details.journey-card[data-tracking-index="' + trackingIndex + '"]'
+  );
+  if (!target) return;
+  target.open = true;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+
 function buildRealtimeRefreshBaseline(plan) {
   const baseline = JSON.parse(JSON.stringify(plan));
   delete baseline.openovRealtimeMeta;
@@ -3836,6 +4110,8 @@ async function refreshLivePlanRealtime(generation = livePlanRealtimeGeneration) 
       if (liveStops) liveStops.innerHTML = renderLiveJourneyStopTimeline(legs);
       updateJourneyRealtimeSummary(card, legs);
     }
+
+    refreshRealtimeTransferAssistants();
 
     const checkedAt = new Date().toLocaleTimeString('nl-NL', {
       hour: '2-digit', minute: '2-digit', second: '2-digit'
@@ -4545,7 +4821,7 @@ function renderJourneyCard(journey, index, walkSettings) {
         ? timelineRealtimePrediction(firstTransitLeg, 'departure', firstScheduledDeparture)
         : null;
       window.__ovliveDisplayedItineraryKeys[index] = itineraryRealtimeKey(journey);
-      window.__ovliveTrackingJourneys[index] = { legs: legs.map(trackingLegCopy) };
+      window.__ovliveTrackingJourneys[index] = { legs: legs.map(trackingLegCopy), tightTransferCandidate: journey.ovliveTightTransferCandidate === true };
       const tightTransferBadge = journey.ovliveTightTransferCandidate === true
         ? '<span class="journey-tight-transfer-tag">⚡ Krappe overstap</span>'
         : '';
@@ -4616,6 +4892,7 @@ function renderJourneyCard(journey, index, walkSettings) {
           </div>
         </summary>
         <div class="journey-detail-body">
+          <div data-transfer-assistant-panel data-tracking-index="${index}"></div>
           ${tightTransferWarningHtml}${trackingPanel}
           <div class="journey-detail-heading"><strong>Route en haltegegevens</strong><span>Realtime alleen waar bevestigd</span></div>
           <div class="journey-leg-details">${legs.map((leg, legIndex) => renderLeg(leg, legIndex, legs)).join('') || '<p>Deze reis bevat geen afzonderlijke reisdelen.</p>'}</div>
@@ -4829,6 +5106,7 @@ async function loadMoreJourneys(direction) {
     bindLiveJourneyCards();
     bindNsTrainDetailsButtons(list);
 
+    refreshRealtimeTransferAssistants();
     const sortControl = document.getElementById('journeySort');
     sortJourneyCards(sortControl?.value || 'departure');
 
@@ -4874,6 +5152,9 @@ $('planBtn').onclick = async () => {
 
   try {
     const tightTransferSearchEnabled = $('tightTransferBtn').getAttribute('aria-pressed') === 'true';
+    window.__ovliveActiveTightTransferSearch = tightTransferSearchEnabled;
+    window.__ovliveTightToggleNeedsSearch = false;
+    window.__ovliveHasPlanResults = false;
     const q = new URLSearchParams({
       fromPlace: resolvePlace('from', 'fromChoice'),
       toPlace: resolvePlace('to', 'toChoice')
@@ -5258,8 +5539,11 @@ q.set('pedestrianSpeed', '1.5');
       `<div id="cancelled-trips-container" aria-live="polite"></div>` +
       renderAlerts(data.openovAlerts || []) +
       `<details class="result-diagnostics"><summary>Realtimebronnen en technische status</summary><div class="result-diagnostics-body"><p class="muted" id="realtime-plan-diagnostic-status">${esc(diagnosticPlanStatus)}</p><div id="realtime-feed-info">${feedInfo}</div>${renderRealtimeLegend()}</div></details>`;
+    window.__ovliveHasPlanResults = true;
+    window.__ovliveTightToggleNeedsSearch = false;
     bindLiveJourneyCards();
     bindNsTrainDetailsButtons();
+    refreshRealtimeTransferAssistants();
     const journeySort = document.getElementById('journeySort');
     if (journeySort) {
       journeySort.addEventListener('change', () => sortJourneyCards(journeySort.value));
