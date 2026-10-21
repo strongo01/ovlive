@@ -61,8 +61,34 @@ assert.ok(script.includes("startDate: String(row.startDate") &&
   script.includes("showVehicleRoute(currentVehicle)"),
   "tapping an exact OpenOV vehicle must load and draw its route in red");
 assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
-  script.includes("candidateTripId === identity.tripId"),
-  "the map must not guess a route from a line number or a different trip");
+  script.includes("function tripIdMatchesForShape") &&
+  script.includes("const exactRouteAndTrip") &&
+  script.includes("const exactTrip"),
+  "the map must use normalized exact-trip matching and must not fall back to line-only matches");
+
+const helperStart = script.indexOf("  function normalizedId(value) {");
+const helperEnd = script.indexOf("  function formatClock(value) {", helperStart);
+assert.ok(helperStart >= 0 && helperEnd > helperStart,
+  "the live map must keep trip ID normalization helpers together");
+const helperContext = vm.createContext({});
+new vm.Script(script.slice(helperStart, helperEnd) +
+  "\nglobalThis.tripIdMatchesForShape = tripIdMatchesForShape;").runInContext(helperContext);
+assert.equal(helperContext.tripIdMatchesForShape(
+  "20261021_18:30_nl-OpenOV_380014114",
+  "20261021_18:30:00_nl-OpenOV_380014114"
+), true, "an omitted :00 seconds component should still identify the same trip");
+assert.equal(helperContext.tripIdMatchesForShape(
+  "nl-OpenOV_380014114",
+  "20261021_18:30:00_nl-OpenOV_380014114"
+), true, "the same base GTFS trip ID can match when MOTIS omits the service wrapper");
+assert.equal(helperContext.tripIdMatchesForShape(
+  "20261021_18:31_nl-OpenOV_380014114",
+  "20261021_18:30_nl-OpenOV_380014114"
+), false, "a different service start time must not match");
+assert.equal(helperContext.tripIdMatchesForShape(
+  "20261021_18:30_nl-OpenOV_999999999",
+  "20261021_18:30_nl-OpenOV_380014114"
+), false, "a different GTFS trip must never match");
 
 assert.ok(worker.includes('url.pathname === "/api/live-map/openov"') &&
   worker.includes("handleLiveMapOpenovApi") &&
