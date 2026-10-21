@@ -5,6 +5,8 @@ export type ApiRateLimitBinding = {
 type ApiRateLimitEnv = {
   API_RATE_LIMITER?: ApiRateLimitBinding;
   PLAN_RATE_LIMITER?: ApiRateLimitBinding;
+  DEVICE_API_RATE_LIMITER?: ApiRateLimitBinding;
+  DEVICE_PLAN_RATE_LIMITER?: ApiRateLimitBinding;
 };
 
 type JsonHeaders = Record<string, string>;
@@ -64,19 +66,31 @@ export async function enforcePublicApiRateLimit(
     );
   }
 
-  // Route planning is user-triggered and uses the stricter quota.
-  // /api/realtime-refresh is a background poll every 10 seconds; it stays
-  // protected by the common API limiter but must not consume the plan quota.
+  // Browser IDs improve fairness for people sharing one public IP address.
+  // They are pseudonymous client identifiers, not authentication credentials.
+  const rawDeviceId = request.headers.get("x-ovlive-device-id")?.trim() ?? "";
+  const deviceId = /^[A-Za-z0-9_-]{16,128}$/.test(rawDeviceId)
+    ? rawDeviceId
+    : null;
+
+  // Route planning consumes both the common API quota and the separate plan quota.
+  // The 10-second realtime poll is protected by common quotas only.
   const isJourneyPlanRequest = url.pathname === "/api/plan";
 
   if (!env.API_RATE_LIMITER ||
-      (isJourneyPlanRequest && !env.PLAN_RATE_LIMITER)) {
+      (isJourneyPlanRequest && !env.PLAN_RATE_LIMITER) ||
+      (deviceId !== null && !env.DEVICE_API_RATE_LIMITER) ||
+      (isJourneyPlanRequest && deviceId !== null && !env.DEVICE_PLAN_RATE_LIMITER)) {
     console.error("[OVLIVE_API_RATE_LIMIT]", JSON.stringify({
       path: url.pathname,
       outcome: "missing_binding",
       apiLimiterConfigured: Boolean(env.API_RATE_LIMITER),
       planLimiterRequired: isJourneyPlanRequest,
-      planLimiterConfigured: Boolean(env.PLAN_RATE_LIMITER)
+      planLimiterConfigured: Boolean(env.PLAN_RATE_LIMITER),
+      deviceIdPresent: deviceId !== null,
+      deviceApiLimiterConfigured: Boolean(env.DEVICE_API_RATE_LIMITER),
+      devicePlanLimiterRequired: isJourneyPlanRequest && deviceId !== null,
+      devicePlanLimiterConfigured: Boolean(env.DEVICE_PLAN_RATE_LIMITER)
     }));
     return errorResponse(
       "De API-beveiliging is niet volledig geconfigureerd.",
@@ -86,33 +100,63 @@ export async function enforcePublicApiRateLimit(
   }
 
   try {
-    const common = await env.API_RATE_LIMITER.limit({
-      key: `client:${clientIp}`
+    // Wider IP-based ceiling prevents a shared network from being blocked by
+    // normal household/school use. A tighter browser-ID quota improves fairness.
+    const commonIp = await env.API_RATE_LIMITER.limit({
+      key: "client:" + clientIp
     });
-    if (!common.success) {
+    if (!commonIp.success) {
       return errorResponse(
-        "Te veel API-aanvragen. Probeer het over een minuut opnieuw.",
+        "Te veel API-aanvragen vanaf dit netwerk. Probeer het over een minuut opnieuw.",
         429,
         headers,
         60
       );
     }
 
-    if (isJourneyPlanRequest) {
-      const plan = await env.PLAN_RATE_LIMITER!.limit({
-        key: `client:${clientIp}`
+    if (deviceId !== null) {
+      const commonDevice = await env.DEVICE_API_RATE_LIMITER!.limit({
+        key: "device:" + deviceId
       });
-      if (!plan.success) {
+      if (!commonDevice.success) {
         return errorResponse(
-          "Er zijn te veel reisplanningen aangevraagd. Probeer het over een minuut opnieuw.",
+          "Dit browserprofiel heeft te veel API-aanvragen gedaan. Probeer het over een minuut opnieuw.",
           429,
           headers,
           60
         );
       }
     }
+
+    if (isJourneyPlanRequest) {
+      const planIp = await env.PLAN_RATE_LIMITER!.limit({
+        key: "client:" + clientIp
+      });
+      if (!planIp.success) {
+        return errorResponse(
+          "Er zijn te veel reisplanningen vanaf dit netwerk aangevraagd. Probeer het over een minuut opnieuw.",
+          429,
+          headers,
+          60
+        );
+      }
+
+      if (deviceId !== null) {
+        const planDevice = await env.DEVICE_PLAN_RATE_LIMITER!.limit({
+          key: "device:" + deviceId
+        });
+        if (!planDevice.success) {
+          return errorResponse(
+            "Dit browserprofiel heeft te veel reisplanningen aangevraagd. Probeer het over een minuut opnieuw.",
+            429,
+            headers,
+            60
+          );
+        }
+      }
+    }
   } catch (error) {
-    // Fail closed: upstream-aanvragen niet uitvoeren als de limiter faalt.
+    // Fail closed: do not call upstream APIs if a configured limiter fails.
     console.error("[OVLIVE_API_RATE_LIMIT]", JSON.stringify({
       path: url.pathname,
       outcome: "limiter_exception",
@@ -124,6 +168,5 @@ export async function enforcePublicApiRateLimit(
       headers
     );
   }
-
   return null;
 }
