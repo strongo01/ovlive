@@ -385,6 +385,65 @@
     return result;
   }
 
+  function splitRouteAtPosition(points, vehiclePoint) {
+    if (!Array.isArray(points) || points.length < 2 ||
+        !Array.isArray(vehiclePoint) || vehiclePoint.length < 2 ||
+        !vehiclePoint.every(Number.isFinite)) {
+      return { distanceMeters: Infinity, passed: [], remaining: points || [] };
+    }
+
+    // For these short distances, an equirectangular projection is accurate
+    // enough to find the closest route segment without a geometry dependency.
+    const latitudeScale = 111_132;
+    const longitudeScale = 111_320 * Math.cos(vehiclePoint[0] * Math.PI / 180);
+    const project = point => [point[1] * longitudeScale, point[0] * latitudeScale];
+    const target = project(vehiclePoint);
+    let best = { distanceSquared: Infinity, segmentIndex: 0, t: 0, point: points[0] };
+
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const a = project(points[i]);
+      const b = project(points[i + 1]);
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const lengthSquared = dx * dx + dy * dy;
+      const t = lengthSquared > 0
+        ? Math.max(0, Math.min(1, ((target[0] - a[0]) * dx +
+          (target[1] - a[1]) * dy) / lengthSquared))
+        : 0;
+      const projected = [a[0] + dx * t, a[1] + dy * t];
+      const distanceSquared = (target[0] - projected[0]) ** 2 +
+        (target[1] - projected[1]) ** 2;
+      if (distanceSquared < best.distanceSquared) {
+        best = {
+          distanceSquared,
+          segmentIndex: i,
+          t,
+          point: [
+            points[i][0] + (points[i + 1][0] - points[i][0]) * t,
+            points[i][1] + (points[i + 1][1] - points[i][1]) * t
+          ]
+        };
+      }
+    }
+
+    const samePoint = (left, right) =>
+      Math.abs(left[0] - right[0]) < 1e-8 &&
+      Math.abs(left[1] - right[1]) < 1e-8;
+    const passed = points.slice(0, best.segmentIndex + 1);
+    if (!samePoint(passed[passed.length - 1], best.point)) passed.push(best.point);
+
+    const remaining = [best.point];
+    for (const point of points.slice(best.segmentIndex + 1)) {
+      if (!samePoint(remaining[remaining.length - 1], point)) remaining.push(point);
+    }
+
+    return {
+      distanceMeters: Math.sqrt(best.distanceSquared),
+      passed,
+      remaining
+    };
+  }
+
   async function loadVehicleRouteGeometry(vehicle) {
     const identity = vehicleRouteIdentity(vehicle);
     if (!identity) {
@@ -468,21 +527,56 @@
     try {
       const geometries = await loadVehicleRouteGeometry(vehicle);
       if (token !== state.routeRequestToken || state.selectedRouteKey !== vehicle.key) return;
-      for (const points of geometries) {
+      const vehiclePoint = [finiteNumber(vehicle.latitude), finiteNumber(vehicle.longitude)];
+      const splits = geometries.map(points => ({
+        points,
+        split: splitRouteAtPosition(points, vehiclePoint)
+      }));
+      let closestIndex = -1;
+      for (let i = 0; i < splits.length; i += 1) {
+        if (closestIndex < 0 ||
+            splits[i].split.distanceMeters < splits[closestIndex].split.distanceMeters) {
+          closestIndex = i;
+        }
+      }
+
+      const addLine = (points, color, opacity, weight) => {
+        if (!Array.isArray(points) || points.length < 2) return;
         window.L.polyline(points, {
-          color: "#ef4444",
-          weight: 5,
-          opacity: 0.96,
+          color,
+          weight,
+          opacity,
           lineCap: "round",
           lineJoin: "round",
           interactive: false
         }).addTo(state.routeLayer);
+      };
+
+      const closest = closestIndex >= 0 ? splits[closestIndex] : null;
+      const canSplitProgress = Boolean(closest &&
+        closest.split.distanceMeters <= 1_500 &&
+        closest.split.passed.length > 1);
+
+      for (let i = 0; i < splits.length; i += 1) {
+        const item = splits[i];
+        if (i === closestIndex && canSplitProgress) {
+          addLine(item.split.passed, "#9ca3af", 0.82, 5);
+          addLine(item.split.remaining, "#ef4444", 0.97, 5);
+        } else {
+          addLine(item.points, "#ef4444", 0.97, 5);
+        }
       }
+
+      // FeatureGroup supports getBounds(); LayerGroup does not in Leaflet.
       const bounds = state.routeLayer.getBounds();
       if (bounds.isValid()) {
         state.map.fitBounds(bounds, { padding: [28, 28], maxZoom: 13 });
       }
-      state.routeStatus = "🔴 Rode lijn = route van deze specifieke rit volgens de dienstregeling.";
+      state.routeStatus = canSplitProgress
+        ? (closest.split.remaining.length > 1
+          ? "⚪ Grijs = afgelegd deel (geschat vanaf GPS); 🔴 rood = resterende route."
+          : "⚪ Grijs = afgelegd deel; de trein/bus bevindt zich bij het einde van de route.")
+        : "🔴 Rood = route van deze rit. De GPS-positie ligt te ver van de route of dicht bij het begin om het afgelegde deel betrouwbaar grijs te markeren.";
     } catch (error) {
       if (token !== state.routeRequestToken || state.selectedRouteKey !== vehicle.key) return;
       state.routeStatus = error instanceof Error ? error.message : "De ritroute kon niet worden getoond.";
@@ -792,7 +886,7 @@
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
       }).addTo(state.map);
       state.layer = L.layerGroup().addTo(state.map);
-      state.routeLayer = L.layerGroup().addTo(state.map);
+      state.routeLayer = L.featureGroup().addTo(state.map);
       attachMyLocationButton(
         state.map,
         state,
