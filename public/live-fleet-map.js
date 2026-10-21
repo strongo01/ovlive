@@ -73,7 +73,7 @@
   function tripIdPartsForShape(value) {
     const raw = String(value ?? "").trim();
     if (!raw) return null;
-    const match = raw.match(/^(\\d{8})_(\\d{1,2}:\\d{2}(?::\\d{2})?)_(.+)$/i);
+    const match = raw.match(/^(\d{8})_(\d{1,2}:\d{2}(?::\d{2})?)_(.+)$/i);
     if (!match) return { tripId: normalizedId(raw), serviceKey: null };
 
     const [, serviceDate, rawTime, rawTripId] = match;
