@@ -72,7 +72,7 @@ assert.ok(helperStart >= 0 && helperEnd > helperStart,
   "the live map must keep trip ID normalization helpers together");
 const helperContext = vm.createContext({});
 new vm.Script(script.slice(helperStart, helperEnd) +
-  "\\nglobalThis.tripIdMatchesForShape = tripIdMatchesForShape;").runInContext(helperContext);
+  "\nglobalThis.tripIdMatchesForShape = tripIdMatchesForShape;").runInContext(helperContext);
 assert.equal(helperContext.tripIdMatchesForShape(
   "20261021_18:30_nl-OpenOV_380014114",
   "20261021_18:30:00_nl-OpenOV_380014114"
