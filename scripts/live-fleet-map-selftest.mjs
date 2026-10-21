@@ -80,7 +80,7 @@ assert.ok(splitStart >= 0 && splitEnd > splitStart,
   "the travelled-route split helper must exist independently of the DOM");
 const splitContext = vm.createContext({});
 new vm.Script(script.slice(splitStart, splitEnd) +
-  "\\nglobalThis.splitRouteAtPosition = splitRouteAtPosition;").runInContext(splitContext);
+  "\nglobalThis.splitRouteAtPosition = splitRouteAtPosition;").runInContext(splitContext);
 const progress = splitContext.splitRouteAtPosition(
   [[52.0, 5.0], [52.01, 5.0], [52.02, 5.0]],
   [52.015, 5.0001]
