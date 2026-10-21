@@ -93,6 +93,9 @@ jobs:
       - name: Public UI JavaScript syntax
         run: node scripts/public-ui-syntax-selftest.mjs
 
+      - name: Realtime transfer assistant regression tests
+        run: npm run transfer-assistant:selftest
+
       - name: Live multi-mode fleet map regression tests
         run: npm run live-map:selftest
 
