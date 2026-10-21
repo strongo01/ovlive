@@ -66,6 +66,14 @@ assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("const exactTrip"),
   "the map must use normalized exact-trip matching and must not fall back to line-only matches");
 
+assert.ok(script.includes("function loadNsVehicleRouteGeometry(vehicle)") &&
+  script.includes('fetch("/api/ns/train-route?"') &&
+  script.includes('vehicle.sourceKey === "ns"'),
+  "NS live train markers must request their exact train journey and rail geometry");
+assert.ok(script.includes("canSplitProgress && i < closestIndex") &&
+  script.includes('addLine(item.points, "#9ca3af"'),
+  "ordered route segments before the vehicle must be shaded grey");
+
 assert.ok(script.includes("state.routeLayer = L.featureGroup().addTo(state.map)") &&
   script.includes("state.routeLayer.getBounds()"),
   "the drawn route layer must support Leaflet getBounds()");
