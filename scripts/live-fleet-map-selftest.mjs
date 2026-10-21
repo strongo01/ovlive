@@ -57,7 +57,7 @@ assert.ok(script.includes("navigator.geolocation.getCurrentPosition") &&
 assert.ok(script.includes("startDate: String(row.startDate") &&
   script.includes("startTime: String(row.startTime") &&
   script.includes('fetch("/api/trip-shape?"') &&
-  script.includes('color: "#ef4444"') &&
+  script.includes('addLine(item.split.remaining, "#ef4444"') &&
   script.includes("showVehicleRoute(currentVehicle)"),
   "tapping an exact OpenOV vehicle must load and draw its route in red");
 assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
