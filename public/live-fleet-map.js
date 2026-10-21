@@ -444,7 +444,59 @@
     };
   }
 
+  async function loadNsVehicleRouteGeometry(vehicle) {
+    const trainNumber = String(vehicle?.trainNumber ?? vehicle?.tripId ?? vehicle?.vehicleId ?? "").trim();
+    if (!/^\d{1,6}$/.test(trainNumber)) {
+      throw new Error("Voor deze NS-trein ontbreekt een geldig treinnummer.");
+    }
+
+    const sourceTime = Date.parse(String(vehicle?.observedAt ?? ""));
+    const dateTime = Number.isFinite(sourceTime)
+      ? new Date(sourceTime).toISOString()
+      : new Date().toISOString();
+    const cacheKey = "ns-route|" + trainNumber + "|" + dateTime.slice(0, 16);
+    if (state.routeGeometryCache.has(cacheKey)) {
+      return state.routeGeometryCache.get(cacheKey);
+    }
+
+    const task = (async () => {
+      const params = new URLSearchParams({ trainNumber, dateTime });
+      const response = await fetch("/api/ns/train-route?" + params.toString(), {
+        cache: "default",
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(15_000)
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload?.ok !== true || !Array.isArray(payload.legs)) {
+        throw new Error(payload?.error ||
+          ("De NS-treinroute kon niet worden opgehaald (HTTP " + response.status + ")."));
+      }
+
+      const geometries = payload.legs
+        .map((candidate, index) => ({
+          sequence: Number.isFinite(Number(candidate?.sequence)) ? Number(candidate.sequence) : index,
+          points: routeCoordinates(candidate?.legGeometry)
+        }))
+        .filter(candidate => candidate.points.length > 1)
+        .sort((left, right) => left.sequence - right.sequence)
+        .map(candidate => candidate.points);
+      if (!geometries.length) {
+        throw new Error("NS gaf geen bruikbare spoorgeometrie voor deze treinrit terug.");
+      }
+      return geometries;
+    })();
+
+    state.routeGeometryCache.set(cacheKey, task);
+    try {
+      return await task;
+    } catch (error) {
+      if (state.routeGeometryCache.get(cacheKey) === task) state.routeGeometryCache.delete(cacheKey);
+      throw error;
+    }
+  }
+
   async function loadVehicleRouteGeometry(vehicle) {
+    if (vehicle?.sourceKey === "ns") return loadNsVehicleRouteGeometry(vehicle);
     const identity = vehicleRouteIdentity(vehicle);
     if (!identity) {
       throw new Error(vehicle.sourceKey === "ns"
@@ -559,7 +611,10 @@
 
       for (let i = 0; i < splits.length; i += 1) {
         const item = splits[i];
-        if (i === closestIndex && canSplitProgress) {
+        if (canSplitProgress && i < closestIndex) {
+          // Earlier ordered route segments are already behind the vehicle.
+          addLine(item.points, "#9ca3af", 0.82, 5);
+        } else if (i === closestIndex && canSplitProgress) {
           addLine(item.split.passed, "#9ca3af", 0.82, 5);
           addLine(item.split.remaining, "#ef4444", 0.97, 5);
         } else {
@@ -635,9 +690,11 @@
     const routeIdentity = vehicleRouteIdentity(vehicle);
     const routeStatus = state.selectedRouteKey === vehicle.key
       ? (state.routeStatus || "Ritroute geselecteerd.")
-      : routeIdentity
-        ? "Tik op dit voertuig om de route als rode lijn te tonen."
-        : "Geen exacte ritkoppeling beschikbaar; er wordt geen vermoedelijke lijn getekend.";
+      : vehicle.sourceKey === "ns" && vehicle.trainNumber
+        ? "Tik op deze trein om de exacte NS-route op te vragen."
+        : routeIdentity
+          ? "Tik op dit voertuig om de route als rode lijn te tonen."
+          : "Geen exacte ritkoppeling beschikbaar; er wordt geen vermoedelijke lijn getekend.";
     const meta = [
       vehicle.agencyName ? "<div>Vervoerder: " + escapeHtml(vehicle.agencyName) + "</div>" : "",
       vehicle.vehicleId ? "<div>Voertuig: " + escapeHtml(vehicle.vehicleId) + "</div>" : "",
