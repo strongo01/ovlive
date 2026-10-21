@@ -4,6 +4,23 @@ import ts from "typescript";
 
 const source = await readFile(new URL("../src/api-rate-limit.ts", import.meta.url), "utf8");
 const workerSource = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const wranglerSource = await readFile(new URL("../wrangler.toml", import.meta.url), "utf8");
+const browserHelper = await readFile(new URL("../public/device-rate-limit.js", import.meta.url), "utf8");
+
+for (const [binding, limit] of [
+  ["API_RATE_LIMITER", 1200],
+  ["PLAN_RATE_LIMITER", 200],
+  ["DEVICE_API_RATE_LIMITER", 300],
+  ["DEVICE_PLAN_RATE_LIMITER", 50]
+]) {
+  const pattern = new RegExp('name\\s*=\\s*"' + binding + '"[\\s\\S]*?limit\\s*=\\s*' + limit + '\\s+period\\s*=\\s*60');
+  assert.match(wranglerSource, pattern, binding + " should be configured at " + limit + " requests per minute");
+}
+assert.ok(browserHelper.includes('const headerName = "x-ovlive-device-id";'),
+  "browser helper must send the expected rate-limit header");
+assert.ok(browserHelper.includes('const storageKey = "ovlive-device-id-v1";'),
+  "browser helper must persist the same browser ID across visits");
+console.log("PASS: configured IP and browser API quotas match the intended values");
 
 const ovapiGuard = workerSource.indexOf('url.pathname.startsWith("/api/ovapi-test/") &&');
 const ovapiMatchDispatch = workerSource.indexOf('if (url.pathname === "/api/ovapi-test/match-plan")');
