@@ -15,6 +15,7 @@ import { applyNdovCancellationsToPlan, prepareNsTrainIdentities } from "./ndov-p
 import { enrichNsTrainPlan } from "./ns-train-realtime";
 import { fetchNsLiveVehiclePositions } from "./ns-live-vehicle-positions";
 import { fetchNsTrainDetails } from "./ns-train-details";
+import { fetchNsLiveTrainRoute } from "./ns-live-train-route.js";
 import { mergeTransitousAndMapFeatureCollections, transitousMatchesToFeatureCollection } from "./transitous-geocode.js";
 import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
@@ -3266,6 +3267,83 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       return json({
         ok: false,
         source: "NS Virtual Train API",
+        trainNumber,
+        error: message,
+        upstreamStatus,
+        checkedAt: new Date().toISOString()
+      }, status, { ...headers, "cache-control": "no-store" });
+    }
+  }
+
+  if (url.pathname === "/api/ns/train-route") {
+    const trainNumber = String(url.searchParams.get("trainNumber") ?? "").trim();
+    if (!/^\d{1,6}$/.test(trainNumber)) {
+      return json({
+        ok: false,
+        source: "NS Reisinformatie + SpoorKaart API",
+        error: "Geef één exact NS-treinnummer op."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
+    const dateTime = String(url.searchParams.get("dateTime") ?? "").trim();
+    if (dateTime && (dateTime.length > 50 || !Number.isFinite(Date.parse(dateTime)))) {
+      return json({
+        ok: false,
+        source: "NS Reisinformatie + SpoorKaart API",
+        error: "Het tijdstip van deze treinpositie is ongeldig."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
+    if (!String(env.NS_API_SUBSCRIPTION_KEY ?? "").trim()) {
+      return json({
+        ok: false,
+        source: "NS Reisinformatie + SpoorKaart API",
+        error: "De NS API-sleutel is niet ingesteld in de Worker."
+      }, 503, { ...headers, "cache-control": "no-store" });
+    }
+
+    try {
+      const route = await fetchNsLiveTrainRoute(trainNumber, dateTime || null, env);
+      return json(route, 200, {
+        ...headers,
+        "cache-control": "private, max-age=60"
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const statusMatch = detail.match(/NS_LIVE_TRAIN_ROUTE_HTTP_(\d{3})/);
+      const upstreamStatus = statusMatch ? Number(statusMatch[1]) : null;
+      const status = upstreamStatus === 429 ? 429 : 502;
+      const message =
+        detail === "NS_LIVE_TRAIN_ROUTE_KEY_MISSING"
+          ? "De NS API-sleutel ontbreekt."
+          : detail === "NS_LIVE_TRAIN_ROUTE_INVALID_TRAIN_NUMBER"
+            ? "Het NS-treinnummer is ongeldig."
+            : upstreamStatus === 401 || upstreamStatus === 403
+              ? "NS heeft de routeaanvraag geweigerd. Controleer of de bestaande NS-sleutel toegang heeft tot Reisinformatie, NS-APP Stations en SpoorKaart."
+              : upstreamStatus === 429
+                ? "De NS API heeft de aanvraaglimiet bereikt. Probeer de treinroute later opnieuw."
+                : detail === "NS_LIVE_TRAIN_ROUTE_NO_JOURNEY"
+                  ? "NS vond op dit tijdstip geen bijpassende treinrit."
+                  : detail === "NS_LIVE_TRAIN_ROUTE_GEOMETRY_MISSING"
+                    ? "NS gaf geen bruikbare spoorgeometrie voor deze treinrit terug."
+                    : detail.startsWith("NS_LIVE_TRAIN_ROUTE_STATION_UNRESOLVED_")
+                      ? "Een station in de exacte NS-rit kon niet naar een spoorwegcode worden vertaald."
+                      : detail === "NS_LIVE_TRAIN_ROUTE_STOPS_MISSING_CODES"
+                        ? "NS leverde niet voor alle stations een bruikbare stationscode; de spoorroute is daarom niet getekend."
+                        : detail === "NS_LIVE_TRAIN_ROUTE_TOO_MANY_STOPS"
+                          ? "Deze treinrit heeft te veel stations om veilig in één routeaanvraag op te halen."
+                          : /timeout|timed out|abort/i.test(detail)
+                            ? "De NS-routegegevens reageren niet op tijd."
+                            : "De exacte NS-treinroute is tijdelijk niet beschikbaar.";
+
+      console.warn("[OVLIVE_NS_LIVE_TRAIN_ROUTE]", JSON.stringify({
+        trainNumber,
+        upstreamStatus,
+        errorCode: detail.match(/NS_LIVE_TRAIN_ROUTE_[A-Z_]+/)?.[0] ?? "unexpected_error"
+      }));
+      return json({
+        ok: false,
+        source: "NS Reisinformatie + SpoorKaart API",
         trainNumber,
         error: message,
         upstreamStatus,
