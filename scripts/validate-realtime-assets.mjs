@@ -110,7 +110,7 @@ async function main() {
   addRequired(required, openovShapeManifestPath);
   const openovShapeShardNames = new Set();
   for (const [routeId, filenames] of Object.entries(openovShapeRoutes)) {
-    if (!/^\\d+$/.test(routeId) || !Array.isArray(filenames) || filenames.length === 0) {
+    if (!/^\d+$/.test(routeId) || !Array.isArray(filenames) || filenames.length === 0) {
       throw new Error("Ongeldige route/shardlijst in OpenOV-GTFS ritvormmanifest voor route " + routeId);
     }
     for (const rawFilename of filenames) {
