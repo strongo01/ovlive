@@ -4479,92 +4479,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       return json({ error: "Geef een geldige Transitous-rit-ID op." }, 400, headers);
     }
 
-    // Fixed upstream endpoint, never a user-supplied URL. Only request this
-    // when a user opens a live map. Do not force-cache upstream errors: a
-    // temporary Transitous 5xx must not poison later route requests.
+    // Only try spelling aliases of the same exact date/time + GTFS trip.
+    // A successful HTTP response is not enough: Transitous can return HTTP 200
+    // with an empty itinerary for one spelling while another exact alias works.
     const boundedCandidates = openovTripShapeIdCandidates(tripId);
+    let lastStatus: number | null = null;
+    let lastFetchError: unknown = null;
+    let sawSuccessfulReplyWithoutGeometry = false;
 
-    try {
-      let response: Response | null = null;
-      let lastFetchError: unknown = null;
-      let successfulTripId: string | null = null;
-
-      for (let candidateIndex = 0; candidateIndex < boundedCandidates.length; candidateIndex++) {
-        const candidateTripId = boundedCandidates[candidateIndex];
-        const upstream = new URL(`${TRANSITOUS}/trip`);
-        upstream.searchParams.set("tripId", candidateTripId);
-        upstream.searchParams.set("detailedLegs", "true");
-        upstream.searchParams.set("joinInterlinedLegs", "false");
-        upstream.searchParams.set("withScheduledSkippedStops", "true");
-
-        // Retry one transient upstream/server failure once; try an ID alias
-        // only after a not-found/bad-request result or repeated server failure.
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            response = await fetch(upstream, {
-              headers: {
-                "accept": "application/json",
-                "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
-              },
-              signal: AbortSignal.timeout(6500)
-            });
-            lastFetchError = null;
-          } catch (error) {
-            lastFetchError = error;
-            response = null;
-            if (attempt === 0) continue;
-            break;
-          }
-
-          if (response.ok) {
-            successfulTripId = candidateTripId;
-            break;
-          }
-
-          const isServerFailure = response.status >= 500 || response.status === 429;
-          if (isServerFailure && attempt === 0) continue;
-          if ((response.status === 400 || response.status === 404) &&
-              candidateIndex + 1 < boundedCandidates.length) {
-            break;
-          }
-          // If a retryable failure persists, still allow the next exact-ID
-          // alias to be tried; never infer a route from another trip.
-          break;
-        }
-
-        if (response?.ok) break;
-        if (lastFetchError && candidateIndex + 1 < boundedCandidates.length) continue;
-        if (response && (response.status >= 500 || response.status === 429) &&
-            candidateIndex + 1 < boundedCandidates.length) continue;
-        if (response && (response.status === 400 || response.status === 404) &&
-            candidateIndex + 1 < boundedCandidates.length) continue;
-        break;
-      }
-
-      if (!response?.ok || !successfulTripId) {
-        const upstreamStatus = response?.status ?? null;
-        console.warn("[OVLIVE_TRIP_SHAPE_UPSTREAM]", JSON.stringify({
-          status: upstreamStatus,
-          tripIdLength: tripId.length,
-          candidateCount: boundedCandidates.length,
-          fetchError: lastFetchError instanceof Error ? lastFetchError.message : undefined
-        }));
-        return json({
-          ok: false,
-          upstreamStatus,
-          error: upstreamStatus === 404
-            ? "Transitous kent deze exacte rit-ID niet; er is geen route getekend."
-            : "De volledige lijnroute is tijdelijk niet beschikbaar."
-        }, upstreamStatus === 404 ? 404 : 502, {
-          ...headers,
-          "cache-control": "no-store",
-          "x-upstream": "Transitous MOTIS v6 /trip"
-        });
-      }
-
-      const itinerary: any = await response.json();
+    const extractTransitShapes = (itinerary: any) => {
       const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
-      const shapes = legs
+      return legs
         .filter((leg: any) =>
           String(leg?.mode ?? "").toUpperCase() !== "WALK" &&
           String(leg?.mode ?? "").toUpperCase() !== "FOOT" &&
@@ -4582,15 +4507,121 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           mode: String(leg?.mode ?? ""),
           legGeometry: leg.legGeometry
         }));
+    };
 
+    try {
+      for (let candidateIndex = 0; candidateIndex < boundedCandidates.length; candidateIndex++) {
+        const candidateTripId = boundedCandidates[candidateIndex];
+        let candidateResponse: Response | null = null;
+        let candidateFetchError: unknown = null;
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const upstream = new URL(`${TRANSITOUS}/trip`);
+          upstream.searchParams.set("tripId", candidateTripId);
+          upstream.searchParams.set("detailedLegs", "true");
+          upstream.searchParams.set("joinInterlinedLegs", "false");
+          upstream.searchParams.set("withScheduledSkippedStops", "true");
+
+          try {
+            candidateResponse = await fetch(upstream, {
+              headers: {
+                "accept": "application/json",
+                "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+              },
+              signal: AbortSignal.timeout(6500)
+            });
+            candidateFetchError = null;
+            lastFetchError = null;
+          } catch (error) {
+            candidateFetchError = error;
+            lastFetchError = error;
+            candidateResponse = null;
+            if (attempt === 0) continue;
+            break;
+          }
+
+          lastStatus = candidateResponse.status;
+          if (candidateResponse.ok) {
+            const itinerary: any = await candidateResponse.json().catch(() => null);
+            const shapes = extractTransitShapes(itinerary);
+            if (shapes.length > 0) {
+              // This is the first alias that actually yielded drawable geometry.
+              return json({
+                ok: true,
+                requestedTripId: tripId,
+                resolvedTripId: candidateTripId,
+                legs: shapes
+              }, 200, {
+                ...headers,
+                "cache-control": "public, max-age=1800",
+                "x-upstream": "Transitous MOTIS v6 /trip"
+              });
+            }
+
+            // Do not stop on HTTP 200 with an empty route shape. Continue to
+            // the next spelling-only alias of this same service instance.
+            sawSuccessfulReplyWithoutGeometry = true;
+            break;
+          }
+
+          const retryable = candidateResponse.status >= 500 || candidateResponse.status === 429;
+          if (retryable && attempt === 0) continue;
+          break;
+        }
+
+        if (candidateResponse?.ok) {
+          // It returned HTTP 200, but no drawable geometry was present.
+          continue;
+        }
+
+        if (candidateFetchError && candidateIndex + 1 < boundedCandidates.length) {
+          continue;
+        }
+
+        const isAliasFallbackStatus = candidateResponse &&
+          (candidateResponse.status === 400 ||
+           candidateResponse.status === 404 ||
+           candidateResponse.status >= 500 ||
+           candidateResponse.status === 429);
+        if (isAliasFallbackStatus && candidateIndex + 1 < boundedCandidates.length) {
+          continue;
+        }
+
+        // Authentication/authorization and other non-retryable client errors
+        // will not improve by changing an exact ID's spelling.
+        break;
+      }
+
+      if (sawSuccessfulReplyWithoutGeometry) {
+        return json({
+          ok: true,
+          requestedTripId: tripId,
+          resolvedTripId: null,
+          legs: [],
+          routeWarning: "Transitous accepteerde de rit-ID, maar leverde voor geen van de exacte ID-schrijfwijzen routegeometrie terug."
+        }, 200, {
+          ...headers,
+          "cache-control": "no-store",
+          "x-upstream": "Transitous MOTIS v6 /trip"
+        });
+      }
+
+      const upstreamStatus = lastStatus;
+      console.warn("[OVLIVE_TRIP_SHAPE_UPSTREAM]", JSON.stringify({
+        status: upstreamStatus,
+        tripIdLength: tripId.length,
+        candidateCount: boundedCandidates.length,
+        fetchError: lastFetchError instanceof Error ? lastFetchError.message : undefined
+      }));
       return json({
-        ok: true,
-        requestedTripId: tripId,
-        resolvedTripId: successfulTripId,
-        legs: shapes
-      }, 200, {
+        ok: false,
+        upstreamStatus,
+        error: upstreamStatus === 404
+          ? "Transitous kent deze exacte rit-ID niet; er is geen route getekend."
+          : "De volledige lijnroute is tijdelijk niet beschikbaar."
+      }, upstreamStatus === 404 ? 404 : 502, {
         ...headers,
-        "cache-control": "public, max-age=1800",
+        "cache-control": "no-store",
         "x-upstream": "Transitous MOTIS v6 /trip"
       });
     } catch (error) {
