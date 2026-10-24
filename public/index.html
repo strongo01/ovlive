@@ -4329,9 +4329,31 @@ function stopTimeEvent(row, direction) {
   };
 }
 
+function firstNonEmptyDestinationText(...values) {
+  for (const value of values) {
+    let candidate = '';
+    if (typeof value === 'string' || typeof value === 'number') {
+      candidate = String(value).trim();
+    } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      candidate = firstNonEmptyDestinationText(
+        value.name, value.displayName, value.destinationName,
+        value.headsign, value.headSign, value.label, value.stop?.name
+      );
+    }
+    if (!candidate) continue;
+    if (/^(?:bestemming onbekend|onbekende bestemming|onbekend|unknown|n\/?a|—|-)$/i.test(candidate)) {
+      continue;
+    }
+    return candidate;
+  }
+  return '';
+}
+
 function stopTimeDestination(row) {
-  return String(row?.tripTo?.name ?? row?.tripTo?.displayName ??
-    row?.headsign ?? row?.destination?.name ?? 'Bestemming onbekend').trim();
+  return firstNonEmptyDestinationText(
+    row?.tripTo, row?.headsign, row?.headSign, row?.destination,
+    row?.to, row?.destinationName, row?.destination?.name, row?.destination?.displayName
+  ) || 'Bestemming onbekend';
 }
 
 function stopTimeMatchesLine(row, query) {
@@ -4621,12 +4643,28 @@ function renderLineSearchStops(row, nowMs = Date.now()) {
       return name && (name === currentName || name.includes(currentName) || currentName.includes(name));
     });
   }
-  // A planned time alone is not evidence that a delayed vehicle has passed a stop.
-  // Use the last location/stop matched from the vehicle/trip row as the boundary.
+  // A vehicle can have a current stop ID in a different namespace than the
+  // journey timetable. Fall back to the first upcoming predicted stop, leaving
+  // its immediately preceding stop visible as the current/last reported stop.
+  if (currentIndex < 0) {
+    const firstUpcomingIndex = stops.findIndex(stop => {
+      const values = [
+        stop?.expectedDeparture, stop?.expectedArrival,
+        stop?.targetDeparture, stop?.targetArrival
+      ];
+      return values.some(value => {
+        const timestamp = lineSearchTimestampMs(value);
+        return Number.isFinite(timestamp) && timestamp >= nowMs - 30_000;
+      });
+    });
+    currentIndex = firstUpcomingIndex >= 0
+      ? Math.max(0, firstUpcomingIndex - 1)
+      : Math.max(0, stops.length - 1);
+  }
   const previous = currentIndex > 0 ? stops.slice(0, currentIndex) : [];
-  const currentAndNext = (currentIndex >= 0 ? stops.slice(currentIndex) : stops).map((stop, index) => ({
+  const currentAndNext = stops.slice(currentIndex).map((stop, index) => ({
     ...stop,
-    isLastReportedStop: currentIndex >= 0 && index === 0
+    isLastReportedStop: index === 0
   }));
   return '<section class="line-search-stops"><h3>Volgende haltes</h3>' +
     (previous.length
@@ -4639,7 +4677,14 @@ function renderLineSearchStops(row, nowMs = Date.now()) {
 
 function renderLineSearchCard(row) {
   const line = String(row?.line ?? 'Lijn onbekend').trim();
-  const destination = String(row?.destination ?? 'Bestemming onbekend').trim();
+  const stopsForDestination = Array.isArray(row?.stops) ? row.stops : [];
+  const stopDestinationCandidates = [...stopsForDestination].reverse().flatMap(stop => [
+    stop?.name, stop?.displayName, stop?.stopName
+  ]);
+  const destination = firstNonEmptyDestinationText(
+    row?.destination, row?.headsign, row?.headSign, row?.destinationName,
+    row?.tripTo, row?.to, ...stopDestinationCandidates
+  ) || 'Bestemming onbekend';
   const operator = String(row?.operatorName ?? '').trim();
   const heading = [operator, line, destination].filter(Boolean).join(' ');
   const vehicleLabel = String(row?.vehicleLabel ?? 'Voertuig').trim();
