@@ -4,8 +4,8 @@ OVLive can refresh the static OpenOV route shapes using the public repository's 
 
 ## One-time setup
 
-1. In Cloudflare, open **My Profile → API Tokens** (or use https://dash.cloudflare.com/profile/api-tokens).
-2. Create a token scoped to the OVLive Cloudflare account with **Workers Scripts: Edit** permission. It is only used by Wrangler to publish a Worker and its static assets; do not give it R2 permissions.
+1. In Cloudflare, open **Workers & Pages** and create a basic **Hello World Worker** named `ovlive-openov-shapes` if it does not already exist. This is a normal Workers project; do not create an R2 bucket or enable an R2 subscription.
+2. Open **My Profile → API Tokens** (https://dash.cloudflare.com/profile/api-tokens) and create a token scoped to that Worker with **Workers Scripts: Edit** access. Cloudflare may require a Worker-level Editor role for an existing Worker. Do not grant R2 permissions.
 3. Open https://github.com/strongo01/ovlive/settings/secrets/actions.
 4. Add the repository secret `CLOUDFLARE_API_TOKEN` with the token.
 5. Add the repository secret `CLOUDFLARE_ACCOUNT_ID` with the account ID shown in the Cloudflare dashboard. Do not use the Zone ID.
