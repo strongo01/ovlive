@@ -4,6 +4,7 @@
  * Bij een planner-refresh hoeven alleen TripUpdates voor de geselecteerde
  * OpenOV-route/dienstdata te worden gematerialiseerd. De decoder loopt door de
  * protobuf-stream, maar bouwt geen volledige objectgrafiek van alle 7k+ ritten.
+ * Bij een route/datumfilter worden stopdetails pas na de ritfilter gedecodeerd.
  */
 
 export interface DecodedOpenovTripUpdateStop {

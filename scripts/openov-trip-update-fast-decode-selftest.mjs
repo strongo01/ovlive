@@ -198,6 +198,7 @@ assert.deepEqual(
 );
 assert.equal(filtered.entities.length, 2);
 assert.ok(filtered.entities.every((row) => row.routeId === "159450"));
+// Keep this log output stable so CI confirms the selective decoder path.
 console.log("PASS: targeted decoding keeps exact trips and same-route/service-date fallback candidates");
 console.log("PASS: unrelated route/date updates do not allocate normalized stop-update arrays");
 console.log("All OpenOV trip-update fast-decode selftests passed.");
