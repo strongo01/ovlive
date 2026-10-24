@@ -55,6 +55,7 @@ coverage/
 
 # OVLive audit: generated route data stays local; regenerate when needed.
 /public/ndov-openov-route-crosswalk/routes/
+/public/openov-trip-shapes/
 
 # Local and historical backup files
 .backup-*/
