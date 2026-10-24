@@ -4485,6 +4485,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const boundedCandidates = openovTripShapeIdCandidates(tripId);
     let lastStatus: number | null = null;
     let lastFetchError: unknown = null;
+    let lastUpstreamDetail = "";
     let sawSuccessfulReplyWithoutGeometry = false;
 
     const extractTransitShapes = (itinerary: any) => {
@@ -4541,6 +4542,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           }
 
           lastStatus = candidateResponse.status;
+          if (!candidateResponse.ok) {
+            // Preserve a short upstream error explanation so we can distinguish
+            // an invalid GTFS trip ID from parameter/format errors. Never return
+            // unbounded response bodies to the public client.
+            const rawDetail = await candidateResponse.clone().text().catch(() => "");
+            lastUpstreamDetail = String(rawDetail ?? "")
+              .replace(/<[^>]*>/g, " ")
+              .replace(/\\s+/g, " ")
+              .trim()
+              .slice(0, 280);
+          }
           if (candidateResponse.ok) {
             const itinerary: any = await candidateResponse.json().catch(() => null);
             const shapes = extractTransitShapes(itinerary);
@@ -4616,7 +4628,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
       // Do not present network/time-out failures as an upstream HTTP status.
       const upstreamStatus = lastFetchError ? null : lastStatus;
-      const errorMessage = upstreamStatus === 404
+      const statusMessage = upstreamStatus === 404
         ? "Transitous kent deze exacte rit-ID niet; er is geen route getekend."
         : upstreamStatus === 400
           ? "Transitous weigert de aangeleverde rit-ID (HTTP 400); er is geen lijnnummer-fallback gebruikt."
@@ -4625,16 +4637,21 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             : upstreamStatus !== null
               ? `Transitous antwoordde met HTTP ${upstreamStatus}; de routegeometrie is niet beschikbaar.`
               : "Transitous reageerde niet op de routevraag (netwerkfout of time-out).";
+      const errorMessage = lastUpstreamDetail
+        ? statusMessage + " Bronmelding: " + lastUpstreamDetail
+        : statusMessage;
       console.warn("[OVLIVE_TRIP_SHAPE_UPSTREAM]", JSON.stringify({
         status: upstreamStatus,
         tripIdLength: tripId.length,
         candidateCount: boundedCandidates.length,
+        upstreamDetail: lastUpstreamDetail || undefined,
         fetchError: lastFetchError instanceof Error ? lastFetchError.message : undefined
       }));
       return json({
         ok: false,
         upstreamStatus,
         candidateCount: boundedCandidates.length,
+        upstreamDetail: lastUpstreamDetail || null,
         error: errorMessage
       }, upstreamStatus === 404 ? 404 : 502, {
         ...headers,
