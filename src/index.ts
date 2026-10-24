@@ -4564,7 +4564,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             break;
           }
 
-          const retryable = candidateResponse.status >= 500 || candidateResponse.status === 429;
+          // A 429 is an explicit rate limit. Retrying immediately or trying
+          // every ID alias would hammer the upstream even harder; return it to
+          // the caller so the UI can explain the temporary limit.
+          const retryable = candidateResponse.status >= 500;
           if (retryable && attempt === 0) continue;
           break;
         }
@@ -4572,6 +4575,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         if (candidateResponse?.ok) {
           // It returned HTTP 200, but no drawable geometry was present.
           continue;
+        }
+
+        if (candidateResponse?.status === 429) {
+          // Stop the outer alias loop as soon as Transitous rate-limits us.
+          break;
         }
 
         if (candidateFetchError && candidateIndex + 1 < boundedCandidates.length) {
