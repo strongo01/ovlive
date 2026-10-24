@@ -286,7 +286,7 @@ assert.ok(worker.includes("function firstNonEmptyLineSearchText") &&
   "line search must resolve destinations from non-empty OVAPI metadata and exact OpenOV trip details");
 assert.ok(html.includes("stopDestinationCandidates") &&
   html.includes("firstUpcomingIndex") &&
-  html.includes("Eerdere haltes"),
+  html.includes("Vorige haltes"),
   "line-search cards must recover a known terminal stop and separate past from upcoming stops");
 console.log("PASS: blank destination fields no longer hide known directions; upcoming/past stop fallback is present");
 
