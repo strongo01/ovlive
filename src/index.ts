@@ -380,13 +380,12 @@ function normalizeOvapiJourneyStops(
         stop.TimingPointCode, stop.UserStopCode, stop.StopId
       ].some((value) => String(value ?? "").trim().toLocaleLowerCase("nl-NL") === currentStopCode))
     : -1;
-  const remainingStops = (currentIndex >= 0
-    ? orderedStops.slice(currentIndex)
-    : orderedStops.filter((stop) => !["PASSED", "CANCEL", "CANCELLED"].includes(
-        String(stop.TripStopStatus ?? "").trim().toUpperCase()
-      ))).filter((stop) => !["CANCEL", "CANCELLED"].includes(
-        String(stop.TripStopStatus ?? "").trim().toUpperCase()
-      ));
+  // Do not slice by the vehicle's reported current-stop code: it can point
+  // further along the trip than OVAPI's still-predicted upcoming stops.
+  // Keep every stop not marked passed/cancelled, matching OVZoeker's timeline.
+  const remainingStops = orderedStops.filter((stop) => !["PASSED", "CANCEL", "CANCELLED"].includes(
+    String(stop.TripStopStatus ?? "").trim().toUpperCase()
+  ));
   const stops = remainingStops.map((stop, index) => ({
     name: String(stop.TimingPointName ?? stop.StopName ?? stop.Name ?? "").trim(),
     userStopCode: String(stop.UserStopCode ?? stop.TimingPointCode ?? stop.StopId ?? "").trim(),
@@ -397,8 +396,8 @@ function normalizeOvapiJourneyStops(
     targetDeparture: String(stop.TargetDepartureTime ?? "").trim() || null,
     status: String(stop.TripStopStatus ?? "").trim(),
     stopOrder: Number(stop.UserStopOrderNumber ?? stop.StopSequence ?? index + 1),
-    isCurrent: currentIndex >= 0 && index === 0,
-    isAtStop: currentIndex >= 0 && index === 0 &&
+    isCurrent: currentIndex >= 0 && orderedStops[currentIndex] === stop,
+    isAtStop: currentIndex >= 0 && orderedStops[currentIndex] === stop &&
       ["ARRIVED", "ONSTOP", "ATSTOP"].includes(String(stop.TripStopStatus ?? "").trim().toUpperCase())
   })).filter((stop) => stop.name);
   const coachValue = remainingStops.find((stop) => stop.NumberOfCoaches != null)?.NumberOfCoaches ??
@@ -4217,6 +4216,20 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       });
     }
 
+    // Exact filters support native-app lookup for a single live journey,
+    // even when a popular line has more results than the general search limit.
+    const requestedTripNumber = String(url.searchParams.get("tripNumber") ?? "").trim();
+    const requestedOperatorCode = String(url.searchParams.get("operatorCode") ?? "").trim();
+    if (
+      (requestedTripNumber && !/^[A-Za-z0-9_-]{1,64}$/.test(requestedTripNumber)) ||
+      (requestedOperatorCode && !/^[A-Za-z0-9_-]{1,32}$/.test(requestedOperatorCode))
+    ) {
+      return json({ error: "Ongeldig exact ritnummer of vervoerderscode." }, 400, {
+        ...headers,
+        "cache-control": "no-store"
+      });
+    }
+
     const limitValue = Number(url.searchParams.get("limit") ?? 30);
     const limit = Number.isFinite(limitValue) ? Math.min(50, Math.max(1, Math.trunc(limitValue))) : 30;
     const needle = query.toLocaleLowerCase("nl-NL");
@@ -4365,10 +4378,18 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 meta?.DestinationName50, meta?.DestinationName
               ) || "Bestemming onbekend";
               const journeyNumber = actual.JourneyNumber == null ? "" : String(actual.JourneyNumber).trim();
+              if (requestedTripNumber &&
+                  journeyNumber.toLocaleLowerCase("nl-NL") !== requestedTripNumber.toLocaleLowerCase("nl-NL")) {
+                continue;
+              }
               const vehicleNumber = String(
                 actual.VehicleNumber ?? actual.VehicleNumberOnTrip ?? actual.VehicleCode ?? actual.VehicleId ?? ""
               ).trim();
               const operatorCode = String(actual.OperatorCode ?? meta.OperatorCode ?? actual.DataOwnerCode ?? meta.DataOwnerCode ?? "").trim();
+              if (requestedOperatorCode &&
+                  operatorCode.toLocaleLowerCase("nl-NL") !== requestedOperatorCode.toLocaleLowerCase("nl-NL")) {
+                continue;
+              }
               const operatorName = openovAgencyNameForLine(routeMetadata, line, operatorCode) ||
                 String(actual.OperatorName ?? meta.OperatorName ?? operatorCode ?? "").trim();
               const mode = String(actual.TransportType ?? meta.TransportType ?? "").trim();
@@ -4500,7 +4521,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       // When OVAPI returned authoritative live journeys for the exact public line,
       // those rows already have better stop-by-stop data. Avoid duplicate Transitous
       // enrichment calls; keep OpenOV as a fallback if OVAPI had no live rows.
-      if (ovapiLineResultsFound) {
+      if (ovapiLineResultsFound || requestedTripNumber) {
+        // An exact native-app lookup must not substitute a different OpenOV
+        // journey when OVAPI cannot confirm the requested journey.
         openovAvailable = false;
       } else {
       const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions");
