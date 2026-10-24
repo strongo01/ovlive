@@ -66,6 +66,10 @@ assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("const exactTrip"),
   "the map must use normalized exact-trip matching and must not fall back to line-only matches");
 
+assert.ok(worker.includes("Array.isArray(leg.legGeometry?.coordinates)") &&
+  worker.includes("leg.legGeometry.coordinates.length > 1"),
+  "the trip-shape endpoint must preserve GeoJSON LineString geometry for native map clients");
+
 assert.ok(script.includes("function loadNsVehicleRouteGeometry(vehicle)") &&
   script.includes('fetch("/api/ns/train-route?"') &&
   script.includes('vehicle.sourceKey === "ns"'),
