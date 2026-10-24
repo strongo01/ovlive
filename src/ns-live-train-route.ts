@@ -471,18 +471,33 @@ function extractOrderedRouteLines(input: any, stationCodes: string[]): number[][
           ? [{ geometry: root, properties: {} }]
           : [];
 
+  // Spoorkaart can return additional track features around a requested route.
+  // A feature whose station pair is not one of the journey's adjacent stops
+  // must never be inserted into the train line: ordering it by feature index
+  // used to draw unrelated tracks and could make a train appear on the wrong
+  // route. Only allow an unlabelled geometry when the response is a single
+  // standalone route geometry, where there is no competing segment to guess.
+  const hasStationPairMetadata = features.some((feature: any) => {
+    const properties = feature?.properties ?? {};
+    const from = properties.from ?? properties.fromCode;
+    const to = properties.to ?? properties.toCode;
+    return Boolean(normalizeStationCode(from) && normalizeStationCode(to));
+  });
+
   const lines: Array<{ sequence: number; featureIndex: number; lineIndex: number; coordinates: number[][] }> = [];
   features.forEach((feature: any, featureIndex: number) => {
-    const match = featurePairIndex(
-      feature?.properties?.from ?? feature?.properties?.fromCode,
-      feature?.properties?.to ?? feature?.properties?.toCode,
-      stationCodes
-    );
+    const properties = feature?.properties ?? {};
+    const from = properties.from ?? properties.fromCode;
+    const to = properties.to ?? properties.toCode;
+    const match = featurePairIndex(from, to, stationCodes);
+    if (hasStationPairMetadata && !match) return;
+    if (!hasStationPairMetadata && features.length > 1) return;
+
     const lineGeometries = lineCoordinates(feature?.geometry);
     lineGeometries.forEach((coordinates, lineIndex) => {
       const oriented = match?.reverse ? [...coordinates].reverse() : coordinates;
       lines.push({
-        sequence: match?.index ?? featureIndex,
+        sequence: match?.index ?? 0,
         featureIndex,
         lineIndex,
         coordinates: oriented
