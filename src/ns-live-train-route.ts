@@ -16,6 +16,23 @@ export interface NsLiveTrainRouteLeg {
   };
 }
 
+export interface NsLiveTrainStop {
+  sequence: number;
+  stationCode: string | null;
+  uicCode: string | null;
+  name: string | null;
+  plannedArrivalDateTime: string | null;
+  plannedDepartureDateTime: string | null;
+  actualArrivalDateTime: string | null;
+  actualDepartureDateTime: string | null;
+  arrivalDelaySeconds: number | null;
+  departureDelaySeconds: number | null;
+  platform: string | null;
+  status: string | null;
+  passing: boolean;
+  cancelled: boolean;
+}
+
 export interface NsLiveTrainRouteResult {
   ok: true;
   source: "NS Reisinformatie + SpoorKaart API";
@@ -23,6 +40,8 @@ export interface NsLiveTrainRouteResult {
   dateTime: string;
   checkedAt: string;
   legs: NsLiveTrainRouteLeg[];
+  stops: NsLiveTrainStop[];
+  routeWarning?: string;
 }
 
 const NS_JOURNEY_ROOT = "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/journey";
@@ -36,13 +55,177 @@ const MAX_ROUTE_CACHE_ENTRIES = 40;
 const MAX_STATION_CACHE_ENTRIES = 120;
 
 const routeCache = new Map<string, { expiresAt: number; promise: Promise<NsLiveTrainRouteResult> }>();
-const stationCodeCache = new Map<string, { expiresAt: number; promise: Promise<string> }>();
+interface NsStationInfo {
+  code: string | null;
+  name: string | null;
+}
+const stationInfoCache = new Map<string, { expiresAt: number; promise: Promise<NsStationInfo> }>();
 
 function asText(value: unknown): string {
   return String(value ?? "").trim();
 }
 
-function unwrap(value: any): any {
+function firstText(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" || typeof value === "number") {
+      const cleaned = String(value).trim();
+      if (cleaned) return cleaned;
+    }
+  }
+  return null;
+}
+
+function truthy(value: unknown): boolean {
+  if (value === true || value === 1) return true;
+  const text = asText(value).toLowerCase();
+  return ["true", "1", "yes", "ja", "cancelled", "canceled", "cancel", "skipped"].includes(text);
+}
+
+function normalizeDateTime(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    const milliseconds = value > 1_000_000_000_000 ? value : value * 1000;
+    const date = new Date(milliseconds);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  }
+
+  let raw = firstText(value);
+  if (!raw && value && typeof value === "object") {
+    const item = value as any;
+    raw = firstText(item.dateTime, item.datetime, item.time, item.value);
+  }
+  if (!raw) return null;
+  const milliseconds = Date.parse(raw);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : null;
+}
+
+function firstDateTime(...values: unknown[]): string | null {
+  for (const value of values) {
+    const normalized = normalizeDateTime(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function stationNameFromObject(value: any): string | null {
+  if (!value || typeof value !== "object") return null;
+  const direct = firstText(
+    value.name,
+    value.stationName,
+    value.longName,
+    value.displayName,
+    value.label,
+    value.value
+  );
+  if (direct) return direct;
+
+  const names = value.names ?? value.localizedNames;
+  if (Array.isArray(names)) {
+    const dutch = names.find((item: any) =>
+      String(item?.language ?? item?.lang ?? "").toLowerCase().startsWith("nl")
+    );
+    const selected = dutch ?? names[0];
+    if (selected) {
+      return firstText(selected.name, selected.value, selected.text, selected.label);
+    }
+  } else if (names && typeof names === "object") {
+    return firstText(names.nl, names.NL, names.default, names.name, names.value);
+  }
+  return null;
+}
+
+function getJourneyStopName(entry: any): string | null {
+  const stop = entry?.stop ?? entry?.station ?? entry;
+  return stationNameFromObject(stop) ??
+    stationNameFromObject(entry?.station) ??
+    firstText(entry?.name, entry?.stationName, entry?.stopName, entry?.displayName);
+}
+
+function journeyStopDateTime(entry: any, kind: "arrival" | "departure", actual: boolean): string | null {
+  const event = entry?.[kind];
+  const title = kind === "arrival" ? "Arrival" : "Departure";
+  const titleLower = kind === "arrival" ? "arrival" : "departure";
+  if (actual) {
+    return firstDateTime(
+      entry?.[`actual${title}DateTime`],
+      entry?.[`actual${title}Time`],
+      entry?.[`${titleLower}ActualDateTime`],
+      event?.actualDateTime,
+      event?.actualTime,
+      entry?.[`actual${title}`]
+    );
+  }
+  return firstDateTime(
+    entry?.[`planned${title}DateTime`],
+    entry?.[`planned${title}Time`],
+    event?.plannedDateTime,
+    event?.plannedTime,
+    entry?.[`${titleLower}DateTime`],
+    entry?.[`${titleLower}Time`],
+    event?.dateTime,
+    event?.time
+  );
+}
+
+function delaySeconds(actual: string | null, planned: string | null): number | null {
+  if (!actual || !planned) return null;
+  const difference = Math.round((Date.parse(actual) - Date.parse(planned)) / 1000);
+  return Number.isFinite(difference) ? difference : null;
+}
+
+function normalizeJourneyStop(
+  entry: any,
+  sequence: number,
+  station: NsStationInfo,
+  directCode: string,
+  uicCode: string
+): NsLiveTrainStop {
+  const stopStatus = firstText(
+    entry?.status,
+    entry?.stopStatus,
+    entry?.scheduleRelationship,
+    entry?.arrivalStatus,
+    entry?.departureStatus
+  );
+  const statusText = (stopStatus ?? "").toLowerCase();
+  const plannedArrivalDateTime = journeyStopDateTime(entry, "arrival", false);
+  const plannedDepartureDateTime = journeyStopDateTime(entry, "departure", false);
+  const actualArrivalDateTime = journeyStopDateTime(entry, "arrival", true);
+  const actualDepartureDateTime = journeyStopDateTime(entry, "departure", true);
+  const platformValue = entry?.actualDepartureTrack ??
+    entry?.plannedDepartureTrack ??
+    entry?.actualArrivalTrack ??
+    entry?.plannedArrivalTrack ??
+    entry?.departurePlatform ??
+    entry?.arrivalPlatform ??
+    entry?.plannedTrack ??
+    entry?.platform ??
+    entry?.track;
+  const platform = typeof platformValue === "object"
+    ? firstText(platformValue?.name, platformValue?.code, platformValue?.number, platformValue?.label)
+    : firstText(platformValue);
+
+  return {
+    sequence,
+    stationCode: directCode || station.code,
+    uicCode: uicCode || null,
+    name: getJourneyStopName(entry) ?? station.name,
+    plannedArrivalDateTime,
+    plannedDepartureDateTime,
+    actualArrivalDateTime,
+    actualDepartureDateTime,
+    arrivalDelaySeconds: delaySeconds(actualArrivalDateTime, plannedArrivalDateTime) ??
+      (typeof entry?.arrivalDelaySeconds === "number" ? entry.arrivalDelaySeconds : null),
+    departureDelaySeconds: delaySeconds(actualDepartureDateTime, plannedDepartureDateTime) ??
+      (typeof entry?.departureDelaySeconds === "number" ? entry.departureDelaySeconds : null),
+    platform,
+    status: stopStatus,
+    passing: truthy(entry?.passing ?? entry?.passThrough),
+    cancelled: truthy(entry?.cancelled ?? entry?.canceled ?? entry?.skipped ?? entry?.cancelledStop) ||
+      /cancel|annul|skip|vervallen/.test(statusText)
+  };
+}
+
+function unwrap(value: any) {
   if (value && typeof value === "object") {
     if (value.payload !== undefined) return value.payload;
     if (value.data !== undefined) return value.data;
@@ -154,34 +337,75 @@ async function requestJson(
   }
 }
 
-async function resolveStationCode(
+function stationInfoFromPayload(input: any, requestedUic: string): NsStationInfo {
+  const root = unwrap(input);
+
+  const visit = (value: any, depth: number): NsStationInfo | null => {
+    if (depth > 8 || value === null || value === undefined) return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof value !== "object") return null;
+
+    const id = value.id && typeof value.id === "object" ? value.id : {};
+    const foundUic = normalizeUicCode(
+      id.uicCode ?? id.uicCdCode ?? value.uicCode ?? value.uicCdCode
+    );
+    const code = normalizeStationCode(id.code ?? value.stationCode ?? value.code);
+    const name = stationNameFromObject(value) ?? stationNameFromObject(id);
+
+    if (foundUic === requestedUic && (code || name)) {
+      return { code: code || null, name: name || null };
+    }
+
+    for (const child of Object.values(value)) {
+      if (child && typeof child === "object") {
+        const found = visit(child, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  const matched = visit(root, 0);
+  if (matched) return matched;
+  return { code: stationCodeFromPayload(input, requestedUic) || null, name: null };
+}
+
+async function resolveStationInfo(
   uicCode: string,
   env: NsLiveTrainRouteEnv,
   fetchImpl: typeof fetch
-): Promise<string> {
-  const cached = stationCodeCache.get(uicCode);
+): Promise<NsStationInfo> {
+  const cached = stationInfoCache.get(uicCode);
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
-  if (cached) stationCodeCache.delete(uicCode);
+  if (cached) stationInfoCache.delete(uicCode);
 
   const promise = (async () => {
     const url = new URL(NS_STATION_ROOT);
     url.searchParams.set("uicCode", uicCode);
     const payload = await requestJson(url, env, Math.round(STATION_CACHE_TTL_MS / 1000), fetchImpl);
-    const code = stationCodeFromPayload(payload, uicCode);
-    if (!code) throw new Error("NS_LIVE_TRAIN_ROUTE_STATION_UNRESOLVED_" + uicCode);
-    return code;
+    const info = stationInfoFromPayload(payload, uicCode);
+    if (!info.code && !info.name) {
+      throw new Error("NS_LIVE_TRAIN_ROUTE_STATION_UNRESOLVED_" + uicCode);
+    }
+    return info;
   })();
 
-  stationCodeCache.set(uicCode, { expiresAt: Date.now() + STATION_CACHE_TTL_MS, promise });
-  while (stationCodeCache.size > MAX_STATION_CACHE_ENTRIES) {
-    const oldest = stationCodeCache.keys().next().value;
+  stationInfoCache.set(uicCode, { expiresAt: Date.now() + STATION_CACHE_TTL_MS, promise });
+  while (stationInfoCache.size > MAX_STATION_CACHE_ENTRIES) {
+    const oldest = stationInfoCache.keys().next().value;
     if (oldest === undefined) break;
-    stationCodeCache.delete(oldest);
+    stationInfoCache.delete(oldest);
   }
   try {
     return await promise;
   } catch (error) {
-    if (stationCodeCache.get(uicCode)?.promise === promise) stationCodeCache.delete(uicCode);
+    if (stationInfoCache.get(uicCode)?.promise === promise) stationInfoCache.delete(uicCode);
     throw error;
   }
 }
@@ -292,29 +516,71 @@ export async function fetchNsLiveTrainRoute(
     if (stops.length > MAX_STOPS) throw new Error("NS_LIVE_TRAIN_ROUTE_TOO_MANY_STOPS");
 
     const stopInfos = stops.map(entry => ({
+      entry,
       uicCode: getStopUicCode(entry),
-      directCode: getDirectStationCode(entry)
+      directCode: getDirectStationCode(entry),
+      name: getJourneyStopName(entry)
     }));
-    if (stopInfos.some(stop => !stop.uicCode && !stop.directCode)) {
-      throw new Error("NS_LIVE_TRAIN_ROUTE_STOPS_MISSING_CODES");
-    }
 
-    const stationCodes = await Promise.all(stopInfos.map(async stop =>
-      stop.directCode || await resolveStationCode(stop.uicCode, env, fetchImpl)
-    ));
+    // The NS journey endpoint is the source of the ordered station list and
+    // timetable. Resolve station metadata once per UIC code, and retain the
+    // timetable even if Spoorkaart cannot supply geometry for one section.
+    const stationMetadata = await Promise.all(stopInfos.map(async stop => {
+      if (stop.uicCode && (!stop.directCode || !stop.name)) {
+        try {
+          return await resolveStationInfo(stop.uicCode, env, fetchImpl);
+        } catch {
+          return { code: stop.directCode || null, name: stop.name || null };
+        }
+      }
+      return { code: stop.directCode || null, name: stop.name || null };
+    }));
+
+    const normalizedStops = stopInfos.map((stop, index) =>
+      normalizeJourneyStop(
+        stop.entry,
+        index,
+        stationMetadata[index],
+        stop.directCode,
+        stop.uicCode
+      )
+    );
+
     const orderedStationCodes: string[] = [];
-    for (const code of stationCodes) {
-      if (orderedStationCodes[orderedStationCodes.length - 1] !== code) {
-        orderedStationCodes.push(code);
+    const haveAllStationCodes = normalizedStops.every(stop => Boolean(stop.stationCode));
+    if (haveAllStationCodes) {
+      for (const stop of normalizedStops) {
+        const code = stop.stationCode!;
+        if (orderedStationCodes[orderedStationCodes.length - 1] !== code) {
+          orderedStationCodes.push(code);
+        }
       }
     }
-    if (orderedStationCodes.length < 2) throw new Error("NS_LIVE_TRAIN_ROUTE_TOO_FEW_STATIONS");
 
-    const trajectUrl = new URL(NS_TRAJECT_ROOT);
-    trajectUrl.searchParams.set("stations", orderedStationCodes.join(","));
-    const trajectPayload = await requestJson(trajectUrl, env, 86_400, fetchImpl);
-    const lines = extractOrderedRouteLines(trajectPayload, orderedStationCodes);
-    if (!lines.length) throw new Error("NS_LIVE_TRAIN_ROUTE_GEOMETRY_MISSING");
+    let legs: NsLiveTrainRouteLeg[] = [];
+    let routeWarning: string | undefined;
+    if (!haveAllStationCodes || orderedStationCodes.length < 2) {
+      routeWarning = "Stations en geplande tijden zijn beschikbaar, maar niet alle stationscodes zijn beschikbaar om de spoorroute te tekenen.";
+    } else {
+      try {
+        const trajectUrl = new URL(NS_TRAJECT_ROOT);
+        trajectUrl.searchParams.set("stations", orderedStationCodes.join(","));
+        const trajectPayload = await requestJson(trajectUrl, env, 86_400, fetchImpl);
+        const lines = extractOrderedRouteLines(trajectPayload, orderedStationCodes);
+        legs = lines.map((coordinates, sequence) => ({
+          tripId: trainNumber,
+          routeId: "NS-SPOORKAART-" + sequence,
+          mode: "RAIL",
+          sequence,
+          legGeometry: { type: "LineString" as const, coordinates }
+        }));
+        if (!legs.length) {
+          routeWarning = "Stations en geplande tijden zijn beschikbaar, maar NS leverde geen bruikbare spoorgeometrie terug.";
+        }
+      } catch {
+        routeWarning = "Stations en geplande tijden zijn beschikbaar, maar de spoorroute kon tijdelijk niet worden opgehaald.";
+      }
+    }
 
     return {
       ok: true,
@@ -322,13 +588,9 @@ export async function fetchNsLiveTrainRoute(
       trainNumber,
       dateTime,
       checkedAt: new Date().toISOString(),
-      legs: lines.map((coordinates, sequence) => ({
-        tripId: trainNumber,
-        routeId: "NS-SPOORKAART-" + sequence,
-        mode: "RAIL",
-        sequence,
-        legGeometry: { type: "LineString", coordinates }
-      }))
+      legs,
+      stops: normalizedStops,
+      ...(routeWarning ? { routeWarning } : {})
     };
   })();
 
