@@ -289,4 +289,35 @@ assert.ok(html.includes("stopDestinationCandidates") &&
   html.includes("Eerdere haltes"),
   "line-search cards must recover a known terminal stop and separate past from upcoming stops");
 console.log("PASS: blank destination fields no longer hide known directions; upcoming/past stop fallback is present");
+
+const lineSearchStopNameKey = new vm.Script(
+  "(" + extractFunction("lineSearchStopNameKey") + ")"
+).runInNewContext();
+const lineSearchTimestampMs = new vm.Script(
+  "(" + extractFunction("lineSearchTimestampMs") + ")"
+).runInNewContext();
+const renderLineSearchStops = new vm.Script(
+  "(" + extractFunction("renderLineSearchStops") + ")"
+).runInNewContext({
+  lineSearchStopNameKey,
+  lineSearchTimestampMs,
+  renderLineSearchStopTable: stops => "<table>" + stops.map(stop => stop.name).join("|") + "</table>",
+  esc: value => String(value ?? "")
+});
+const timelineNow = Date.parse("2026-10-24T09:00:00+02:00");
+const stopTimelineHTML = renderLineSearchStops({
+  stop: "",
+  currentStopCode: "mismatched-current-stop-id",
+  stops: [
+    { name: "Eerder", expectedDeparture: new Date(timelineNow - 600_000).toISOString() },
+    { name: "Huidig", expectedDeparture: new Date(timelineNow - 120_000).toISOString() },
+    { name: "Volgende", expectedDeparture: new Date(timelineNow + 300_000).toISOString() }
+  ]
+}, timelineNow);
+assert.ok(stopTimelineHTML.includes("<summary>Vorige haltes (1)</summary>"),
+  "when current stop IDs differ, already-passed stops must be collapsible");
+assert.ok(stopTimelineHTML.includes("<table>Eerder</table>") &&
+  stopTimelineHTML.includes("<table>Huidig|Volgende</table>"),
+  "the current/last-reported stop and future stops must remain visible outside the past-stop disclosure");
+
 console.log("All live vehicle map selftests passed.");
