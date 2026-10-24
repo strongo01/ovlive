@@ -1,6 +1,13 @@
 name: Refresh OpenOV trip shapes in Cloudflare R2
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/refresh-openov-trip-shapes-r2.yml"
+      - "scripts/build-openov-trip-shapes.py"
+      - "scripts/openov-trip-shapes-selftest.py"
   schedule:
     # OpenOV normally publishes the new static GTFS feed in the evening.
     # Run later in the UTC day to avoid publishing yesterday's timetable.
@@ -15,8 +22,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-builder:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout public OVLive repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate synthetic GTFS route-shape builder
+        run: python3 scripts/openov-trip-shapes-selftest.py
+
   refresh-and-publish:
-    if: github.repository == 'strongo01/ovlive'
+    if: github.repository == 'strongo01/ovlive' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
