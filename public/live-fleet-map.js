@@ -41,6 +41,7 @@
     routeLayer: null,
     selectedRouteKey: null,
     routeStatus: "",
+    routeSource: "",
     routeRequestToken: 0,
     routeGeometryCache: new Map(),
     locationMarker: null,
@@ -510,7 +511,10 @@
     }
 
     const task = (async () => {
-      const params = new URLSearchParams({ tripId: identity.tripId });
+      const params = new URLSearchParams({
+        tripId: identity.tripId,
+        routeId: identity.routeId
+      });
       const response = await fetch("/api/trip-shape?" + params.toString(), {
         cache: "default",
         headers: { accept: "application/json" },
@@ -525,6 +529,9 @@
       // (or a spelling-only alias with the same date/time and base trip ID).
       // Verify that request/resolution identity first; per-leg routeId/tripId and
       // mode metadata may be absent or spelled differently by Transitous.
+      if (payload.routeSource) {
+        state.routeSource = String(payload.routeSource);
+      }
       const requestedTripId = String(payload.requestedTripId ?? identity.tripId).trim();
       const resolvedTripId = String(payload.resolvedTripId ?? requestedTripId).trim();
       if (!tripIdMatchesForShape(requestedTripId, identity.tripId) ||
@@ -571,6 +578,7 @@
     const token = ++state.routeRequestToken;
     state.selectedRouteKey = vehicle.key;
     state.routeStatus = "Route wordt opgehaald…";
+    state.routeSource = "";
     state.routeLayer.clearLayers();
     refreshVehiclePopup(vehicle.key);
 
@@ -625,11 +633,12 @@
       if (bounds.isValid()) {
         state.map.fitBounds(bounds, { padding: [28, 28], maxZoom: 13 });
       }
-      state.routeStatus = canSplitProgress
+      const sourceLabel = state.routeSource ? " Bron: " + state.routeSource + "." : "";
+      state.routeStatus = (canSplitProgress
         ? (closest.split.remaining.length > 1
           ? "⚪ Grijs = afgelegd deel (geschat vanaf GPS); 🔴 rood = resterende route."
           : "⚪ Grijs = afgelegd deel; de trein/bus bevindt zich bij het einde van de route.")
-        : "🔴 Rood = route van deze rit. De GPS-positie ligt te ver van de route of dicht bij het begin om het afgelegde deel betrouwbaar grijs te markeren.";
+        : "🔴 Rood = route van deze rit. De GPS-positie ligt te ver van de route of dicht bij het begin om het afgelegde deel betrouwbaar grijs te markeren.") + sourceLabel;
     } catch (error) {
       if (token !== state.routeRequestToken || state.selectedRouteKey !== vehicle.key) return;
       state.routeStatus = error instanceof Error ? error.message : "De ritroute kon niet worden getoond.";
