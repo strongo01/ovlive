@@ -264,7 +264,7 @@ assert.ok(html.includes('L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}
 assert.ok(html.includes("renderLiveJourneyStopTimeline(legs)"),
   "each journey must include a per-stop time line");
 console.log("PASS: live map markup, 10-second polling, route timeline and lifecycle are wired");
-console.log("All live vehicle map selftests passed.");
+
 
 const firstNonEmptyDestinationText = new vm.Script(
   "(" + extractFunction("firstNonEmptyDestinationText") + ")"
@@ -289,3 +289,4 @@ assert.ok(html.includes("stopDestinationCandidates") &&
   html.includes("Eerdere haltes"),
   "line-search cards must recover a known terminal stop and separate past from upcoming stops");
 console.log("PASS: blank destination fields no longer hide known directions; upcoming/past stop fallback is present");
+console.log("All live vehicle map selftests passed.");
