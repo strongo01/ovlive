@@ -44,6 +44,14 @@ const routeGeoJson = {
         type: "LineString",
         coordinates: [[5.0, 52.0], [4.9, 52.3]]
       }
+    },
+    {
+      type: "Feature",
+      properties: { from: "UT", to: "AH" },
+      geometry: {
+        type: "LineString",
+        coordinates: [[5.1, 52.1], [5.3, 52.2], [5.0, 52.0]]
+      }
     }
   ]
 };
@@ -180,7 +188,20 @@ const noGeometryFetchMock = async (input, init = {}) => {
   }
 
   if (url.pathname.endsWith("/api/v1/traject.geojson")) {
-    return new Response(JSON.stringify({ type: "FeatureCollection", features: [] }), {
+    // Spoorkaart returned a real line, but it connects the first and final
+    // stations directly instead of matching the journey's adjacent pair.
+    // The endpoint must not draw that unrelated geometry as this train's route.
+    return new Response(JSON.stringify({
+      type: "FeatureCollection",
+      features: [{
+        type: "Feature",
+        properties: { from: "UT", to: "AH" },
+        geometry: {
+          type: "LineString",
+          coordinates: [[5.1, 52.1], [5.3, 52.2], [5.0, 52.0]]
+        }
+      }]
+    }), {
       status: 200,
       headers: { "content-type": "application/geo+json" }
     });
