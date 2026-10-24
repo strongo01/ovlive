@@ -1,0 +1,9 @@
+name = "ovlive-openov-shapes"
+main = "src/openov-shapes-assets.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[assets]
+directory = "./public/openov-trip-shapes"
+binding = "ASSETS"
+run_worker_first = true
