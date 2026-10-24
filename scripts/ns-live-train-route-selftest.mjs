@@ -21,6 +21,11 @@ const stationCodes = new Map([
   ["8400002", "ASD"],
   ["8400003", "AH"]
 ]);
+const stationNames = new Map([
+  ["8400001", "Utrecht Centraal"],
+  ["8400002", "Amsterdam Centraal"],
+  ["8400003", "Amsterdam Amstel"]
+]);
 const routeGeoJson = {
   type: "FeatureCollection",
   features: [
@@ -58,9 +63,25 @@ const fetchMock = async (input, init = {}) => {
     return new Response(JSON.stringify({
       payload: {
         stops: [
-          { stop: { uicCode: "8400001", name: "Utrecht Centraal" } },
-          { stop: { uicCode: "8400002", name: "Amsterdam Centraal" } },
-          { stop: { uicCode: "8400003", name: "Amsterdam Amstel" } }
+          {
+            stop: { uicCode: "8400001" },
+            plannedDepartureDateTime: "2026-10-20T07:21:00+02:00",
+            actualDepartureDateTime: "2026-10-20T07:22:00+02:00",
+            plannedTrack: "5"
+          },
+          {
+            stop: { uicCode: "8400002" },
+            plannedArrivalDateTime: "2026-10-20T07:42:00+02:00",
+            plannedDepartureDateTime: "2026-10-20T07:43:00+02:00",
+            actualArrivalDateTime: "2026-10-20T07:44:00+02:00",
+            plannedTrack: "8"
+          },
+          {
+            stop: { uicCode: "8400003" },
+            plannedArrivalDateTime: "2026-10-20T07:50:00+02:00",
+            plannedTrack: "2",
+            passing: false
+          }
         ]
       }
     }), { status: 200, headers: { "content-type": "application/json" } });
@@ -71,7 +92,10 @@ const fetchMock = async (input, init = {}) => {
     const code = stationCodes.get(uicCode);
     assert.ok(code, "station lookup should request only known UIC codes");
     return new Response(JSON.stringify({
-      payload: { id: { uicCode, code } }
+      payload: {
+        id: { uicCode, code },
+        name: stationNames.get(uicCode)
+      }
     }), { status: 200, headers: { "content-type": "application/json" } });
   }
 
@@ -106,6 +130,20 @@ assert.equal(route.dateTime, "2026-10-20T07:20:00.000Z");
 assert.equal(route.legs.length, 2,
   "the selected train's connected track segments should be preserved");
 assert.equal(route.legs[0].sequence, 0);
+assert.equal(route.stops.length, 3, "ordered stations must be returned with the route");
+assert.deepEqual(route.stops.map(stop => stop.name), [
+  "Utrecht Centraal",
+  "Amsterdam Centraal",
+  "Amsterdam Amstel"
+], "the API must resolve Dutch station names by exact UIC code");
+assert.equal(route.stops[0].plannedDepartureDateTime, "2026-10-20T05:21:00.000Z",
+  "planned departure times must be normalized to ISO UTC");
+assert.equal(route.stops[0].actualDepartureDateTime, "2026-10-20T05:22:00.000Z",
+  "actual departure time must be kept separately from the timetable");
+assert.equal(route.stops[0].departureDelaySeconds, 60,
+  "departure delay should be calculated from planned and actual times");
+assert.equal(route.stops[1].plannedArrivalDateTime, "2026-10-20T05:42:00.000Z");
+assert.equal(route.stops[1].platform, "8");
 assert.deepEqual(route.legs[0].legGeometry.coordinates[0], [5.1, 52.1],
   "a reversed track segment must be oriented in the journey direction");
 assert.deepEqual(route.legs[1].legGeometry.coordinates[0], [4.9, 52.3],
