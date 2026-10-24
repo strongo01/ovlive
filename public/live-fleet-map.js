@@ -42,6 +42,7 @@
     selectedRouteKey: null,
     routeStatus: "",
     routeSource: "",
+    routeSourceCache: new Map(),
     routeRequestToken: 0,
     routeGeometryCache: new Map(),
     locationMarker: null,
@@ -457,6 +458,7 @@
       : new Date().toISOString();
     const cacheKey = "ns-route|" + trainNumber + "|" + dateTime.slice(0, 16);
     if (state.routeGeometryCache.has(cacheKey)) {
+      state.routeSource = state.routeSourceCache.get(cacheKey) || "";
       return state.routeGeometryCache.get(cacheKey);
     }
 
@@ -492,6 +494,7 @@
       return await task;
     } catch (error) {
       if (state.routeGeometryCache.get(cacheKey) === task) state.routeGeometryCache.delete(cacheKey);
+      state.routeSourceCache.delete(cacheKey);
       throw error;
     }
   }
@@ -529,9 +532,8 @@
       // (or a spelling-only alias with the same date/time and base trip ID).
       // Verify that request/resolution identity first; per-leg routeId/tripId and
       // mode metadata may be absent or spelled differently by Transitous.
-      if (payload.routeSource) {
-        state.routeSource = String(payload.routeSource);
-      }
+      state.routeSource = String(payload.routeSource ?? "");
+      state.routeSourceCache.set(cacheKey, state.routeSource);
       const requestedTripId = String(payload.requestedTripId ?? identity.tripId).trim();
       const resolvedTripId = String(payload.resolvedTripId ?? requestedTripId).trim();
       if (!tripIdMatchesForShape(requestedTripId, identity.tripId) ||
