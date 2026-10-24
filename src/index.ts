@@ -22,7 +22,7 @@ import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-
 
 interface Env {
   ASSETS: Fetcher;
-  OPENOV_SHAPES?: R2Bucket;
+  OPENOV_SHAPES_ASSETS?: Fetcher;
   NDOV_FEEDS: DurableObjectNamespace;
   NDOV_AUTOCOLLECT?: string;
   APP_NAME: string;
@@ -75,7 +75,6 @@ async function findOpenovStaticTripShape(
   type ShapeManifest = {
     format?: number;
     precision?: number;
-    objectPrefix?: string;
     routes?: Record<string, string[]>;
   };
   type ShapeShard = {
@@ -87,40 +86,38 @@ async function findOpenovStaticTripShape(
   };
 
   let manifest: ShapeManifest | null = null;
-  let manifestSource: "r2" | "assets" = "assets";
-  let objectPrefix = "";
+  let manifestSource: "service" | "assets" = "assets";
 
-  // R2 is the rolling, automatically refreshed source. Each publication uses a
-  // versioned prefix and publishes manifest.json last, so an update never points
-  // to half-uploaded files. Local static assets remain a safe migration fallback.
-  if (env.OPENOV_SHAPES) {
+  // Dedicated Cloudflare Worker serves the large daily-updated static GTFS
+  // shapes. A service binding keeps this data off the primary Worker asset set
+  // and needs no R2 bucket or R2 billing subscription.
+  if (env.OPENOV_SHAPES_ASSETS) {
     try {
-      const object = await env.OPENOV_SHAPES.get("manifest.json");
-      if (object) {
-        const candidate = JSON.parse(await object.text()) as ShapeManifest;
-        const candidatePrefix = String(candidate.objectPrefix ?? "");
-        if (candidate.format === 1 &&
-            candidate.routes && typeof candidate.routes === "object" &&
-            !Array.isArray(candidate.routes) &&
-            /^versions\/[A-Za-z0-9_-]+\/$/.test(candidatePrefix)) {
+      const response = await env.OPENOV_SHAPES_ASSETS.fetch(new Request(
+        "https://openov-shapes.local/manifest.json",
+        { method: "GET", headers: { accept: "application/json" } }
+      ));
+      if (response.ok) {
+        const candidate = await response.json() as ShapeManifest;
+        if (candidate?.format === 1 && candidate.routes &&
+            typeof candidate.routes === "object" && !Array.isArray(candidate.routes)) {
           manifest = candidate;
-          manifestSource = "r2";
-          objectPrefix = candidatePrefix;
+          manifestSource = "service";
         }
       }
     } catch {
-      // Continue to the previously deployed static assets if R2 is not ready.
+      // Keep local static assets as an offline/development fallback.
     }
   }
 
   if (!manifest) {
     try {
-      const manifestResponse = await env.ASSETS.fetch(new Request(
+      const response = await env.ASSETS.fetch(new Request(
         "https://ovlive-assets.local/openov-trip-shapes/manifest.json",
         { method: "GET", headers: { accept: "application/json" } }
       ));
-      if (!manifestResponse.ok) return null;
-      manifest = await manifestResponse.json() as ShapeManifest;
+      if (!response.ok) return null;
+      manifest = await response.json() as ShapeManifest;
     } catch {
       return null;
     }
@@ -139,22 +136,25 @@ async function findOpenovStaticTripShape(
     if (!new RegExp("^route-" + routeId + "-\\d+\\.json$").test(filename)) continue;
 
     let shard: ShapeShard | null = null;
-    if (manifestSource === "r2" && env.OPENOV_SHAPES) {
+    if (manifestSource === "service" && env.OPENOV_SHAPES_ASSETS) {
       try {
-        const object = await env.OPENOV_SHAPES.get(objectPrefix + filename);
-        if (!object) continue;
-        shard = JSON.parse(await object.text()) as ShapeShard;
+        const response = await env.OPENOV_SHAPES_ASSETS.fetch(new Request(
+          "https://openov-shapes.local/" + filename,
+          { method: "GET", headers: { accept: "application/json" } }
+        ));
+        if (!response.ok) continue;
+        shard = await response.json() as ShapeShard;
       } catch {
         continue;
       }
     } else {
-      const shardResponse = await env.ASSETS.fetch(new Request(
-        "https://ovlive-assets.local/openov-trip-shapes/" + filename,
-        { method: "GET", headers: { accept: "application/json" } }
-      ));
-      if (!shardResponse.ok) continue;
       try {
-        shard = await shardResponse.json() as ShapeShard;
+        const response = await env.ASSETS.fetch(new Request(
+          "https://ovlive-assets.local/openov-trip-shapes/" + filename,
+          { method: "GET", headers: { accept: "application/json" } }
+        ));
+        if (!response.ok) continue;
+        shard = await response.json() as ShapeShard;
       } catch {
         continue;
       }
