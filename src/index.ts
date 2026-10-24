@@ -186,6 +186,27 @@ function normalizeLineSearchTripId(value: unknown): string {
   return String(value ?? "").trim().replace(/^\d{8}_\d{2}:\d{2}(?::\d{2})?_/, "");
 }
 
+function firstNonEmptyLineSearchText(...values: unknown[]): string {
+  for (const value of values) {
+    let candidate = "";
+    if (typeof value === "string" || typeof value === "number") {
+      candidate = String(value).trim();
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      const item = value as Record<string, any>;
+      candidate = firstNonEmptyLineSearchText(
+        item.name, item.displayName, item.destinationName, item.headsign,
+        item.headSign, item.label, item.stop?.name
+      );
+    }
+    if (!candidate) continue;
+    if (/^(?:bestemming onbekend|onbekende bestemming|onbekend|unknown|n\/?a|—|-)$/i.test(candidate)) {
+      continue;
+    }
+    return candidate;
+  }
+  return "";
+}
+
 interface OpenovRouteMetadataEntry {
   routeShortName?: string;
   routeLongName?: string;
@@ -4312,8 +4333,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             }
           }
           for (const [routeKey, routeData] of Object.entries(details)) {
-            const meta = routeData?.Line ?? directory[routeKey]?.Line ?? directory[routeKey] ?? {};
-            const line = String(meta?.LinePublicNumber ?? query).trim();
+            const directoryEntry = directory[routeKey] ?? {};
+            const directoryMeta = directoryEntry?.Line ?? directoryEntry;
+            const detailMeta = routeData?.Line ?? {};
+            const meta = Object.keys(detailMeta).length ? detailMeta : directoryMeta;
+            const line = String(firstNonEmptyLineSearchText(
+              meta?.LinePublicNumber, directoryMeta?.LinePublicNumber, query
+            ) || query).trim();
             const actuals = routeData?.Actuals && typeof routeData.Actuals === "object"
               ? Object.entries(routeData.Actuals)
               : [];
@@ -4327,7 +4353,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 : null;
               // Ignore very old passes; an out-of-date observation is not a live vehicle.
               if (ageSeconds !== null && (ageSeconds < -120 || ageSeconds > 600)) continue;
-              const destination = String(actual.DestinationName50 ?? meta.DestinationName50 ?? "").trim();
+              // OVAPI can include an empty string on an Actual even when the
+              // directory/Line metadata has the correct direction. Nullish
+              // coalescing treats "" as a value, so choose the first non-empty
+              // destination instead of prematurely falling back to "unknown".
+              const destination = firstNonEmptyLineSearchText(
+                actual.DestinationName50, actual.DestinationName, actual.destinationName50,
+                actual.HeadSign, actual.Headsign, actual.headsign, actual.Destination,
+                detailMeta?.DestinationName50, detailMeta?.DestinationName,
+                directoryMeta?.DestinationName50, directoryMeta?.DestinationName,
+                meta?.DestinationName50, meta?.DestinationName
+              ) || "Bestemming onbekend";
               const journeyNumber = actual.JourneyNumber == null ? "" : String(actual.JourneyNumber).trim();
               const vehicleNumber = String(
                 actual.VehicleNumber ?? actual.VehicleNumberOnTrip ?? actual.VehicleCode ?? actual.VehicleId ?? ""
@@ -4534,10 +4570,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             displayLine.toLocaleLowerCase("nl-NL") === needle;
           const line = displayLine || publicRouteName ||
             (String(leg?.mode ?? "").toUpperCase() === "TRAIN" ? "Trein" : "Lijn onbekend");
-          const destination = String(
-            leg?.headsign ?? leg?.tripTo?.name ?? leg?.tripTo?.displayName ??
-            leg?.to?.name ?? leg?.destination?.name ?? itinerary?.to?.name ?? ""
-          ).trim() || "Bestemming onbekend";
+          const finalTransitLeg = [...legs].reverse().find((value: any) =>
+            !["WALK", "FOOT"].includes(String(value?.mode ?? "").toUpperCase())
+          ) ?? leg;
+          const destination = firstNonEmptyLineSearchText(
+            leg?.headsign, leg?.headSign, leg?.tripTo, leg?.destination,
+            leg?.to, leg?.toName, leg?.destinationName,
+            finalTransitLeg?.headsign, finalTransitLeg?.tripTo, finalTransitLeg?.destination,
+            finalTransitLeg?.to, finalTransitLeg?.toName, finalTransitLeg?.destinationName,
+            itinerary?.to, itinerary?.destination, itinerary?.tripTo
+          ) || "Bestemming onbekend";
           const suffixMatch = tripId.match(/_nl-OpenOV_(.+)$/i);
           const tripNumber = suffixMatch?.[1] ?? "";
           const vehicleMatched = vehicleId.toLocaleLowerCase("nl-NL").includes(needle);
