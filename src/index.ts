@@ -44,6 +44,92 @@ const OPENOV = {
 
 const TRANSITOUS = "https://api.transitous.org/api/v6";
 
+interface OpenovStaticTripShape {
+  tripId: string;
+  routeId: string;
+  mode: string;
+  legGeometry: { points: string; precision: number };
+}
+
+/**
+ * Resolve a live OpenOV trip directly against the same static GTFS trip_id
+ * and route_id. This safely covers the daily-import window where OpenOV has
+ * published new numeric trip IDs but Transitous still has yesterday's feed.
+ */
+async function findOpenovStaticTripShape(
+  env: Env,
+  wrappedTripIdValue: unknown,
+  routeIdValue: unknown
+): Promise<OpenovStaticTripShape | null> {
+  const wrappedTripId = String(wrappedTripIdValue ?? "").trim();
+  const routeId = String(routeIdValue ?? "").trim();
+  if (!/^\\d+$/.test(routeId)) return null;
+
+  const match = wrappedTripId.match(
+    /^\\d{8}_\\d{1,2}:\\d{2}(?::\\d{2})?_nl-OpenOV_(\\d+)$/i
+  );
+  if (!match) return null;
+  const tripId = match[1];
+
+  try {
+    const manifestResponse = await env.ASSETS.fetch(new Request(
+      "https://ovlive-assets.local/openov-trip-shapes/manifest.json",
+      { method: "GET", headers: { accept: "application/json" } }
+    ));
+    if (!manifestResponse.ok) return null;
+    const manifest = await manifestResponse.json() as {
+      format?: number;
+      precision?: number;
+      routes?: Record<string, string[]>;
+    };
+    if (manifest?.format !== 1 || !manifest.routes ||
+        typeof manifest.routes !== "object" || Array.isArray(manifest.routes)) return null;
+
+    const routeFiles = manifest.routes[routeId];
+    if (!Array.isArray(routeFiles) || !routeFiles.length) return null;
+
+    // The route manifest contains plain filenames only. Validate them before
+    // using the asset binding, and bound lookups to keep a malformed manifest
+    // from multiplying work on the public Worker.
+    for (const filenameValue of routeFiles.slice(0, 40)) {
+      const filename = String(filenameValue ?? "");
+      if (!new RegExp("^route-" + routeId + "-\\d+\\.json$").test(filename)) continue;
+      const shardResponse = await env.ASSETS.fetch(new Request(
+        "https://ovlive-assets.local/openov-trip-shapes/" + filename,
+        { method: "GET", headers: { accept: "application/json" } }
+      ));
+      if (!shardResponse.ok) continue;
+      const shard = await shardResponse.json() as {
+        format?: number;
+        routeId?: string;
+        precision?: number;
+        trips?: Record<string, string>;
+        shapes?: Record<string, string>;
+      };
+      if (shard?.format !== 1 || String(shard.routeId ?? "") !== routeId ||
+          !shard.trips || !shard.shapes) continue;
+
+      const shapeId = String(shard.trips[tripId] ?? "");
+      const points = String(shard.shapes[shapeId] ?? "");
+      if (!shapeId || points.length < 2) continue;
+      return {
+        tripId,
+        routeId,
+        mode: "TRANSIT",
+        legGeometry: {
+          points,
+          precision: Number.isInteger(shard.precision) ? Number(shard.precision) :
+            Number.isInteger(manifest.precision) ? Number(manifest.precision!) : 5
+        }
+      };
+    }
+  } catch {
+    // The normal Transitous error remains visible if local GTFS shape assets
+    // are missing or temporarily unreadable.
+  }
+  return null;
+}
+
 function normalizeLineSearchTripId(value: unknown): string {
   // Transitous/OpenOV composite IDs can start with the service date and trip start time.
   // Those timestamp digits must not be mistaken for a requested line/trip number.
