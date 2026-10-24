@@ -62,9 +62,15 @@ assert.ok(script.includes("startDate: String(row.startDate") &&
   "tapping an exact OpenOV vehicle must load and draw its route in red");
 assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("function tripIdMatchesForShape") &&
-  script.includes("const exactRouteAndTrip") &&
-  script.includes("const exactTrip"),
-  "the map must use normalized exact-trip matching and must not fall back to line-only matches");
+  script.includes("payload.requestedTripId") &&
+  script.includes("payload.resolvedTripId") &&
+  script.includes("tripIdMatchesForShape(resolvedTripId, identity.tripId)"),
+  "the map must validate the exact trip request/resolution before drawing route geometry");
+assert.ok(script.includes('return mode !== "WALK" && mode !== "FOOT";') &&
+  !script.includes("candidate.modeMatches && candidate.points.length > 1"),
+  "verified exact-trip geometry must not be discarded by inconsistent per-leg mode labels");
+assert.ok(!script.includes("candidate.candidateRouteId === identity.routeId"),
+  "the map must not discard exact-trip geometry merely because route metadata IDs differ");
 
 assert.ok(worker.includes("Array.isArray(leg.legGeometry?.coordinates)") &&
   worker.includes("leg.legGeometry.coordinates.length > 1"),
