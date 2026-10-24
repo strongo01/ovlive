@@ -433,11 +433,14 @@ console.log("PASS: planner summary exposes bounded KV6 lookup diagnostics");
 console.log("PASS: KV78 summary labels StopPlace confirmation accurately");
 
 // Full-line geometry is loaded separately from the selected journey segment.
-// Keep the upstream fixed to Transitous, cached, and limited to a known trip ID.
+// Keep the upstream fixed to Transitous, cache successful shape responses, and
+// never force-cache upstream errors or empty geometry responses.
 assert.ok(workerSource.includes('if (url.pathname === "/api/trip-shape")') &&
   workerSource.includes('${TRANSITOUS}/trip') &&
-  workerSource.includes('cf: { cacheTtl: 1800, cacheEverything: true }'),
-  "full trip shapes must use the fixed, cached Transitous trip endpoint");
+  workerSource.includes('"cache-control": "public, max-age=1800"') &&
+  workerSource.includes('"cache-control": "no-store"') &&
+  !workerSource.includes('cf: { cacheTtl: 1800, cacheEverything: true }'),
+  "full trip shapes must use the fixed Transitous endpoint, cache successful geometry, and avoid caching errors");
 assert.ok(workerSource.includes("String(url.searchParams.get(\"tripId\") ?? \"\").trim()") &&
   workerSource.includes("tripId.length > 256"),
   "the full-trip-shape endpoint must validate the requested trip identity");
