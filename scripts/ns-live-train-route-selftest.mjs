@@ -152,6 +152,61 @@ assert.equal(requests.filter(r => r.url.pathname.endsWith("/api/v2/journey")).le
 assert.equal(requests.filter(r => r.url.pathname.endsWith("/nsapp-stations/v1/station")).length, 3);
 assert.equal(requests.filter(r => r.url.pathname.endsWith("/api/v1/traject.geojson")).length, 1);
 
+// The station timetable must remain useful even when Spoorkaart has no
+// matching line geometry for a particular train.
+const noGeometryFetchMock = async (input, init = {}) => {
+  const url = new URL(String(input));
+  assert.equal(
+    new Headers(init.headers).get("Ocp-Apim-Subscription-Key"),
+    "test-ns-key"
+  );
+
+  if (url.pathname.endsWith("/api/v2/journey")) {
+    assert.equal(url.searchParams.get("train"), "1734");
+    return new Response(JSON.stringify({
+      payload: {
+        stops: [
+          {
+            stop: { uicCode: "8400001" },
+            plannedDepartureDateTime: "2026-10-20T07:31:00+02:00"
+          },
+          {
+            stop: { uicCode: "8400002" },
+            plannedArrivalDateTime: "2026-10-20T07:52:00+02:00"
+          }
+        ]
+      }
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }
+
+  if (url.pathname.endsWith("/api/v1/traject.geojson")) {
+    return new Response(JSON.stringify({ type: "FeatureCollection", features: [] }), {
+      status: 200,
+      headers: { "content-type": "application/geo+json" }
+    });
+  }
+
+  throw new Error("Unexpected no-geometry mocked request: " + url.toString());
+};
+
+const stationOnlyRoute = await fetchNsLiveTrainRoute(
+  "1734",
+  "2026-10-20T07:30:00.000Z",
+  {
+    NS_API_SUBSCRIPTION_KEY: "test-ns-key",
+    APP_NAME: "OVLive",
+    APP_VERSION: "test",
+    APP_CONTACT: "https://example.test"
+  },
+  noGeometryFetchMock
+);
+assert.equal(stationOnlyRoute.ok, true);
+assert.equal(stationOnlyRoute.legs.length, 0,
+  "a route with no matching track geometry should not invent a line");
+assert.equal(stationOnlyRoute.stops.length, 2,
+  "planned stations and times must still be returned without track geometry");
+assert.match(stationOnlyRoute.routeWarning ?? "", /spoorgeometrie/i);
+
 await assert.rejects(
   fetchNsLiveTrainRoute("train-1733", "2026-10-20T07:20:00.000Z",
     { NS_API_SUBSCRIPTION_KEY: "test-ns-key" }, fetchMock),
