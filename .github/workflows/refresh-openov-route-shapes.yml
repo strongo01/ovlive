@@ -34,8 +34,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
       - name: Validate synthetic GTFS route-shape builder
         run: python3 scripts/openov-trip-shapes-selftest.py
+      - name: Validate static Worker asset deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p public/openov-trip-shapes
+          printf '%s\n' '{"format":1,"precision":5,"routes":{"123":["route-123-0.json"]},"routeCount":1,"tripCount":1,"shapeCount":1}' > public/openov-trip-shapes/manifest.json
+          printf '%s\n' '{"format":1,"routeId":"123","precision":5,"trips":{"456":"shape-1"},"shapes":{"shape-1":"_p~iF~ps|U_ulLnnqC"}}' > public/openov-trip-shapes/route-123-0.json
+          npx wrangler deploy --dry-run --config wrangler.openov-shapes.toml
+          rm -rf public/openov-trip-shapes
 
   refresh-and-publish:
     if: github.repository == 'strongo01/ovlive' && github.event_name != 'push'
