@@ -126,8 +126,9 @@ assert.ok(script.includes("canSplitProgress && i < closestIndex") &&
   "ordered route segments before the vehicle must be shaded grey");
 
 assert.ok(script.includes("state.routeLayer = L.featureGroup().addTo(state.map)") &&
-  script.includes("state.routeLayer.getBounds()"),
-  "the drawn route layer must support Leaflet getBounds()");
+  script.includes("state.routeLayer.clearLayers()") &&
+  !script.includes("state.map.fitBounds("),
+  "selecting a vehicle must draw the route without automatically zooming the map out to fit the full route");
 assert.ok(script.includes('addLine(item.split.passed, "#9ca3af"') &&
   script.includes('addLine(item.split.remaining, "#ef4444"') &&
   script.includes('distanceMeters <= 1_500'),
