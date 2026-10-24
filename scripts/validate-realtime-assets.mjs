@@ -92,38 +92,39 @@ async function main() {
   }
   addRequired(required, routeMetadataPath);
 
-  // Exact fallback for the daily OpenOV-GTFS / Transitous-import mismatch.
-  // The Worker uses these assets only when trip_id AND route_id match exactly.
+  // The refreshed OpenOV trip-shape set is stored in Cloudflare R2 and can
+  // update independently of Worker deployments. A local copy is optional and
+  // remains a fallback for first-time migration/offline development.
   const openovShapeManifestPath = "openov-trip-shapes/manifest.json";
-  if (!byPath.has(openovShapeManifestPath)) {
-    throw new Error(
-      "Exact OpenOV-GTFS ritvormen ontbreken: public/" + openovShapeManifestPath +
-      ". Run npm run openov:build-trip-shapes -- --refresh en voer de controle opnieuw uit."
-    );
-  }
-  const openovShapeManifest = await readJson(openovShapeManifestPath);
-  const openovShapeRoutes = openovShapeManifest?.routes;
-  if (openovShapeManifest?.format !== 1 || !openovShapeRoutes ||
-      typeof openovShapeRoutes !== "object" || Array.isArray(openovShapeRoutes)) {
-    throw new Error("OpenOV-GTFS ritvormmanifest heeft geen geldig formaat of routes-object.");
-  }
-  addRequired(required, openovShapeManifestPath);
+  let openovShapeManifest = {};
+  let openovShapeRoutes = {};
   const openovShapeShardNames = new Set();
-  for (const [routeId, filenames] of Object.entries(openovShapeRoutes)) {
-    if (!/^\d+$/.test(routeId) || !Array.isArray(filenames) || filenames.length === 0) {
-      throw new Error("Ongeldige route/shardlijst in OpenOV-GTFS ritvormmanifest voor route " + routeId);
+  if (byPath.has(openovShapeManifestPath)) {
+    openovShapeManifest = await readJson(openovShapeManifestPath);
+    openovShapeRoutes = openovShapeManifest?.routes;
+    if (openovShapeManifest?.format !== 1 || !openovShapeRoutes ||
+        typeof openovShapeRoutes !== "object" || Array.isArray(openovShapeRoutes)) {
+      throw new Error("OpenOV-GTFS ritvormmanifest heeft geen geldig formaat of routes-object.");
     }
-    for (const rawFilename of filenames) {
-      const filename = String(rawFilename ?? "").trim();
-      if (!new RegExp("^route-" + routeId + "-\\d+\\.json$").test(filename)) {
-        throw new Error("Ongeldige OpenOV-GTFS ritvorm-shard voor route " + routeId + ": " + filename);
+    addRequired(optional, openovShapeManifestPath);
+    for (const [routeId, filenames] of Object.entries(openovShapeRoutes)) {
+      if (!/^\\d+$/.test(routeId) || !Array.isArray(filenames) || filenames.length === 0) {
+        throw new Error("Ongeldige route/shardlijst in OpenOV-GTFS ritvormmanifest voor route " + routeId);
       }
-      openovShapeShardNames.add(filename);
-      addRequired(required, "openov-trip-shapes/" + filename);
+      for (const rawFilename of filenames) {
+        const filename = String(rawFilename ?? "").trim();
+        if (!new RegExp("^route-" + routeId + "-\\\\d+\\\\.json$").test(filename)) {
+          throw new Error("Ongeldige OpenOV-GTFS ritvorm-shard voor route " + routeId + ": " + filename);
+        }
+        openovShapeShardNames.add(filename);
+        addRequired(optional, "openov-trip-shapes/" + filename);
+      }
     }
-  }
-  if (!openovShapeShardNames.size) {
-    throw new Error("OpenOV-GTFS ritvormmanifest bevat geen bruikbare geometrie-shards.");
+    if (!openovShapeShardNames.size) {
+      throw new Error("OpenOV-GTFS ritvormmanifest bevat geen bruikbare geometrie-shards.");
+    }
+  } else {
+    notes.push("Lokale OpenOV-GTFS-ritvormen ontbreken; de Worker haalt ververste ritvormen uit Cloudflare R2.");
   }
 
   const routeShardNames = new Set();
