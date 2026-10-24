@@ -82,6 +82,12 @@ assert.ok(worker.includes("sawSuccessfulReplyWithoutGeometry = true") &&
   worker.includes("openovTripShapeIdCandidates(tripId)"),
   "trip-shape lookup must try other exact ID spellings when Transitous returns HTTP 200 without geometry");
 
+assert.ok(worker.includes("Transitous beperkt tijdelijk het aantal routevragen (HTTP 429)") &&
+  worker.includes("Transitous weigert de aangeleverde rit-ID (HTTP 400)") &&
+  worker.includes("Transitous reageerde niet op de routevraag (netwerkfout of time-out)") &&
+  worker.includes("candidateCount: boundedCandidates.length"),
+  "trip-shape failures must expose actionable upstream status instead of hiding every failure behind one generic message");
+
 assert.ok(script.includes("function loadNsVehicleRouteGeometry(vehicle)") &&
   script.includes('fetch("/api/ns/train-route?"') &&
   script.includes('vehicle.sourceKey === "ns"'),
