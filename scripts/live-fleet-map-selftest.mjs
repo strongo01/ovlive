@@ -98,6 +98,13 @@ assert.ok(worker.includes("const rawDetail = await candidateResponse.clone().tex
   worker.includes("upstreamDetail: lastUpstreamDetail || null"),
   "a short, bounded upstream error body must be visible when Transitous rejects a trip request");
 
+assert.ok(worker.includes("if (!boundedCandidates.length)") &&
+  worker.includes("De rit-ID moet een volledige dienstdatum, starttijd en OpenOV-trip-ID bevatten.") &&
+  worker.includes("candidateDiagnostics.push") &&
+  worker.includes("const attemptSummary = candidateDiagnostics"),
+  "trip lookup must reject incomplete IDs and preserve the response from canonical ID attempts");
+
+
 assert.ok(script.includes("function loadNsVehicleRouteGeometry(vehicle)") &&
   script.includes('fetch("/api/ns/train-route?"') &&
   script.includes('vehicle.sourceKey === "ns"'),
