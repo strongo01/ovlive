@@ -517,7 +517,8 @@ export async function fetchNsLiveTrainRoute(
   trainNumberValue: string,
   dateTimeValue: string | null | undefined,
   env: NsLiveTrainRouteEnv,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  journeyIdValue?: string
 ): Promise<NsLiveTrainRouteResult> {
   const trainNumber = asText(trainNumberValue);
   if (!/^\d{1,6}$/.test(trainNumber)) throw new Error("NS_LIVE_TRAIN_ROUTE_INVALID_TRAIN_NUMBER");
@@ -527,17 +528,47 @@ export async function fetchNsLiveTrainRoute(
   const sourceMs = Number.isFinite(parsedDateTime) ? parsedDateTime : Date.now();
   const minuteMs = Math.floor(sourceMs / 60_000) * 60_000;
   const dateTime = new Date(minuteMs).toISOString();
-  const cacheKey = trainNumber + "|" + dateTime;
+  const journeyId = asText(journeyIdValue);
+  if (journeyId.length > 256) throw new Error("NS_LIVE_TRAIN_ROUTE_INVALID_JOURNEY_ID");
+  const cacheKey = trainNumber + "|" + dateTime + "|" + journeyId;
   const cached = routeCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
   if (cached) routeCache.delete(cacheKey);
 
   const promise = (async (): Promise<NsLiveTrainRouteResult> => {
-    const journeyUrl = new URL(NS_JOURNEY_ROOT);
-    journeyUrl.searchParams.set("train", trainNumber);
-    journeyUrl.searchParams.set("dateTime", dateTime);
-    journeyUrl.searchParams.set("omitCrowdForecast", "true");
-    const journeyPayload = await requestJson(journeyUrl, env, 300, fetchImpl);
+    let journeyPayload: any = null;
+
+    // The Virtual Train API can supply the NS ritId for the live position.
+    // Reisinformatie accepts an exact journey id as an alternative to searching
+    // by train number + wall-clock time. Prefer that identity when available;
+    // fall back to the time-based query if the ID is not accepted or has no stops.
+    if (journeyId) {
+      try {
+        const journeyByIdUrl = new URL(NS_JOURNEY_ROOT);
+        journeyByIdUrl.searchParams.set("id", journeyId);
+        journeyByIdUrl.searchParams.set("omitCrowdForecast", "true");
+        const candidate = await requestJson(journeyByIdUrl, env, 300, fetchImpl);
+        if (getJourneyStops(candidate).length >= 2) {
+          journeyPayload = candidate;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        // An authorization/configuration error cannot be fixed by switching
+        // from "id" to "train"; surface it instead of masking it with a retry.
+        if (/NS_LIVE_TRAIN_ROUTE_KEY_MISSING|NS_LIVE_TRAIN_ROUTE_HTTP_(401|403)/.test(detail)) {
+          throw error;
+        }
+      }
+    }
+
+    if (!journeyPayload) {
+      const journeyUrl = new URL(NS_JOURNEY_ROOT);
+      journeyUrl.searchParams.set("train", trainNumber);
+      journeyUrl.searchParams.set("dateTime", dateTime);
+      journeyUrl.searchParams.set("omitCrowdForecast", "true");
+      journeyPayload = await requestJson(journeyUrl, env, 300, fetchImpl);
+    }
+
     const stops = getJourneyStops(journeyPayload);
     if (stops.length < 2) throw new Error("NS_LIVE_TRAIN_ROUTE_NO_JOURNEY");
     if (stops.length > MAX_STOPS) throw new Error("NS_LIVE_TRAIN_ROUTE_TOO_MANY_STOPS");
