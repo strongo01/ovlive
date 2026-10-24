@@ -630,11 +630,11 @@
         }
       }
 
-      // FeatureGroup supports getBounds(); LayerGroup does not in Leaflet.
-      const bounds = state.routeLayer.getBounds();
-      if (bounds.isValid()) {
-        state.map.fitBounds(bounds, { padding: [28, 28], maxZoom: 13 });
-      }
+      // Keep the user's current map center and zoom when a vehicle is selected.
+      // A full vehicle route can span a large area; fitBounds() would zoom the
+      // map out to show the entire route and make the clicked vehicle hard to inspect.
+      // The route overlay is still drawn, including the part around the vehicle.
+
       const sourceLabel = state.routeSource ? " Bron: " + state.routeSource + "." : "";
       state.routeStatus = (canSplitProgress
         ? (closest.split.remaining.length > 1
