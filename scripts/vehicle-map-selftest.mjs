@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 
 function extractFunction(name) {
   const start = html.indexOf("function " + name + "(");
@@ -264,3 +265,27 @@ assert.ok(html.includes("renderLiveJourneyStopTimeline(legs)"),
   "each journey must include a per-stop time line");
 console.log("PASS: live map markup, 10-second polling, route timeline and lifecycle are wired");
 console.log("All live vehicle map selftests passed.");
+
+const firstNonEmptyDestinationText = new vm.Script(
+  "(" + extractFunction("firstNonEmptyDestinationText") + ")"
+).runInNewContext();
+assert.equal(
+  firstNonEmptyDestinationText("", "Bestemming onbekend", "Amstelveen"),
+  "Amstelveen",
+  "an empty/unknown first field must not hide a valid destination from later fields"
+);
+assert.equal(
+  firstNonEmptyDestinationText({ name: "" }, { displayName: "Utrecht Centraal" }),
+  "Utrecht Centraal",
+  "nested destination fields must skip blank names and use a valid display name"
+);
+assert.ok(worker.includes("function firstNonEmptyLineSearchText") &&
+  worker.includes("detailMeta?.DestinationName50") &&
+  worker.includes("directoryMeta?.DestinationName50") &&
+  worker.includes("finalTransitLeg?.to"),
+  "line search must resolve destinations from non-empty OVAPI metadata and exact OpenOV trip details");
+assert.ok(html.includes("stopDestinationCandidates") &&
+  html.includes("firstUpcomingIndex") &&
+  html.includes("Eerdere haltes"),
+  "line-search cards must recover a known terminal stop and separate past from upcoming stops");
+console.log("PASS: blank destination fields no longer hide known directions; upcoming/past stop fallback is present");
