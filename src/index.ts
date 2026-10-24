@@ -4483,9 +4483,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // A successful HTTP response is not enough: Transitous can return HTTP 200
     // with an empty itinerary for one spelling while another exact alias works.
     const boundedCandidates = openovTripShapeIdCandidates(tripId);
+    if (!boundedCandidates.length) {
+      return json({
+        ok: false,
+        error: "De rit-ID moet een volledige dienstdatum, starttijd en OpenOV-trip-ID bevatten."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
     let lastStatus: number | null = null;
     let lastFetchError: unknown = null;
     let lastUpstreamDetail = "";
+    const candidateDiagnostics: Array<{ tripId: string; status: number; detail: string }> = [];
     let sawSuccessfulReplyWithoutGeometry = false;
 
     const extractTransitShapes = (itinerary: any) => {
@@ -4552,6 +4559,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               .replace(/\s+/g, " ")
               .trim()
               .slice(0, 280);
+            candidateDiagnostics.push({
+              tripId: candidateTripId,
+              status: candidateResponse.status,
+              detail: lastUpstreamDetail
+            });
           }
           if (candidateResponse.ok) {
             const itinerary: any = await candidateResponse.json().catch(() => null);
@@ -4637,13 +4649,21 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             : upstreamStatus !== null
               ? `Transitous antwoordde met HTTP ${upstreamStatus}; de routegeometrie is niet beschikbaar.`
               : "Transitous reageerde niet op de routevraag (netwerkfout of time-out).";
-      const errorMessage = lastUpstreamDetail
-        ? statusMessage + " Bronmelding: " + lastUpstreamDetail
-        : statusMessage;
+      const attemptSummary = candidateDiagnostics
+        .map((attempt, index) =>
+          `poging ${index + 1} (HTTP ${attempt.status}): ${attempt.detail || "geen fouttekst"}`
+        )
+        .join(" | ");
+      const errorMessage = attemptSummary
+        ? statusMessage + " Pogingen: " + attemptSummary
+        : lastUpstreamDetail
+          ? statusMessage + " Bronmelding: " + lastUpstreamDetail
+          : statusMessage;
       console.warn("[OVLIVE_TRIP_SHAPE_UPSTREAM]", JSON.stringify({
         status: upstreamStatus,
         tripIdLength: tripId.length,
         candidateCount: boundedCandidates.length,
+        attempts: candidateDiagnostics,
         upstreamDetail: lastUpstreamDetail || undefined,
         fetchError: lastFetchError instanceof Error ? lastFetchError.message : undefined
       }));
@@ -4651,6 +4671,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         ok: false,
         upstreamStatus,
         candidateCount: boundedCandidates.length,
+        attempts: candidateDiagnostics,
         upstreamDetail: lastUpstreamDetail || null,
         error: errorMessage
       }, upstreamStatus === 404 ? 404 : 502, {
