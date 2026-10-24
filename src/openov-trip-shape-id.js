@@ -24,8 +24,15 @@ export function openovTripShapeIdCandidates(value) {
     if (baseTripId) {
       const serviceTimes = [rawTime];
       const zeroSeconds = rawTime.match(/^(\d{1,2}:\d{2}):00$/);
+      const noSeconds = rawTime.match(/^(\d{1,2}:\d{2})$/);
+
+      // OpenOV and Transitous don't always include seconds in the same place.
+      // Try the exact time first, then the equivalent HH:mm:00 / HH:mm spelling.
+      // Do not alter non-zero seconds.
       if (zeroSeconds && !serviceTimes.includes(zeroSeconds[1])) {
         serviceTimes.push(zeroSeconds[1]);
+      } else if (noSeconds && !serviceTimes.includes(noSeconds[1] + ":00")) {
+        serviceTimes.push(noSeconds[1] + ":00");
       }
 
       for (const serviceTime of serviceTimes) {
