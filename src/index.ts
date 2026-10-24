@@ -63,10 +63,10 @@ async function findOpenovStaticTripShape(
 ): Promise<OpenovStaticTripShape | null> {
   const wrappedTripId = String(wrappedTripIdValue ?? "").trim();
   const routeId = String(routeIdValue ?? "").trim();
-  if (!/^\\d+$/.test(routeId)) return null;
+  if (!/^\d+$/.test(routeId)) return null;
 
   const match = wrappedTripId.match(
-    /^\\d{8}_\\d{1,2}:\\d{2}(?::\\d{2})?_nl-OpenOV_(\\d+)$/i
+    /^\d{8}_\d{1,2}:\d{2}(?::\d{2})?_nl-OpenOV_(\d+)$/i
   );
   if (!match) return null;
   const tripId = match[1];
