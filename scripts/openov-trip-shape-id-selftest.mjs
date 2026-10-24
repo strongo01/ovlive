@@ -6,36 +6,40 @@ const zeroSeconds = openovTripShapeIdCandidates(
 );
 assert.deepEqual(zeroSeconds, [
   "20261024_10:30:00_nl-OpenOV_380014114",
-  "20261024_10:30:00_380014114",
-  "20261024_10:30_nl-OpenOV_380014114",
-  "20261024_10:30_380014114",
-  "nl-OpenOV_380014114"
-], "only spelling aliases of the same OpenOV trip may be tried, with the unwrapped namespaced ID last");
-assert.ok(!zeroSeconds.includes("380014114"),
-  "the fallback must never remove the OpenOV namespace and try a potentially colliding bare numeric ID");
+  "20261024_10:30_nl-OpenOV_380014114"
+], "only canonical, date-wrapped Transitous trip IDs should be tried");
 
 const minuteOnly = openovTripShapeIdCandidates(
   "20261024_10:30_nl-OpenOV_380014114"
 );
-assert.ok(minuteOnly.includes("20261024_10:30:00_nl-OpenOV_380014114"),
-  "a minute-only trip ID must also try the equivalent zero-seconds spelling");
+assert.deepEqual(minuteOnly, [
+  "20261024_10:30_nl-OpenOV_380014114",
+  "20261024_10:30:00_nl-OpenOV_380014114"
+], "a minute-only trip ID may try the equivalent zero-seconds spelling");
+
+const withoutInnerNamespace = openovTripShapeIdCandidates(
+  "20261024_10:30_380014114"
+);
+assert.deepEqual(withoutInnerNamespace, [
+  "20261024_10:30_nl-OpenOV_380014114",
+  "20261024_10:30:00_nl-OpenOV_380014114"
+], "an untagged trip ID must be canonicalized before being sent to Transitous");
 
 const outerNamespace = openovTripShapeIdCandidates(
   "nl-OpenOV_20261024_25:15:00_380014114"
 );
-assert.ok(outerNamespace.includes("20261024_25:15:00_nl-OpenOV_380014114"),
-  "a leading feed namespace must be translated to the Transitous trip-ID spelling");
-assert.ok(outerNamespace.includes("20261024_25:15_380014114"),
-  "overnight GTFS service times must retain their service date when seconds are omitted");
+assert.deepEqual(outerNamespace, [
+  "20261024_25:15:00_nl-OpenOV_380014114",
+  "20261024_25:15_nl-OpenOV_380014114"
+], "outer feed namespace and overnight times must be converted to the canonical Transitous ID");
 
-const differentTrip = openovTripShapeIdCandidates(
-  "20261024_10:30:00_nl-OpenOV_380014114"
+assert.deepEqual(
+  openovTripShapeIdCandidates("nl-OpenOV_380014114"),
+  [],
+  "a bare namespaced trip ID is incomplete and must not be sent to /trip"
 );
-assert.ok(!differentTrip.some(candidate => candidate.includes("380014115")),
-  "trip lookup aliases must never change the underlying trip ID");
-assert.ok(!differentTrip.some(candidate => candidate.startsWith("20261025_")),
-  "trip lookup aliases must never change the service date");
-
+assert.deepEqual(openovTripShapeIdCandidates("380014114"), [],
+  "a bare numeric trip ID must never be used as a /trip identifier");
 assert.deepEqual(openovTripShapeIdCandidates(""), []);
 assert.deepEqual(openovTripShapeIdCandidates("x".repeat(257)), []);
-console.log("PASS: exact OpenOV trip-ID aliases handle zero seconds and overnight GTFS times");
+console.log("PASS: only canonical date-wrapped Transitous trip IDs and zero-seconds aliases are generated");
