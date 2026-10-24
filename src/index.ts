@@ -3296,6 +3296,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       }, 400, { ...headers, "cache-control": "no-store" });
     }
 
+    const journeyId = String(
+      url.searchParams.get("journeyId") ?? url.searchParams.get("ritId") ?? ""
+    ).trim();
+    if (journeyId.length > 256) {
+      return json({
+        ok: false,
+        source: "NS Reisinformatie + SpoorKaart API",
+        error: "De rit-identificatie is ongeldig."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
     if (!String(env.NS_API_SUBSCRIPTION_KEY ?? "").trim()) {
       return json({
         ok: false,
@@ -3305,7 +3316,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     }
 
     try {
-      const route = await fetchNsLiveTrainRoute(trainNumber, dateTime || null, env);
+      const route = await fetchNsLiveTrainRoute(
+        trainNumber,
+        dateTime || null,
+        env,
+        fetch,
+        journeyId || undefined
+      );
       return json(route, 200, {
         ...headers,
         "cache-control": "private, max-age=60"
