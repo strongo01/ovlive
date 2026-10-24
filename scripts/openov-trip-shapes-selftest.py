@@ -5,8 +5,14 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
+import importlib.util
 
-from build_openov_trip_shapes import build
+builder_path = Path(__file__).with_name("build-openov-trip-shapes.py")
+spec = importlib.util.spec_from_file_location("build_openov_trip_shapes", builder_path)
+builder = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
+spec.loader.exec_module(builder)
+build = builder.build
 
 
 def decode_polyline(encoded: str, precision: int = 5):
