@@ -4606,7 +4606,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         });
       }
 
-      const upstreamStatus = lastStatus;
+      // Do not present network/time-out failures as an upstream HTTP status.
+      const upstreamStatus = lastFetchError ? null : lastStatus;
+      const errorMessage = upstreamStatus === 404
+        ? "Transitous kent deze exacte rit-ID niet; er is geen route getekend."
+        : upstreamStatus === 400
+          ? "Transitous weigert de aangeleverde rit-ID (HTTP 400); er is geen lijnnummer-fallback gebruikt."
+          : upstreamStatus === 429
+            ? "Transitous beperkt tijdelijk het aantal routevragen (HTTP 429). Wacht even en probeer opnieuw."
+            : upstreamStatus !== null
+              ? `Transitous antwoordde met HTTP ${upstreamStatus}; de routegeometrie is niet beschikbaar.`
+              : "Transitous reageerde niet op de routevraag (netwerkfout of time-out).";
       console.warn("[OVLIVE_TRIP_SHAPE_UPSTREAM]", JSON.stringify({
         status: upstreamStatus,
         tripIdLength: tripId.length,
@@ -4616,9 +4626,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       return json({
         ok: false,
         upstreamStatus,
-        error: upstreamStatus === 404
-          ? "Transitous kent deze exacte rit-ID niet; er is geen route getekend."
-          : "De volledige lijnroute is tijdelijk niet beschikbaar."
+        candidateCount: boundedCandidates.length,
+        error: errorMessage
       }, upstreamStatus === 404 ? 404 : 502, {
         ...headers,
         "cache-control": "no-store",
