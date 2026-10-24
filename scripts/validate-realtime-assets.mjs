@@ -92,6 +92,40 @@ async function main() {
   }
   addRequired(required, routeMetadataPath);
 
+  // Exact fallback for the daily OpenOV-GTFS / Transitous-import mismatch.
+  // The Worker uses these assets only when trip_id AND route_id match exactly.
+  const openovShapeManifestPath = "openov-trip-shapes/manifest.json";
+  if (!byPath.has(openovShapeManifestPath)) {
+    throw new Error(
+      "Exact OpenOV-GTFS ritvormen ontbreken: public/" + openovShapeManifestPath +
+      ". Run npm run openov:build-trip-shapes -- --refresh en voer de controle opnieuw uit."
+    );
+  }
+  const openovShapeManifest = await readJson(openovShapeManifestPath);
+  const openovShapeRoutes = openovShapeManifest?.routes;
+  if (openovShapeManifest?.format !== 1 || !openovShapeRoutes ||
+      typeof openovShapeRoutes !== "object" || Array.isArray(openovShapeRoutes)) {
+    throw new Error("OpenOV-GTFS ritvormmanifest heeft geen geldig formaat of routes-object.");
+  }
+  addRequired(required, openovShapeManifestPath);
+  const openovShapeShardNames = new Set();
+  for (const [routeId, filenames] of Object.entries(openovShapeRoutes)) {
+    if (!/^\\d+$/.test(routeId) || !Array.isArray(filenames) || filenames.length === 0) {
+      throw new Error("Ongeldige route/shardlijst in OpenOV-GTFS ritvormmanifest voor route " + routeId);
+    }
+    for (const rawFilename of filenames) {
+      const filename = String(rawFilename ?? "").trim();
+      if (!new RegExp("^route-" + routeId + "-\\d+\\.json$").test(filename)) {
+        throw new Error("Ongeldige OpenOV-GTFS ritvorm-shard voor route " + routeId + ": " + filename);
+      }
+      openovShapeShardNames.add(filename);
+      addRequired(required, "openov-trip-shapes/" + filename);
+    }
+  }
+  if (!openovShapeShardNames.size) {
+    throw new Error("OpenOV-GTFS ritvormmanifest bevat geen bruikbare geometrie-shards.");
+  }
+
   const routeShardNames = new Set();
   for (const [routeId, filenames] of Object.entries(routes)) {
     if (!Array.isArray(filenames) || filenames.length === 0) {
@@ -167,6 +201,10 @@ async function main() {
     generatedAt: routeManifest.generatedAt ?? null,
     routeCount: Object.keys(routes).length,
     routeShardCount: routeShardNames.size,
+    openovShapeSource: openovShapeManifest.source ?? null,
+    openovShapeRouteCount: Object.keys(openovShapeRoutes).length,
+    openovShapeShardCount: openovShapeShardNames.size,
+    openovShapeTripCount: Number(openovShapeManifest.tripCount ?? 0),
     requiredRouteFiles: [...required].filter((file) => file.startsWith("ndov-openov-route-crosswalk/routes/")).length,
     tripCrosswalkShardCount: tripShards.length,
     staticAssetCount: allFiles.length,
@@ -189,13 +227,16 @@ async function main() {
   }
   if (tooLarge.length) throw new Error(tooLarge.length + " asset(s) zijn groter dan 25 MiB.");
   if (missingRequired.length) {
+    const missingOpenovShapeAsset = missingRequired.some((file) => file.startsWith("openov-trip-shapes/"));
     const missingRouteFile = missingRequired.some((file) => file.startsWith("ndov-openov-route-crosswalk/routes/"));
     const missingRouteMetadata = missingRequired.includes("ndov-openov-route-crosswalk/route-metadata.json");
-    const advice = missingRouteMetadata
-      ? "Run npm run ndov:build-openov-route-metadata met gtfs-openov-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit."
-      : missingRouteFile
-        ? "Run npm run ndov:build-openov-route-crosswalk met gtfs-openov-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit."
-        : "Run npm run ndov:build-crosswalk met gtfs-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit.";
+    const advice = missingOpenovShapeAsset
+      ? "Run npm run openov:build-trip-shapes -- --refresh en voer de controle opnieuw uit."
+      : missingRouteMetadata
+        ? "Run npm run ndov:build-openov-route-metadata met gtfs-openov-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit."
+        : missingRouteFile
+          ? "Run npm run ndov:build-openov-route-crosswalk met gtfs-openov-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit."
+          : "Run npm run ndov:build-crosswalk met gtfs-nl.zip in ~/Library/Caches/ovlive-ndov/ en voer de controle opnieuw uit.";
     throw new Error(missingRequired.length + " verplichte realtime-asset(s) ontbreken. Deployment afgebroken om een Worker zonder NDOV-koppelingen te voorkomen. " + advice);
   }
 
