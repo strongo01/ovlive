@@ -4549,7 +4549,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             const rawDetail = await candidateResponse.clone().text().catch(() => "");
             lastUpstreamDetail = String(rawDetail ?? "")
               .replace(/<[^>]*>/g, " ")
-              .replace(/\\s+/g, " ")
+              .replace(/\s+/g, " ")
               .trim()
               .slice(0, 280);
           }
