@@ -11,6 +11,12 @@ assert.deepEqual(zeroSeconds, [
   "20261024_10:30_380014114"
 ], "only the same trip and service date may be tried without zero seconds");
 
+const minuteOnly = openovTripShapeIdCandidates(
+  "20261024_10:30_nl-OpenOV_380014114"
+);
+assert.ok(minuteOnly.includes("20261024_10:30:00_nl-OpenOV_380014114"),
+  "a minute-only trip ID must also try the equivalent zero-seconds spelling");
+
 const outerNamespace = openovTripShapeIdCandidates(
   "nl-OpenOV_20261024_25:15:00_380014114"
 );
