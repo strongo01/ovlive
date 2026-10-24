@@ -2,52 +2,38 @@ export function openovTripShapeIdCandidates(value) {
   const raw = String(value ?? "").trim();
   if (!raw || raw.length > 256) return [];
 
-  const candidates = [];
-  const appendCandidate = (candidate) => {
-    const cleaned = String(candidate ?? "").trim();
-    if (cleaned && !candidates.includes(cleaned)) candidates.push(cleaned);
-  };
-  const withoutLeadingNamespace = raw.replace(/^nl-OpenOV_/i, "");
-
-  appendCandidate(raw);
-  appendCandidate(withoutLeadingNamespace);
-
-  // A GTFS-RT vehicle can expose HH:mm:00, but Transitous trip IDs often use
-  // HH:mm. Keep the service date and base trip ID exact; only remove seconds
-  // when they are explicitly zero. Never infer a trip from a route/line name.
-  const wrappedTrip = withoutLeadingNamespace.match(
-    /^(\d{8})_(\d{1,2}:\d{2}(?::\d{2})?)_(.+)$/i
+  // Transitous/MOTIS expects the service-instance wrapper
+  // YYYYMMDD_HH:mm[_:ss]_nl-OpenOV_<GTFS trip ID>.
+  // An unwrapped "nl-OpenOV_<id>" is not a valid /trip identifier and can
+  // mask the more useful response from the canonical request.
+  const withoutOuterNamespace = raw.replace(/^nl-OpenOV_/i, "");
+  const wrappedTrip = withoutOuterNamespace.match(
+    /^(\d{8})_(\d{1,2}:\d{2}(?::\d{2})?)_(?:nl-OpenOV_)?(.+)$/i
   );
-  if (wrappedTrip) {
-    const [, serviceDate, rawTime, rawBaseTripId] = wrappedTrip;
-    const baseTripId = rawBaseTripId.replace(/^nl-OpenOV_/i, "");
-    if (baseTripId) {
-      const serviceTimes = [rawTime];
-      const zeroSeconds = rawTime.match(/^(\d{1,2}:\d{2}):00$/);
-      const noSeconds = rawTime.match(/^(\d{1,2}:\d{2})$/);
+  if (!wrappedTrip) return [];
 
-      // OpenOV and Transitous don't always include seconds in the same place.
-      // Try the exact time first, then the equivalent HH:mm:00 / HH:mm spelling.
-      // Do not alter non-zero seconds.
-      if (zeroSeconds && !serviceTimes.includes(zeroSeconds[1])) {
-        serviceTimes.push(zeroSeconds[1]);
-      } else if (noSeconds && !serviceTimes.includes(noSeconds[1] + ":00")) {
-        serviceTimes.push(noSeconds[1] + ":00");
-      }
+  const [, serviceDate, rawTime, rawBaseTripId] = wrappedTrip;
+  const baseTripId = String(rawBaseTripId ?? "").replace(/^nl-OpenOV_/i, "").trim();
+  if (!baseTripId) return [];
 
-      for (const serviceTime of serviceTimes) {
-        appendCandidate(serviceDate + "_" + serviceTime + "_nl-OpenOV_" + baseTripId);
-        appendCandidate(serviceDate + "_" + serviceTime + "_" + baseTripId);
-      }
+  const hourMinuteSecond = rawTime.split(":");
+  const hour = String(Number(hourMinuteSecond[0])).padStart(2, "0");
+  const minute = hourMinuteSecond[1];
+  const second = hourMinuteSecond[2];
+  const canonicalTime = hour + ":" + minute +
+    (second === undefined ? "" : ":" + second);
+  const serviceTimes = [canonicalTime];
 
-      // Final fallback: ask for the same namespaced static GTFS trip without
-      // the service-date/time wrapper. The underlying OpenOV trip ID remains
-      // unchanged; do not try a bare numeric ID or a route/line ID.
-      appendCandidate("nl-OpenOV_" + baseTripId);
-    }
-  } else if (withoutLeadingNamespace === raw) {
-    appendCandidate("nl-OpenOV_" + raw);
+  // OpenOV and Transitous sometimes differ only by a zero-seconds suffix.
+  // Keep the service date and the exact base GTFS trip ID; never try a line ID,
+  // a bare numeric ID, or an unwrapped trip ID.
+  if (second === "00") {
+    serviceTimes.push(hour + ":" + minute);
+  } else if (second === undefined) {
+    serviceTimes.push(hour + ":" + minute + ":00");
   }
 
-  return candidates.slice(0, 6);
+  return [...new Set(serviceTimes)]
+    .map(serviceTime => serviceDate + "_" + serviceTime + "_nl-OpenOV_" + baseTripId)
+    .slice(0, 2);
 }
