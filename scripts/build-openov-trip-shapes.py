@@ -13,6 +13,7 @@ import io
 import json
 import shutil
 import sys
+import urllib.request
 import zipfile
 from collections import defaultdict
 from pathlib import Path
@@ -210,15 +211,47 @@ def build(archive: Path, output_dir: Path) -> dict:
     }
 
 
+def refresh_archive(archive: Path) -> None:
+    url = "https://gtfs.openov.nl/gtfs-rt/gtfs-openov-nl.zip"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    temporary = archive.with_suffix(archive.suffix + ".download")
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "OVLive/0.3 (OpenOV GTFS route-shape builder)", "Accept": "application/zip"}
+    )
+    print("Download actuele OpenOV GTFS-dienstregeling…", file=sys.stderr)
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as target:
+            shutil.copyfileobj(response, target, length=1024 * 1024)
+        with zipfile.ZipFile(temporary) as zf:
+            find_member(zf, "trips.txt")
+            find_member(zf, "shapes.txt")
+            broken_member = zf.testzip()
+            if broken_member:
+                raise ValueError("GTFS-zip is beschadigd bij bestand " + broken_member)
+        temporary.replace(archive)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gtfs", type=Path, default=DEFAULT_GTFS,
-                        help="Pad naar de actuele gtfs-openov-nl.zip")
+                        help="Pad naar gtfs-openov-nl.zip")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT,
                         help="Uitvoermap binnen public/")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Download eerst de nieuwste openbare OpenOV GTFS-zip (ongeveer 230 MB)")
     args = parser.parse_args()
     archive = args.gtfs.expanduser().resolve()
     output_dir = args.out_dir.expanduser().resolve()
+    if args.refresh:
+        try:
+            refresh_archive(archive)
+        except Exception as exc:
+            print(f"FOUT: actuele OpenOV GTFS kon niet worden opgehaald: {exc}", file=sys.stderr)
+            return 4
     if not archive.is_file():
         print(f"FOUT: GTFS niet gevonden: {archive}", file=sys.stderr)
         return 2
