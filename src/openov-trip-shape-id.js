@@ -39,6 +39,11 @@ export function openovTripShapeIdCandidates(value) {
         appendCandidate(serviceDate + "_" + serviceTime + "_nl-OpenOV_" + baseTripId);
         appendCandidate(serviceDate + "_" + serviceTime + "_" + baseTripId);
       }
+
+      // Final fallback: ask for the same namespaced static GTFS trip without
+      // the service-date/time wrapper. The underlying OpenOV trip ID remains
+      // unchanged; do not try a bare numeric ID or a route/line ID.
+      appendCandidate("nl-OpenOV_" + baseTripId);
     }
   } else if (withoutLeadingNamespace === raw) {
     appendCandidate("nl-OpenOV_" + raw);
