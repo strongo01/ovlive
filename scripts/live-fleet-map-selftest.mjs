@@ -76,6 +76,12 @@ assert.ok(worker.includes("Array.isArray(leg.legGeometry?.coordinates)") &&
   worker.includes("leg.legGeometry.coordinates.length > 1"),
   "the trip-shape endpoint must preserve GeoJSON LineString geometry for native map clients");
 
+assert.ok(worker.includes("sawSuccessfulReplyWithoutGeometry = true") &&
+  worker.includes("if (shapes.length > 0)") &&
+  worker.includes("if (candidateResponse?.ok)") &&
+  worker.includes("openovTripShapeIdCandidates(tripId)"),
+  "trip-shape lookup must try other exact ID spellings when Transitous returns HTTP 200 without geometry");
+
 assert.ok(script.includes("function loadNsVehicleRouteGeometry(vehicle)") &&
   script.includes('fetch("/api/ns/train-route?"') &&
   script.includes('vehicle.sourceKey === "ns"'),
