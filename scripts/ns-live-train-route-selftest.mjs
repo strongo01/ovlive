@@ -160,6 +160,73 @@ assert.equal(requests.filter(r => r.url.pathname.endsWith("/api/v2/journey")).le
 assert.equal(requests.filter(r => r.url.pathname.endsWith("/nsapp-stations/v1/station")).length, 3);
 assert.equal(requests.filter(r => r.url.pathname.endsWith("/api/v1/traject.geojson")).length, 1);
 
+// Prefer a specific NS journey ID when it is available for the live vehicle.
+// The number + timestamp path above remains covered as a fallback.
+const exactJourneyRequests = [];
+const exactJourneyFetchMock = async (input, init = {}) => {
+  const url = new URL(String(input));
+  exactJourneyRequests.push(url);
+  assert.equal(
+    new Headers(init.headers).get("Ocp-Apim-Subscription-Key"),
+    "test-ns-key"
+  );
+
+  if (url.pathname.endsWith("/api/v2/journey")) {
+    assert.equal(url.searchParams.get("id"), "rit-1735-exact");
+    assert.equal(url.searchParams.get("train"), null,
+      "exact journey lookup should use id rather than ambiguously searching by train number");
+    assert.equal(url.searchParams.get("dateTime"), null);
+    return new Response(JSON.stringify({
+      payload: {
+        stops: [
+          { stop: { uicCode: "8400001" }, plannedDepartureDateTime: "2026-10-20T07:21:00+02:00" },
+          { stop: { uicCode: "8400002" }, plannedArrivalDateTime: "2026-10-20T07:42:00+02:00" },
+          { stop: { uicCode: "8400003" }, plannedArrivalDateTime: "2026-10-20T07:50:00+02:00" }
+        ]
+      }
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }
+
+  if (url.pathname.endsWith("/api/v1/traject.geojson")) {
+    assert.equal(url.searchParams.get("stations"), "UT,ASD,AH");
+    return new Response(JSON.stringify(routeGeoJson), {
+      status: 200,
+      headers: { "content-type": "application/geo+json" }
+    });
+  }
+
+  if (url.pathname.endsWith("/nsapp-stations/v1/station")) {
+    const uicCode = url.searchParams.get("uicCode");
+    const code = stationCodes.get(uicCode);
+    assert.ok(code, "station lookup should request only known UIC codes");
+    return new Response(JSON.stringify({
+      payload: { id: { uicCode, code }, name: stationNames.get(uicCode) }
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }
+
+  throw new Error("Unexpected exact-journey mocked request: " + url.toString());
+};
+
+const exactJourneyRoute = await fetchNsLiveTrainRoute(
+  "1735",
+  "2026-10-20T07:20:47.000Z",
+  {
+    NS_API_SUBSCRIPTION_KEY: "test-ns-key",
+    APP_NAME: "OVLive",
+    APP_VERSION: "test",
+    APP_CONTACT: "https://example.test"
+  },
+  exactJourneyFetchMock,
+  "rit-1735-exact"
+);
+assert.equal(exactJourneyRoute.ok, true);
+assert.equal(exactJourneyRoute.legs.length, 2,
+  "the route must be built from the journey selected by the exact NS ID");
+assert.equal(
+  exactJourneyRequests.find(url => url.pathname.endsWith("/api/v2/journey"))?.searchParams.get("id"),
+  "rit-1735-exact"
+);
+
 // The station timetable must remain useful even when Spoorkaart has no
 // matching line geometry for a particular train.
 const noGeometryFetchMock = async (input, init = {}) => {
