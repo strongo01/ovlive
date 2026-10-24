@@ -16,6 +16,7 @@ import { enrichNsTrainPlan } from "./ns-train-realtime";
 import { fetchNsLiveVehiclePositions } from "./ns-live-vehicle-positions";
 import { fetchNsTrainDetails } from "./ns-train-details";
 import { fetchNsLiveTrainRoute } from "./ns-live-train-route.js";
+import { openovTripShapeIdCandidates } from "./openov-trip-shape-id.js";
 import { mergeTransitousAndMapFeatureCollections, transitousMatchesToFeatureCollection } from "./transitous-geocode.js";
 import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-limit";
 
@@ -4481,18 +4482,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // Fixed upstream endpoint, never a user-supplied URL. Only request this
     // when a user opens a live map. Do not force-cache upstream errors: a
     // temporary Transitous 5xx must not poison later route requests.
-    const tripIdCandidates: string[] = [tripId];
-    const appendCandidate = (candidate: string): void => {
-      const cleaned = candidate.trim();
-      if (cleaned && !tripIdCandidates.includes(cleaned)) tripIdCandidates.push(cleaned);
-    };
-    const withoutLeadingNamespace = tripId.replace(/^nl-OpenOV_/i, "");
-    appendCandidate(withoutLeadingNamespace);
-    const wrappedTrip = tripId.match(/^(\d{8})_(\d{1,2}:\d{2}(?::\d{2})?)_(.+)$/);
-    if (wrappedTrip) {
-      appendCandidate(`${wrappedTrip[1]}_${wrappedTrip[2]}_${wrappedTrip[3].replace(/^nl-OpenOV_/i, "")}`);
-    }
-    const boundedCandidates = tripIdCandidates.slice(0, 3);
+    const boundedCandidates = openovTripShapeIdCandidates(tripId);
 
     try {
       let response: Response | null = null;
