@@ -521,33 +521,31 @@
         throw new Error(payload?.error || ("De ritroute kon niet worden opgehaald (HTTP " + response.status + ")."));
       }
 
-      const candidates = payload.legs
-        .map(candidate => ({
-          candidateRouteId: normalizedId(candidate?.routeId),
-          candidateTripId: String(candidate?.tripId ?? "").trim(),
-          points: routeCoordinates(candidate?.legGeometry),
-          modeMatches: routeModeMatches(vehicle.mode, candidate?.mode)
-        }))
-        .filter(candidate => candidate.modeMatches && candidate.points.length > 1);
+      // The Worker requests Transitous /trip with this exact service-instance ID
+      // (or a spelling-only alias with the same date/time and base trip ID).
+      // Verify that request/resolution identity first; per-leg routeId/tripId and
+      // mode metadata may be absent or spelled differently by Transitous.
+      const requestedTripId = String(payload.requestedTripId ?? identity.tripId).trim();
+      const resolvedTripId = String(payload.resolvedTripId ?? requestedTripId).trim();
+      if (!tripIdMatchesForShape(requestedTripId, identity.tripId) ||
+          !tripIdMatchesForShape(resolvedTripId, identity.tripId)) {
+        throw new Error("Transitous heeft geen geometrie bevestigd voor de exact geselecteerde rit.");
+      }
 
-      // Prefer a complete route + trip match. The /trip endpoint was queried
-      // with this exact vehicle trip ID, so MOTIS may safely be trusted when
-      // its returned leg exposes that same trip under another route ID alias.
-      // An explicit, different trip ID is never accepted as a route fallback.
-      const exactRouteAndTrip = candidates.filter(candidate =>
-        candidate.candidateRouteId === identity.routeId &&
-        (!candidate.candidateTripId ||
-          tripIdMatchesForShape(candidate.candidateTripId, identity.tripId))
-      );
-      const exactTrip = candidates.filter(candidate =>
-        candidate.candidateTripId &&
-        tripIdMatchesForShape(candidate.candidateTripId, identity.tripId)
-      );
-      const geometries = (exactRouteAndTrip.length ? exactRouteAndTrip : exactTrip)
-        .map(candidate => candidate.points);
+      // Once the /trip response is tied to this exact service instance, retain
+      // every drawable transit leg it returned. Do not discard correct geometry
+      // just because route IDs or mode labels (BUS/COACH/TROLLEYBUS etc.) differ.
+      // Walking legs stay excluded, and we never fall back to a line-number query.
+      const geometries = payload.legs
+        .filter(candidate => {
+          const mode = String(candidate?.mode ?? "").trim().toUpperCase();
+          return mode !== "WALK" && mode !== "FOOT";
+        })
+        .map(candidate => routeCoordinates(candidate?.legGeometry))
+        .filter(points => points.length > 1);
       if (!geometries.length) {
         throw new Error(payload.legs.length
-          ? "Transitous gaf routevormen terug, maar geen passende routevorm voor deze rit-ID en vervoersmodus."
+          ? "Transitous leverde voor deze exacte rit geen tekenbare OV-routegeometrie terug."
           : "Transitous heeft voor deze exacte rit geen routevorm teruggegeven.");
       }
       return geometries;
