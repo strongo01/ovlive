@@ -22,6 +22,7 @@ import { enforcePublicApiRateLimit, type ApiRateLimitBinding } from "./api-rate-
 
 interface Env {
   ASSETS: Fetcher;
+  OPENOV_SHAPES?: R2Bucket;
   NDOV_FEEDS: DurableObjectNamespace;
   NDOV_AUTOCOLLECT?: string;
   APP_NAME: string;
@@ -71,61 +72,110 @@ async function findOpenovStaticTripShape(
   if (!match) return null;
   const tripId = match[1];
 
-  try {
-    const manifestResponse = await env.ASSETS.fetch(new Request(
-      "https://ovlive-assets.local/openov-trip-shapes/manifest.json",
-      { method: "GET", headers: { accept: "application/json" } }
-    ));
-    if (!manifestResponse.ok) return null;
-    const manifest = await manifestResponse.json() as {
-      format?: number;
-      precision?: number;
-      routes?: Record<string, string[]>;
-    };
-    if (manifest?.format !== 1 || !manifest.routes ||
-        typeof manifest.routes !== "object" || Array.isArray(manifest.routes)) return null;
+  type ShapeManifest = {
+    format?: number;
+    precision?: number;
+    objectPrefix?: string;
+    routes?: Record<string, string[]>;
+  };
+  type ShapeShard = {
+    format?: number;
+    routeId?: string;
+    precision?: number;
+    trips?: Record<string, string>;
+    shapes?: Record<string, string>;
+  };
 
-    const routeFiles = manifest.routes[routeId];
-    if (!Array.isArray(routeFiles) || !routeFiles.length) return null;
+  let manifest: ShapeManifest | null = null;
+  let manifestSource: "r2" | "assets" = "assets";
+  let objectPrefix = "";
 
-    // The route manifest contains plain filenames only. Validate them before
-    // using the asset binding, and bound lookups to keep a malformed manifest
-    // from multiplying work on the public Worker.
-    for (const filenameValue of routeFiles.slice(0, 40)) {
-      const filename = String(filenameValue ?? "");
-      if (!new RegExp("^route-" + routeId + "-\\d+\\.json$").test(filename)) continue;
+  // R2 is the rolling, automatically refreshed source. Each publication uses a
+  // versioned prefix and publishes manifest.json last, so an update never points
+  // to half-uploaded files. Local static assets remain a safe migration fallback.
+  if (env.OPENOV_SHAPES) {
+    try {
+      const object = await env.OPENOV_SHAPES.get("manifest.json");
+      if (object) {
+        const candidate = JSON.parse(await object.text()) as ShapeManifest;
+        const candidatePrefix = String(candidate.objectPrefix ?? "");
+        if (candidate.format === 1 &&
+            candidate.routes && typeof candidate.routes === "object" &&
+            !Array.isArray(candidate.routes) &&
+            /^versions\/[A-Za-z0-9_-]+\/$/.test(candidatePrefix)) {
+          manifest = candidate;
+          manifestSource = "r2";
+          objectPrefix = candidatePrefix;
+        }
+      }
+    } catch {
+      // Continue to the previously deployed static assets if R2 is not ready.
+    }
+  }
+
+  if (!manifest) {
+    try {
+      const manifestResponse = await env.ASSETS.fetch(new Request(
+        "https://ovlive-assets.local/openov-trip-shapes/manifest.json",
+        { method: "GET", headers: { accept: "application/json" } }
+      ));
+      if (!manifestResponse.ok) return null;
+      manifest = await manifestResponse.json() as ShapeManifest;
+    } catch {
+      return null;
+    }
+  }
+
+  if (manifest?.format !== 1 || !manifest.routes ||
+      typeof manifest.routes !== "object" || Array.isArray(manifest.routes)) return null;
+
+  const routeFiles = manifest.routes[routeId];
+  if (!Array.isArray(routeFiles) || !routeFiles.length) return null;
+
+  // Only inspect a bounded number of exact-route shards. No line-number-only or
+  // nearest-route matching is allowed if a live trip is absent from the GTFS.
+  for (const filenameValue of routeFiles.slice(0, 40)) {
+    const filename = String(filenameValue ?? "");
+    if (!new RegExp("^route-" + routeId + "-\\d+\\.json$").test(filename)) continue;
+
+    let shard: ShapeShard | null = null;
+    if (manifestSource === "r2" && env.OPENOV_SHAPES) {
+      try {
+        const object = await env.OPENOV_SHAPES.get(objectPrefix + filename);
+        if (!object) continue;
+        shard = JSON.parse(await object.text()) as ShapeShard;
+      } catch {
+        continue;
+      }
+    } else {
       const shardResponse = await env.ASSETS.fetch(new Request(
         "https://ovlive-assets.local/openov-trip-shapes/" + filename,
         { method: "GET", headers: { accept: "application/json" } }
       ));
       if (!shardResponse.ok) continue;
-      const shard = await shardResponse.json() as {
-        format?: number;
-        routeId?: string;
-        precision?: number;
-        trips?: Record<string, string>;
-        shapes?: Record<string, string>;
-      };
-      if (shard?.format !== 1 || String(shard.routeId ?? "") !== routeId ||
-          !shard.trips || !shard.shapes) continue;
-
-      const shapeId = String(shard.trips[tripId] ?? "");
-      const points = String(shard.shapes[shapeId] ?? "");
-      if (!shapeId || points.length < 2) continue;
-      return {
-        tripId,
-        routeId,
-        mode: "TRANSIT",
-        legGeometry: {
-          points,
-          precision: Number.isInteger(shard.precision) ? Number(shard.precision) :
-            Number.isInteger(manifest.precision) ? Number(manifest.precision!) : 5
-        }
-      };
+      try {
+        shard = await shardResponse.json() as ShapeShard;
+      } catch {
+        continue;
+      }
     }
-  } catch {
-    // The normal Transitous error remains visible if local GTFS shape assets
-    // are missing or temporarily unreadable.
+
+    if (shard?.format !== 1 || String(shard.routeId ?? "") !== routeId ||
+        !shard.trips || !shard.shapes) continue;
+
+    const shapeId = String(shard.trips[tripId] ?? "");
+    const points = String(shard.shapes[shapeId] ?? "");
+    if (!shapeId || points.length < 2) continue;
+    return {
+      tripId,
+      routeId,
+      mode: "TRANSIT",
+      legGeometry: {
+        points,
+        precision: Number.isInteger(shard.precision) ? Number(shard.precision) :
+          Number.isInteger(manifest.precision) ? Number(manifest.precision!) : 5
+      }
+    };
   }
   return null;
 }
