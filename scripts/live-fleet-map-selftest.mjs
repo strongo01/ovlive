@@ -92,6 +92,12 @@ assert.ok(worker.includes("if (candidateResponse?.status === 429)") &&
   !worker.includes("candidateResponse.status >= 500 || candidateResponse.status === 429"),
   "an upstream HTTP 429 must stop route-ID retries instead of amplifying rate limits");
 
+assert.ok(worker.includes("const rawDetail = await candidateResponse.clone().text().catch(() => \"\")") &&
+  worker.includes("lastUpstreamDetail = String(rawDetail ?? \"\")") &&
+  worker.includes(".slice(0, 280)") &&
+  worker.includes("upstreamDetail: lastUpstreamDetail || null"),
+  "a short, bounded upstream error body must be visible when Transitous rejects a trip request");
+
 assert.ok(script.includes("function loadNsVehicleRouteGeometry(vehicle)") &&
   script.includes('fetch("/api/ns/train-route?"') &&
   script.includes('vehicle.sourceKey === "ns"'),
