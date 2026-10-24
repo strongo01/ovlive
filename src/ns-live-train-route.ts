@@ -118,17 +118,29 @@ function stationNameFromObject(value: any): string | null {
   );
   if (direct) return direct;
 
-  const names = value.names ?? value.localizedNames;
+  const names = value.names ?? value.localizedNames ?? value.namen;
   if (Array.isArray(names)) {
     const dutch = names.find((item: any) =>
-      String(item?.language ?? item?.lang ?? "").toLowerCase().startsWith("nl")
+      String(item?.language ?? item?.lang ?? item?.taal ?? "").toLowerCase().startsWith("nl")
     );
     const selected = dutch ?? names[0];
     if (selected) {
       return firstText(selected.name, selected.value, selected.text, selected.label);
     }
   } else if (names && typeof names === "object") {
-    return firstText(names.nl, names.NL, names.default, names.name, names.value);
+    // Support both modern localized names and the older NS "namen" object,
+    // where "lang" is the long station name (not a language code).
+    return firstText(
+      names.nl,
+      names.NL,
+      names.default,
+      names.lang,
+      names.long,
+      names.middel,
+      names.kort,
+      names.name,
+      names.value
+    );
   }
   return null;
 }
