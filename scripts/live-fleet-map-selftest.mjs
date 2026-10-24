@@ -88,6 +88,10 @@ assert.ok(worker.includes("Transitous beperkt tijdelijk het aantal routevragen (
   worker.includes("candidateCount: boundedCandidates.length"),
   "trip-shape failures must expose actionable upstream status instead of hiding every failure behind one generic message");
 
+assert.ok(worker.includes("if (candidateResponse?.status === 429)") &&
+  !worker.includes("candidateResponse.status >= 500 || candidateResponse.status === 429"),
+  "an upstream HTTP 429 must stop route-ID retries instead of amplifying rate limits");
+
 assert.ok(script.includes("function loadNsVehicleRouteGeometry(vehicle)") &&
   script.includes('fetch("/api/ns/train-route?"') &&
   script.includes('vehicle.sourceKey === "ns"'),
