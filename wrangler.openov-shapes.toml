@@ -6,4 +6,3 @@ workers_dev = true
 [assets]
 directory = "./public/openov-trip-shapes"
 binding = "ASSETS"
-run_worker_first = true
