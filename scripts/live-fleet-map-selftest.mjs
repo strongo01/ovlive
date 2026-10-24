@@ -92,6 +92,18 @@ assert.ok(worker.includes("if (candidateResponse?.status === 429)") &&
   !worker.includes("candidateResponse.status >= 500 || candidateResponse.status === 429"),
   "an upstream HTTP 429 must stop route-ID retries instead of amplifying rate limits");
 
+assert.ok(worker.includes("async function findOpenovStaticTripShape(") &&
+  worker.includes("findOpenovStaticTripShape(env, tripId, routeId)") &&
+  worker.includes('routeSource: "OpenOV GTFS-static (exact trip-ID + route-ID)"') &&
+  worker.includes("shard.trips[tripId]") &&
+  worker.includes("shard.shapes[shapeId]"),
+  "when Transitous has a stale trip index, route geometry may only fall back to an exact local GTFS trip_id + route_id match");
+
+assert.ok(script.includes("routeId: identity.routeId") &&
+  script.includes("state.routeSourceCache") &&
+  script.includes("state.routeSource = String(payload.routeSource ?? \"\")"),
+  "the website must send the exact route ID and retain geometry source metadata with its route cache");
+
 assert.ok(worker.includes("const rawDetail = await candidateResponse.clone().text().catch(() => \"\")") &&
   worker.includes("lastUpstreamDetail = String(rawDetail ?? \"\")") &&
   worker.includes(".slice(0, 280)") &&
