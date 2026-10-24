@@ -4561,6 +4561,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (url.pathname === "/api/trip-shape") {
     const tripId = String(url.searchParams.get("tripId") ?? "").trim();
+    const routeId = String(url.searchParams.get("routeId") ?? "").trim();
     if (!tripId || tripId.length > 256) {
       return json({ error: "Geef een geldige Transitous-rit-ID op." }, 400, headers);
     }
@@ -4710,13 +4711,32 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         break;
       }
 
+      // Transitous imports OpenOV GTFS on a different schedule from the
+      // realtime feed. If its timetable has an older numeric trip_id, resolve
+      // the exact same trip_id + route_id from a locally prebuilt current GTFS
+      // shape index instead of guessing from the public line number.
+      const staticShape = await findOpenovStaticTripShape(env, tripId, routeId);
+      if (staticShape) {
+        return json({
+          ok: true,
+          requestedTripId: tripId,
+          resolvedTripId: tripId,
+          routeSource: "OpenOV GTFS-static (exact trip-ID + route-ID)",
+          legs: [staticShape]
+        }, 200, {
+          ...headers,
+          "cache-control": "public, max-age=1800",
+          "x-upstream": "OpenOV GTFS-static exact trip shape"
+        });
+      }
+
       if (sawSuccessfulReplyWithoutGeometry) {
         return json({
           ok: true,
           requestedTripId: tripId,
           resolvedTripId: null,
           legs: [],
-          routeWarning: "Transitous accepteerde de rit-ID, maar leverde voor geen van de exacte ID-schrijfwijzen routegeometrie terug."
+          routeWarning: "Transitous accepteerde de rit-ID, maar leverde voor geen van de exacte ID-schrijfwijzen routegeometrie terug. Er is ook geen exacte ritvorm gevonden in de lokale OpenOV-GTFS-index."
         }, 200, {
           ...headers,
           "cache-control": "no-store",
