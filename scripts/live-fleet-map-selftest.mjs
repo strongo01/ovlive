@@ -192,6 +192,19 @@ assert.ok(nsSource.includes("CACHE_TTL_MS = 5_000") &&
   nsSource.includes("readEdgeCache"),
   "the NS upstream positions response must retain its isolate and edge cache");
 
+// Native OVLive needs the exact OVAPI journey, not a line-wide top-N result.
+assert.ok(worker.includes('url.searchParams.get("tripNumber")') &&
+  worker.includes('url.searchParams.get("operatorCode")') &&
+  worker.includes("journeyNumber.toLocaleLowerCase") &&
+  worker.includes("operatorCode.toLocaleLowerCase"),
+  "line search must support exact trip-number and operator-code filters");
+assert.ok(worker.includes("ovapiLineResultsFound || requestedTripNumber"),
+  "an exact journey lookup must not silently fall back to a different OpenOV journey");
+assert.ok(worker.includes("Keep every stop not marked passed/cancelled") &&
+  worker.includes('orderedStops.filter((stop) => !["PASSED", "CANCEL", "CANCELLED"]') &&
+  !worker.includes("orderedStops.slice(currentIndex)"),
+  "the OVAPI trip timeline must keep upcoming stops that are not explicitly passed or cancelled");
+
 console.log("PASS: live fleet map script parses and is attached to the correct map panel");
 console.log("PASS: independent vehicle modes, exact-trip route popups, and red route lines are present");
 console.log("PASS: My Location controls work on the general map and individual journey maps");
