@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import io
 import json
+import math
 import shutil
 import sys
 import urllib.request
@@ -49,8 +50,8 @@ def encode_polyline(points: list[tuple[float, float]]) -> str | None:
     last_lat = 0
     last_lon = 0
     for latitude, longitude in points:
-        lat = round(latitude * 100000)
-        lon = round(longitude * 100000)
+        lat = math.floor(latitude * 100000 + 0.5)
+        lon = math.floor(longitude * 100000 + 0.5)
         output.append(encode_signed(lat - last_lat))
         output.append(encode_signed(lon - last_lon))
         last_lat = lat
@@ -226,9 +227,6 @@ def refresh_archive(archive: Path) -> None:
         with zipfile.ZipFile(temporary) as zf:
             find_member(zf, "trips.txt")
             find_member(zf, "shapes.txt")
-            broken_member = zf.testzip()
-            if broken_member:
-                raise ValueError("GTFS-zip is beschadigd bij bestand " + broken_member)
         temporary.replace(archive)
     except Exception:
         temporary.unlink(missing_ok=True)
