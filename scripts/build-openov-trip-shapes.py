@@ -257,6 +257,8 @@ def main() -> int:
         print(json.dumps(build(archive, output_dir), ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:
+        build_dir = output_dir.with_name("." + output_dir.name + ".build")
+        shutil.rmtree(build_dir, ignore_errors=True)
         print(f"FOUT: OpenOV-ritvormen niet opgebouwd: {exc}", file=sys.stderr)
         return 3
 
