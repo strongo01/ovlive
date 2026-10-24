@@ -8,8 +8,11 @@ assert.deepEqual(zeroSeconds, [
   "20261024_10:30:00_nl-OpenOV_380014114",
   "20261024_10:30:00_380014114",
   "20261024_10:30_nl-OpenOV_380014114",
-  "20261024_10:30_380014114"
-], "only the same trip and service date may be tried without zero seconds");
+  "20261024_10:30_380014114",
+  "nl-OpenOV_380014114"
+], "only spelling aliases of the same OpenOV trip may be tried, with the unwrapped namespaced ID last");
+assert.ok(!zeroSeconds.includes("380014114"),
+  "the fallback must never remove the OpenOV namespace and try a potentially colliding bare numeric ID");
 
 const minuteOnly = openovTripShapeIdCandidates(
   "20261024_10:30_nl-OpenOV_380014114"
