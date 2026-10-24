@@ -59,9 +59,10 @@ class_name = "NdovFeedHub"
 tag = "v1"
 new_sqlite_classes = ["NdovFeedHub"]
 
-[[r2_buckets]]
-binding = "OPENOV_SHAPES"
-bucket_name = "ovlive-openov-trip-shapes"
+
+[[services]]
+binding = "OPENOV_SHAPES_ASSETS"
+service = "ovlive-openov-shapes"
 
 [triggers]
 crons = ["*/5 * * * *"]
