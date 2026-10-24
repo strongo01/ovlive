@@ -4581,6 +4581,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           leg?.legGeometry &&
           (typeof leg.legGeometry === "string" ||
            typeof leg.legGeometry?.points === "string" ||
+           (Array.isArray(leg.legGeometry?.coordinates) &&
+            leg.legGeometry.coordinates.length > 1) ||
            (Array.isArray(leg.legGeometry) && leg.legGeometry.length > 1))
         )
         .slice(0, 12)
