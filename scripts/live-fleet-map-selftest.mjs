@@ -272,7 +272,7 @@ assert.ok(worker.includes("Keep every stop not marked passed/cancelled") &&
 console.log("PASS: live fleet map script parses and is attached to the correct map panel");
 console.log("PASS: independent vehicle modes, exact-trip route popups, and red route lines are present");
 console.log("PASS: My Location controls work on the general map and individual journey maps");
-console.log("PASS: 20-second non-overlapping polling, hidden-tab pause, and failure backoff are present");
+console.log("PASS: 30-second non-overlapping polling, hidden-tab pause, and failure backoff are present");
 console.log("PASS: OpenOV map feed uses selective decoding, short edge caching, and single-flight");
 console.log("PASS: NS all-position mode is explicit and remains cached");
 console.log("All live fleet map selftests passed.");
