@@ -245,6 +245,18 @@
     .live-map-attribution a{color:inherit}
     .live-location-status{font-size:12px;color:var(--muted);margin:6px 0;min-height:1.2em}
     .live-fleet-route-status{font-size:12px;color:var(--muted);margin-top:7px;line-height:1.45}
+    .live-fleet-stop-timeline{margin-top:10px;padding:9px;border:1px solid #303842;border-radius:10px;background:#191e24;color:#f6f7f9;max-width:320px}
+    .live-fleet-stop-source{font-size:11px;color:#a8b0ba;margin:4px 0 8px;line-height:1.35}
+    .live-fleet-stop-list{list-style:none;margin:7px 0 0;padding:0;max-height:250px;overflow:auto}
+    .live-fleet-stop{display:flex;gap:8px;align-items:flex-start;padding:6px 2px;border-bottom:1px solid #303842}
+    .live-fleet-stop:last-child{border-bottom:0}
+    .live-fleet-stop-glyph{flex:0 0 18px;text-align:center;font-weight:800}
+    .live-fleet-stop-details{min-width:0;display:flex;flex-direction:column;gap:2px}
+    .live-fleet-stop-details strong{font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+    .live-fleet-stop-status,.live-fleet-stop-times{font-size:11px;line-height:1.35;color:#a8b0ba}
+    .live-fleet-stop.is-passed .live-fleet-stop-glyph,.live-fleet-stop.is-passed .live-fleet-stop-status{color:#86efac}
+    .live-fleet-stop.is-current .live-fleet-stop-glyph,.live-fleet-stop.is-current .live-fleet-stop-status{color:#fb923c}
+    .live-fleet-stop.is-cancelled .live-fleet-stop-glyph,.live-fleet-stop.is-cancelled .live-fleet-stop-status{color:#fca5a5}
 
     .live-fleet-controls{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
     .live-fleet-mode{display:flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.025);font-size:12px;font-weight:700;cursor:pointer}
