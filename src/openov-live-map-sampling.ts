@@ -84,3 +84,37 @@ export function selectDiverseOpenovLiveMapPositions<T extends OpenovMapPositionI
 
   return selected;
 }
+
+
+/**
+ * Keep every known tram position in the national live-map sample before
+ * filling the remaining slots with a diverse sample of other vehicles.
+ * This prevents low-volume tram routes from losing most of their vehicles
+ * when thousands of national bus/rail position records compete for the cap.
+ */
+export function selectOpenovPositionsWithTramPriority<
+  T extends OpenovMapPositionIdentity
+>(
+  positions: readonly T[],
+  maxPositions: number,
+  tramRouteIds: ReadonlySet<string>
+): T[] {
+  if (!Number.isSafeInteger(maxPositions) || maxPositions <= 0) return [];
+
+  const isTramRoute = (position: T) => {
+    const routeId = normalizeId(position.routeId);
+    return Boolean(routeId && tramRouteIds.has(routeId));
+  };
+
+  const tramPositions = positions.filter(isTramRoute);
+  if (tramPositions.length >= maxPositions) {
+    return selectDiverseOpenovLiveMapPositions(tramPositions, maxPositions);
+  }
+
+  const otherPositions = positions.filter(position => !isTramRoute(position));
+  const sampledOthers = selectDiverseOpenovLiveMapPositions(
+    otherPositions,
+    maxPositions - tramPositions.length
+  );
+  return tramPositions.concat(sampledOthers);
+}
