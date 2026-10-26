@@ -4448,7 +4448,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                       "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
                     },
                     signal: AbortSignal.timeout(9000),
-                    cf: { cacheEverything: true, cacheTtl: 10 }
+                    cf: { cacheEverything: true, cacheTtl: 3 }
                   });
                   if (!detailsResponse.ok) {
                     throw new Error("HTTP " + detailsResponse.status);
@@ -4607,7 +4607,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               "user-agent": env.APP_NAME + "/" + env.APP_VERSION + " (" + env.APP_CONTACT + ")"
             },
             signal: AbortSignal.timeout(8000),
-            cf: { cacheEverything: true, cacheTtl: 10 }
+            cf: { cacheEverything: true, cacheTtl: 3 }
           });
           if (!journeysResponse.ok) {
             throw new Error("OVAPI gaf HTTP " + journeysResponse.status + " terug voor ritdetails.");
