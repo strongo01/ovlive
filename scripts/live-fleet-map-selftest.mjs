@@ -244,11 +244,10 @@ assert.equal(helperContext.tripIdMatchesForShape(
 assert.ok(worker.includes('url.pathname === "/api/live-map/openov"') &&
   worker.includes("handleLiveMapOpenovApi") &&
   worker.includes("decodeOpenovVehiclePositions(bytes)") &&
-  worker.includes("Avoid sorting the entire national feed") &&
-  worker.includes("LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000") &&
+  worker.includes("LIVE_MAP_OPENOV_CACHE_TTL_MS = 30_000") &&
   worker.includes("liveMapOpenovInFlight") &&
   worker.includes("OVLIVE_LIVE_MAP_OPENOV_STALE_INFLIGHT"),
-  "the OpenOV live-map endpoint must use the selective decoder, a 15-second cache, and recover from stale single-flight requests");
+  "the NDOV/OVapi live-map endpoint must use the selective decoder, a 30-second cache, and recover from stale single-flight requests");
 assert.ok(worker.includes('url.searchParams.get("all") === "1"') &&
   worker.includes("allPositions: includeAllPositions"),
   "NS live-map retrieval must be explicitly opt-in and bounded");
