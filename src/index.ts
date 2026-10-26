@@ -6,6 +6,7 @@ import {
 } from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 import { decodeOpenovVehiclePositions } from "./openov-vehicle-position-fast-decode.js";
+import { selectDiverseOpenovLiveMapPositions } from "./openov-live-map-sampling.js";
 import { decodeOpenovTripUpdates } from "./openov-trip-update-fast-decode.js";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
@@ -3222,16 +3223,18 @@ async function handleLiveMapOpenovApi(
       // Avoid sorting the entire national feed on the CPU-limited Worker.
       // Every returned point is independently age-checked by the UI; a stable
       // capped source-order sample is preferable to an expensive global sort.
-      const entities = decoded.entities
-        .filter((entity: any) =>
-          Number.isFinite(entity.latitude) &&
-          Number.isFinite(entity.longitude) &&
-          entity.latitude >= 49 &&
-          entity.latitude <= 56 &&
-          entity.longitude >= 2 &&
-          entity.longitude <= 9.5
-        )
-        .slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS);
+      const validPositions = decoded.entities.filter((entity: any) =>
+        Number.isFinite(entity.latitude) &&
+        Number.isFinite(entity.longitude) &&
+        entity.latitude >= 49 &&
+        entity.latitude <= 56 &&
+        entity.longitude >= 2 &&
+        entity.longitude <= 9.5
+      );
+      const entities = selectDiverseOpenovLiveMapPositions(
+        validPositions,
+        LIVE_MAP_OPENOV_MAX_POSITIONS
+      );
 
       const feedTimestamp = decoded.feedTimestamp;
       const rawAgeSeconds = typeof feedTimestamp === "number"
@@ -3250,7 +3253,8 @@ async function handleLiveMapOpenovApi(
         decoder: "selective-protobuf",
         byteCount: bytes.byteLength,
         sourceEntityCount: decoded.sourceEntityCount,
-        validPositionCount: entities.length,
+        validPositionCount: validPositions.length,
+        returnedCount: entities.length,
         decodeDurationMs,
         totalDurationMs: Date.now() - startedAt,
         freshness
@@ -3266,6 +3270,7 @@ async function handleLiveMapOpenovApi(
         ageSeconds,
         freshness,
         entityCount: decoded.sourceEntityCount,
+        validPositionCount: validPositions.length,
         returnedCount: entities.length,
         decoder: "selective-protobuf",
         entities
