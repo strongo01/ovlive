@@ -4726,15 +4726,24 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       itinerary: any,
       fallbackTripId: string,
       fallbackRouteId: string
-    ) => drawableTransitLegs(itinerary).flatMap((leg: any) =>
-      normalizeTransitousLineSearchStops(leg).map((stop: Record<string, any>) => ({
-        ...stop,
-        tripId: String(leg?.tripId ?? fallbackTripId),
-        routeId: String(leg?.routeId ?? fallbackRouteId),
-        mode: String(leg?.mode ?? ""),
-        source: "Transitous timetable"
-      }))
-    );
+    ) => {
+      const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
+      return legs
+        .filter((leg: any) => {
+          const mode = String(leg?.mode ?? "").toUpperCase();
+          return mode !== "WALK" && mode !== "FOOT";
+        })
+        .slice(0, 12)
+        .flatMap((leg: any) =>
+          normalizeTransitousLineSearchStops(leg).map((stop: Record<string, any>) => ({
+            ...stop,
+            tripId: String(leg?.tripId ?? fallbackTripId),
+            routeId: String(leg?.routeId ?? fallbackRouteId),
+            mode: String(leg?.mode ?? ""),
+            source: "Transitous timetable"
+          }))
+        );
+    };
 
     try {
       for (let candidateIndex = 0; candidateIndex < boundedCandidates.length; candidateIndex++) {
