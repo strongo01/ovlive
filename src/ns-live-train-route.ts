@@ -158,10 +158,9 @@ function journeyStopDateTime(entry: any, kind: "arrival" | "departure", actual: 
   const title = kind === "arrival" ? "Arrival" : "Departure";
   const titleLower = kind === "arrival" ? "arrival" : "departure";
 
-  // NS journey responses have used both flat stop-time fields and nested
-  // stop/station + arrival/departure objects. Inspect only fields explicitly
-  // marked planned or actual first; do not accidentally present a planned time
-  // as a live observation.
+  // NS journey payloads use both flat/nested event fields and arrays such as
+  // arrivals: [{ actualTime, plannedTime }]. Inspect explicitly marked fields
+  // first so an actual time can never silently become a timetable time.
   const containers = [
     entry,
     entry?.stop,
@@ -171,55 +170,66 @@ function journeyStopDateTime(entry: any, kind: "arrival" | "departure", actual: 
   ].filter((value: any) => value && typeof value === "object");
 
   for (const container of containers) {
-    const event = container?.[kind];
-    const explicit = actual
-      ? firstDateTime(
-          container?.[`actual${title}DateTime`],
-          container?.[`actual${title}Time`],
-          container?.[`${titleLower}ActualDateTime`],
-          container?.[`${titleLower}ActualTime`],
-          container?.[`actual${title}`],
-          container?.actual?.[kind]?.dateTime,
-          container?.actual?.[kind]?.time,
-          event?.actualDateTime,
-          event?.actualTime,
-          event?.actual
-        )
-      : firstDateTime(
-          container?.[`planned${title}DateTime`],
-          container?.[`planned${title}Time`],
-          container?.[`${titleLower}PlannedDateTime`],
-          container?.[`${titleLower}PlannedTime`],
-          container?.[`planned${title}`],
-          container?.planned?.[kind]?.dateTime,
-          container?.planned?.[kind]?.time,
-          event?.plannedDateTime,
-          event?.plannedTime,
-          event?.planned,
-          event?.scheduledDateTime,
-          event?.scheduledTime
-        );
-    if (explicit) return explicit;
+    const pluralEvents = Array.isArray(container?.[`${kind}s`])
+      ? container[`${kind}s`]
+      : [];
+    // Keep an undefined candidate when the singular event is absent so flat
+    // plannedArrivalDateTime / actualDepartureTime fields are still examined.
+    const events = [container?.[kind], ...pluralEvents];
+    for (const event of events) {
+      const explicit = actual
+        ? firstDateTime(
+            container?.[`actual${title}DateTime`],
+            container?.[`actual${title}Time`],
+            container?.[`${titleLower}ActualDateTime`],
+            container?.[`${titleLower}ActualTime`],
+            container?.[`actual${title}`],
+            container?.actual?.[kind]?.dateTime,
+            container?.actual?.[kind]?.time,
+            event?.actualDateTime,
+            event?.actualTime,
+            event?.actual
+          )
+        : firstDateTime(
+            container?.[`planned${title}DateTime`],
+            container?.[`planned${title}Time`],
+            container?.[`${titleLower}PlannedDateTime`],
+            container?.[`${titleLower}PlannedTime`],
+            container?.[`planned${title}`],
+            container?.planned?.[kind]?.dateTime,
+            container?.planned?.[kind]?.time,
+            event?.plannedDateTime,
+            event?.plannedTime,
+            event?.planned,
+            event?.scheduledDateTime,
+            event?.scheduledTime
+          );
+      if (explicit) return explicit;
+    }
   }
 
-  // Older NS payloads sometimes return one unqualified event time. Use it as
-  // the planned baseline only, and never as an actual arrival/departure.
+  // Older NS payloads sometimes expose only an unqualified event time. Use it
+  // strictly as the planned baseline, never as an actual arrival/departure.
   if (!actual) {
     for (const container of containers) {
-      const event = container?.[kind];
-      const fallback = firstDateTime(
-        container?.[`${titleLower}DateTime`],
-        container?.[`${titleLower}Time`],
-        container?.[`${titleLower}`],
-        event?.dateTime,
-        event?.time
-      );
-      if (fallback) return fallback;
+      const pluralEvents = Array.isArray(container?.[`${kind}s`])
+        ? container[`${kind}s`]
+        : [];
+      const events = [container?.[kind], ...pluralEvents];
+      for (const event of events) {
+        const fallback = firstDateTime(
+          container?.[`${titleLower}DateTime`],
+          container?.[`${titleLower}Time`],
+          container?.[`${titleLower}`],
+          event?.dateTime,
+          event?.time
+        );
+        if (fallback) return fallback;
+      }
     }
   }
   return null;
 }
-
 function delaySeconds(actual: string | null, planned: string | null): number | null {
   if (!actual || !planned) return null;
   const difference = Math.round((Date.parse(actual) - Date.parse(planned)) / 1000);
