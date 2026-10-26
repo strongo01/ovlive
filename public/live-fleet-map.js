@@ -602,6 +602,74 @@
     }
   }
 
+  async function loadRealtimeStopUpdates(vehicle) {
+    const identity = vehicleRouteIdentity(vehicle);
+    if (!identity || vehicle?.sourceKey === "ns") return [];
+    const tripId = normalizedId(vehicle.tripId);
+    const routeId = normalizedId(vehicle.routeId);
+    if (!tripId || !routeId) return [];
+
+    const params = new URLSearchParams({
+      kind: "tripUpdates",
+      tripId,
+      routeId,
+      limit: "500"
+    });
+    const response = await fetch("/api/realtime?" + params.toString(), {
+      cache: "no-store",
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(10_000)
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok !== true || !Array.isArray(payload.entities)) {
+      throw new Error(payload?.error || "Realtime-haltegegevens zijn niet beschikbaar.");
+    }
+
+    const targetDate = String(vehicle.startDate ?? "").replace(/\D/g, "");
+    const normalizeTime = value => {
+      const parts = String(value ?? "").trim().split(":");
+      if (parts.length < 2 || parts.length > 3 || parts.some(part => !/^\d{1,2}$/.test(part))) {
+        return "";
+      }
+      return parts.map((part, index) => part.padStart(2, "0") ||
+        (index === 2 ? "00" : "")).concat().join(":");
+    };
+    const targetTime = normalizeTime(vehicle.startTime);
+    const matched = payload.entities.find(entity => {
+      if (normalizedId(entity?.tripId) !== tripId) return false;
+      const candidateRoute = normalizedId(entity?.routeId);
+      if (candidateRoute && candidateRoute !== routeId) return false;
+      const candidateDate = String(entity?.startDate ?? "").replace(/\D/g, "");
+      if (targetDate && candidateDate && targetDate !== candidateDate) return false;
+      const candidateTime = normalizeTime(entity?.startTime);
+      if (targetTime && candidateTime && targetTime !== candidateTime) return false;
+      return Array.isArray(entity?.stopUpdates);
+    });
+    return matched?.stopUpdates ?? [];
+  }
+
+  function refreshOpenovStopUpdates(vehicle) {
+    const cacheKey = vehicleRouteCacheKey(vehicle);
+    if (!cacheKey || vehicle?.sourceKey === "ns") return;
+    const detail = state.routeStopDetails.get(cacheKey);
+    if (!detail || detail.status !== "loaded") return;
+    if (detail.realtimeCheckedAt && Date.now() - detail.realtimeCheckedAt < 20_000) return;
+
+    detail.realtimeCheckedAt = Date.now();
+    void loadRealtimeStopUpdates(vehicle).then(stopUpdates => {
+      const latest = state.routeStopDetails.get(cacheKey);
+      if (!latest || latest.status !== "loaded") return;
+      latest.stopUpdates = stopUpdates;
+      latest.realtimeError = null;
+      refreshVehiclePopup(vehicle.key);
+    }).catch(error => {
+      const latest = state.routeStopDetails.get(cacheKey);
+      if (!latest) return;
+      latest.realtimeError = error instanceof Error ? error.message : "Realtime-haltegegevens zijn niet beschikbaar.";
+      refreshVehiclePopup(vehicle.key);
+    });
+  }
+
   function refreshVehiclePopup(key) {
     const marker = state.markers.get(key);
     const vehicle = marker?.__ovliveVehicle;
