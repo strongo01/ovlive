@@ -319,4 +319,84 @@ await assert.rejects(
   "an invalid train identifier must be rejected before making upstream requests"
 );
 
+// Long rail journeys keep every timetable stop. SpoorKaart calls are
+// chunked to bounded station lists with an overlapping endpoint between chunks.
+const longStationCodes = Array.from({ length: 40 }, (_, index) =>
+  "S" + String(index).padStart(3, "0")
+);
+const longGeometryRequests = [];
+const longJourneyFetchMock = async (input, init = {}) => {
+  const url = new URL(String(input));
+  assert.equal(
+    new Headers(init.headers).get("Ocp-Apim-Subscription-Key"),
+    "test-ns-key"
+  );
+
+  if (url.pathname.endsWith("/api/v2/journey")) {
+    return new Response(JSON.stringify({
+      payload: {
+        stops: longStationCodes.map((code, index) => ({
+          stop: {
+            uicCode: String(8401000 + index),
+            code,
+            name: "Station " + index
+          },
+          ...(index === 0
+            ? { plannedDepartureDateTime: "2026-10-20T05:00:00Z" }
+            : { plannedArrivalDateTime: new Date(Date.UTC(2026, 9, 20, 5, index)).toISOString() })
+        }))
+      }
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }
+
+  if (url.pathname.endsWith("/api/v1/traject.geojson")) {
+    const codes = (url.searchParams.get("stations") ?? "").split(",");
+    longGeometryRequests.push(codes);
+    assert.ok(codes.length <= 36,
+      "each SpoorKaart geometry request must stay within the bounded station limit");
+    const features = codes.slice(0, -1).map((from, index) => ({
+      type: "Feature",
+      properties: { from, to: codes[index + 1] },
+      geometry: {
+        type: "LineString",
+        coordinates: [[4.0 + index / 100, 52.0], [4.01 + index / 100, 52.01]]
+      }
+    }));
+    return new Response(JSON.stringify({ type: "FeatureCollection", features }), {
+      status: 200,
+      headers: { "content-type": "application/geo+json" }
+    });
+  }
+
+  throw new Error("Unexpected long-journey mocked NS request: " + url.toString());
+};
+
+const longJourneyRoute = await fetchNsLiveTrainRoute(
+  "1736",
+  "2026-10-20T07:00:00.000Z",
+  {
+    NS_API_SUBSCRIPTION_KEY: "test-ns-key",
+    APP_NAME: "OVLive",
+    APP_VERSION: "test",
+    APP_CONTACT: "https://example.test"
+  },
+  longJourneyFetchMock
+);
+assert.equal(longJourneyRoute.ok, true);
+assert.equal(longJourneyRoute.stops.length, 40,
+  "long journeys must retain the complete station timetable instead of being rejected");
+assert.equal(longJourneyRoute.stops[0].plannedDepartureDateTime, "2026-10-20T05:00:00.000Z");
+assert.equal(longJourneyRoute.stops[39].plannedArrivalDateTime,
+  new Date(Date.UTC(2026, 9, 20, 5, 39)).toISOString(),
+  "the final station's planned time must remain available");
+assert.equal(longGeometryRequests.length, 2,
+  "a 40-station journey should use two bounded geometry requests");
+assert.deepEqual(longGeometryRequests.map(codes => codes.length), [36, 5]);
+assert.equal(longGeometryRequests[0].at(-1), longGeometryRequests[1][0],
+  "adjacent geometry chunks must share their endpoint station");
+assert.equal(longJourneyRoute.legs.length, 39,
+  "all sequential track segments should be returned for the long journey");
+
+console.log("PASS: long train journeys retain all stops and use bounded geometry chunks");
+
 console.log("PASS: NS train route lookup uses exact train/time, ordered station codes and cached track geometry");
