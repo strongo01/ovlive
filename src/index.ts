@@ -3506,9 +3506,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                       ? "Een station in de exacte NS-rit kon niet naar een spoorwegcode worden vertaald."
                       : detail === "NS_LIVE_TRAIN_ROUTE_STOPS_MISSING_CODES"
                         ? "NS leverde niet voor alle stations een bruikbare stationscode; de spoorroute is daarom niet getekend."
-                        : detail === "NS_LIVE_TRAIN_ROUTE_TOO_MANY_STOPS"
-                          ? "Deze treinrit heeft te veel stations om veilig in één routeaanvraag op te halen."
-                          : /timeout|timed out|abort/i.test(detail)
+                      : /timeout|timed out|abort/i.test(detail)
                             ? "De NS-routegegevens reageren niet op tijd."
                             : "De exacte NS-treinroute is tijdelijk niet beschikbaar.";
 
