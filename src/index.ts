@@ -6,7 +6,7 @@ import {
 } from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 import { decodeOpenovVehiclePositions } from "./openov-vehicle-position-fast-decode.js";
-import { selectDiverseOpenovLiveMapPositions, selectOpenovPositionsWithTramPriority } from "./openov-live-map-sampling.js";
+import { selectOpenovPositionsWithTramPriority } from "./openov-live-map-sampling.js";
 import { decodeOpenovTripUpdates } from "./openov-trip-update-fast-decode.js";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
