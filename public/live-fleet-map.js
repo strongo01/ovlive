@@ -212,7 +212,7 @@
 
       const vehicle = {
         key: "openov:" + keyPart,
-        source: "OpenOV GTFS-Realtime",
+        source: "NDOV-loket / OVapi GTFS-Realtime",
         sourceKey: "openov",
         mode,
         latitude,
@@ -1272,7 +1272,7 @@
           ok: false,
           error: message
         };
-        problems.push((sourceName === "openov" ? "OpenOV" : "NS") + ": " + message);
+        problems.push((sourceName === "openov" ? "NDOV/OVapi" : "NS") + ": " + message);
       }
     }
 
