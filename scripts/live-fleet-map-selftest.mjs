@@ -37,6 +37,11 @@ assert.ok(script.includes("const backoff = [20_000, 30_000, 45_000, 60_000]"),
   "repeated full failures must apply progressive retry backoff");
 assert.ok(script.includes('setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35)'),
   "last-known markers must visibly fade when their source is unavailable");
+assert.ok(script.includes("function markerZIndexOffset(mode)") &&
+  script.includes('if (mode === "tram") return 2400;') &&
+  script.includes("zIndexOffset: markerZIndexOffset(vehicle.mode)") &&
+  script.includes("marker.setZIndexOffset(markerZIndexOffset(vehicle.mode))"),
+  "tram markers must render above overlapping bus markers, both on creation and refresh");
 assert.ok(script.includes("marker.setLatLng([vehicle.latitude, vehicle.longitude])"),
   "existing markers must be moved instead of rebuilding the entire Leaflet map");
 assert.ok(script.includes("openovFeedNotFresh") && script.includes("last-known map points"),
