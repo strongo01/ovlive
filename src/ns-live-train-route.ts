@@ -47,7 +47,9 @@ export interface NsLiveTrainRouteResult {
 const NS_JOURNEY_ROOT = "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v2/journey";
 const NS_STATION_ROOT = "https://gateway.apiportal.ns.nl/nsapp-stations/v1/station";
 const NS_TRAJECT_ROOT = "https://gateway.apiportal.ns.nl/Spoorkaart-API/api/v1/traject.geojson";
-const MAX_STOPS = 36;
+// SpoorKaart route lookups are bounded to 36 stations per request.
+// Larger train journeys are split into overlapping chunks, while their full timetable is retained.
+const MAX_STATIONS_PER_ROUTE_REQUEST = 36;
 const MAX_JSON_BYTES = 5_000_000;
 const ROUTE_CACHE_TTL_MS = 5 * 60_000;
 const STATION_CACHE_TTL_MS = 24 * 60 * 60_000;
@@ -611,7 +613,6 @@ export async function fetchNsLiveTrainRoute(
 
     const stops = getJourneyStops(journeyPayload);
     if (stops.length < 2) throw new Error("NS_LIVE_TRAIN_ROUTE_NO_JOURNEY");
-    if (stops.length > MAX_STOPS) throw new Error("NS_LIVE_TRAIN_ROUTE_TOO_MANY_STOPS");
 
     const stopInfos = stops.map(entry => ({
       entry,
@@ -660,23 +661,47 @@ export async function fetchNsLiveTrainRoute(
     if (!haveAllStationCodes || orderedStationCodes.length < 2) {
       routeWarning = "Stations en geplande tijden zijn beschikbaar, maar niet alle stationscodes zijn beschikbaar om de spoorroute te tekenen.";
     } else {
-      try {
-        const trajectUrl = new URL(NS_TRAJECT_ROOT);
-        trajectUrl.searchParams.set("stations", orderedStationCodes.join(","));
-        const trajectPayload = await requestJson(trajectUrl, env, 86_400, fetchImpl);
-        const lines = extractOrderedRouteLines(trajectPayload, orderedStationCodes);
-        legs = lines.map((coordinates, sequence) => ({
-          tripId: trainNumber,
-          routeId: "NS-SPOORKAART-" + sequence,
-          mode: "RAIL",
-          sequence,
-          legGeometry: { type: "LineString" as const, coordinates }
-        }));
-        if (!legs.length) {
-          routeWarning = "Stations en geplande tijden zijn beschikbaar, maar NS leverde geen bruikbare spoorgeometrie terug.";
+      // Keep the complete station/timetable list even for long train journeys.
+      // SpoorKaart lookups are split into chunks with one shared endpoint station
+      // so each adjacent track segment is requested once and remains ordered.
+      const stationChunks: string[][] = [];
+      for (
+        let start = 0;
+        start < orderedStationCodes.length - 1;
+        start += MAX_STATIONS_PER_ROUTE_REQUEST - 1
+      ) {
+        stationChunks.push(
+          orderedStationCodes.slice(start, start + MAX_STATIONS_PER_ROUTE_REQUEST)
+        );
+      }
+
+      const routeCoordinates: number[][][] = [];
+      let failedGeometryChunks = 0;
+      for (const stationChunk of stationChunks) {
+        try {
+          const trajectUrl = new URL(NS_TRAJECT_ROOT);
+          trajectUrl.searchParams.set("stations", stationChunk.join(","));
+          const trajectPayload = await requestJson(trajectUrl, env, 86_400, fetchImpl);
+          routeCoordinates.push(...extractOrderedRouteLines(trajectPayload, stationChunk));
+        } catch {
+          failedGeometryChunks += 1;
         }
-      } catch {
-        routeWarning = "Stations en geplande tijden zijn beschikbaar, maar de spoorroute kon tijdelijk niet worden opgehaald.";
+      }
+
+      legs = routeCoordinates.map((coordinates, sequence) => ({
+        tripId: trainNumber,
+        routeId: "NS-SPOORKAART-" + sequence,
+        mode: "RAIL",
+        sequence,
+        legGeometry: { type: "LineString" as const, coordinates }
+      }));
+
+      if (failedGeometryChunks > 0) {
+        routeWarning = legs.length
+          ? "De stations en geplande tijden zijn beschikbaar, maar een deel van de spoorroute kon niet worden opgehaald."
+          : "Stations en geplande tijden zijn beschikbaar, maar de spoorroute kon tijdelijk niet worden opgehaald.";
+      } else if (!legs.length) {
+        routeWarning = "Stations en geplande tijden zijn beschikbaar, maar NS leverde geen bruikbare spoorgeometrie terug.";
       }
     }
 
