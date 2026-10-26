@@ -6,7 +6,7 @@ import {
 } from "./openov-realtime-prediction.js";
 import GtfsRealtimeBindings from "gtfs-realtime-bindings";
 import { decodeOpenovVehiclePositions } from "./openov-vehicle-position-fast-decode.js";
-import { selectDiverseOpenovLiveMapPositions } from "./openov-live-map-sampling.js";
+import { selectDiverseOpenovLiveMapPositions, selectOpenovPositionsWithTramPriority } from "./openov-live-map-sampling.js";
 import { decodeOpenovTripUpdates } from "./openov-trip-update-fast-decode.js";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
@@ -3097,6 +3097,82 @@ let liveMapOpenovMemoryCache: {
 let liveMapOpenovInFlight: Promise<LiveMapOpenovCachedBody> | null = null;
 let liveMapOpenovInFlightStartedAtMs = 0;
 
+const LIVE_MAP_TRAM_ROUTE_METADATA_CACHE_MS = 60 * 60 * 1000;
+const LIVE_MAP_TRAM_ROUTE_METADATA_RETRY_MS = 60 * 1000;
+let liveMapTramRouteIdsCache: {
+  expiresAtMs: number;
+  routeIds: Set<string>;
+} | null = null;
+let liveMapTramRouteIdsInFlight: Promise<Set<string>> | null = null;
+
+function isTramRouteType(value: unknown): boolean {
+  const routeType = Number(value);
+  return Number.isFinite(routeType) &&
+    (routeType === 0 || (routeType >= 900 && routeType <= 999));
+}
+
+async function getLiveMapTramRouteIds(env: Env): Promise<Set<string>> {
+  const now = Date.now();
+  if (liveMapTramRouteIdsCache &&
+      liveMapTramRouteIdsCache.expiresAtMs > now) {
+    return liveMapTramRouteIdsCache.routeIds;
+  }
+  if (liveMapTramRouteIdsInFlight) return liveMapTramRouteIdsInFlight;
+
+  const task = (async () => {
+    try {
+      const response = await env.ASSETS.fetch(new Request(
+        "https://ovlive-assets.local/ndov-openov-route-crosswalk/route-metadata.json",
+        { method: "GET", headers: { accept: "application/json" } }
+      ));
+      if (!response.ok) {
+        throw new Error("route-metadata HTTP " + response.status);
+      }
+
+      const payload = await response.json() as {
+        routes?: Record<string, { routeType?: unknown }>;
+      };
+      if (!payload.routes || typeof payload.routes !== "object" ||
+          Array.isArray(payload.routes)) {
+        throw new Error("route-metadata bevat geen routes-index");
+      }
+
+      const routeIds = new Set(
+        Object.entries(payload.routes)
+          .filter(([, info]) => isTramRouteType(info?.routeType))
+          .map(([routeId]) => routeId.replace(/^nl-OpenOV_/i, "").trim())
+          .filter(Boolean)
+      );
+      if (!routeIds.size) {
+        throw new Error("route-metadata bevat geen herkenbare tramroutes");
+      }
+
+      liveMapTramRouteIdsCache = {
+        expiresAtMs: Date.now() + LIVE_MAP_TRAM_ROUTE_METADATA_CACHE_MS,
+        routeIds
+      };
+      return routeIds;
+    } catch (error) {
+      console.warn("[OVLIVE_LIVE_MAP_TRAM_METADATA]", error instanceof Error ? error.message : String(error));
+      const empty = new Set<string>();
+      liveMapTramRouteIdsCache = {
+        expiresAtMs: Date.now() + LIVE_MAP_TRAM_ROUTE_METADATA_RETRY_MS,
+        routeIds: empty
+      };
+      return empty;
+    }
+  })();
+
+  liveMapTramRouteIdsInFlight = task;
+  try {
+    return await task;
+  } finally {
+    if (liveMapTramRouteIdsInFlight === task) {
+      liveMapTramRouteIdsInFlight = null;
+    }
+  }
+}
+
 function defaultLiveMapOpenovCache(): Cache | null {
   if (typeof caches === "undefined") return null;
   return (caches as unknown as { default?: Cache }).default ?? null;
@@ -3117,7 +3193,8 @@ function respondLiveMapOpenov(
 
 async function handleLiveMapOpenovApi(
   url: URL,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  env: Env
 ): Promise<Response> {
   const cacheKey = new Request(new URL(
     "/__ovlive-internal/live-map-openov-v1",
@@ -3231,9 +3308,20 @@ async function handleLiveMapOpenovApi(
         entity.longitude >= 2 &&
         entity.longitude <= 9.5
       );
-      const entities = selectDiverseOpenovLiveMapPositions(
+
+      // Always include all positions for known tram routes before applying the
+      // national 2,000-position cap. The feed is bus-heavy and source-order /
+      // route sampling can otherwise omit trams that are active in Utrecht.
+      const tramRouteIds = await getLiveMapTramRouteIds(env);
+      const validTramPositionCount = validPositions.filter((entity: any) => {
+        const routeId = String(entity.routeId ?? "")
+          .replace(/^nl-OpenOV_/i, "").trim();
+        return routeId && tramRouteIds.has(routeId);
+      }).length;
+      const entities = selectOpenovPositionsWithTramPriority(
         validPositions,
-        LIVE_MAP_OPENOV_MAX_POSITIONS
+        LIVE_MAP_OPENOV_MAX_POSITIONS,
+        tramRouteIds
       );
 
       const feedTimestamp = decoded.feedTimestamp;
@@ -3254,7 +3342,13 @@ async function handleLiveMapOpenovApi(
         byteCount: bytes.byteLength,
         sourceEntityCount: decoded.sourceEntityCount,
         validPositionCount: validPositions.length,
+        validTramPositionCount,
         returnedCount: entities.length,
+        returnedTramPositionCount: entities.filter((entity: any) => {
+          const routeId = String(entity.routeId ?? "")
+            .replace(/^nl-OpenOV_/i, "").trim();
+          return routeId && tramRouteIds.has(routeId);
+        }).length,
         decodeDurationMs,
         totalDurationMs: Date.now() - startedAt,
         freshness
@@ -3271,7 +3365,13 @@ async function handleLiveMapOpenovApi(
         freshness,
         entityCount: decoded.sourceEntityCount,
         validPositionCount: validPositions.length,
+        validTramPositionCount,
         returnedCount: entities.length,
+        returnedTramPositionCount: entities.filter((entity: any) => {
+          const routeId = String(entity.routeId ?? "")
+            .replace(/^nl-OpenOV_/i, "").trim();
+          return routeId && tramRouteIds.has(routeId);
+        }).length,
         decoder: "selective-protobuf",
         entities
       });
@@ -3532,7 +3632,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (url.pathname === "/api/live-map/openov") {
-    return handleLiveMapOpenovApi(url, headers);
+    return handleLiveMapOpenovApi(url, headers, env);
   }
 
   if (url.pathname === "/api/ns/vehicle-positions") {
