@@ -99,6 +99,16 @@ assert.ok(worker.includes("async function findOpenovStaticTripShape(") &&
   worker.includes("shard.shapes[shapeId]"),
   "when Transitous has a stale trip index, route geometry may only fall back to an exact local GTFS trip_id + route_id match");
 
+assert.ok(worker.includes("const extractTransitStops") &&
+  worker.includes("normalizeTransitousLineSearchStops(leg)") &&
+  worker.includes('source: "Transitous timetable"') &&
+  worker.includes('stopTimesSource: "Transitous timetable; realtime stop predictions are not implied"'),
+  "the exact trip-shape API must expose clearly labelled timetable stops as a fallback when realtime stop updates are missing");
+assert.ok(worker.includes("let timetableStops: Array<Record<string, any>> = []") &&
+  worker.includes("stops: timetableStops") &&
+  worker.includes("candidateStops.length > timetableStops.length"),
+  "the exact-trip timetable fallback must survive even if route geometry cannot be returned");
+
 assert.ok(script.includes("routeId: identity.routeId") &&
   script.includes("state.routeSourceCache") &&
   script.includes("state.routeSource = String(payload.routeSource ?? \"\")"),
