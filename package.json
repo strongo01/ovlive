@@ -31,7 +31,7 @@
     "ndov:build-openov-route-metadata": "python3 scripts/build-ndov-openov-route-crosswalk.py --route-metadata-only",
     "ndov:openov-route-metadata-selftest": "python3 scripts/openov-route-metadata-selftest.py",
     "openov:build-trip-shapes": "python3 scripts/build-openov-trip-shapes.py",
-    "live-map:selftest": "node scripts/live-fleet-map-selftest.mjs && node scripts/openov-trip-shape-id-selftest.mjs && python3 scripts/openov-trip-shapes-selftest.py",
+    "live-map:selftest": "node scripts/live-fleet-map-selftest.mjs && node scripts/openov-live-map-sampling-selftest.mjs && node scripts/openov-trip-shape-id-selftest.mjs && python3 scripts/openov-trip-shapes-selftest.py",
     "transfer-assistant:selftest": "node scripts/realtime-transfer-assistant-selftest.mjs"
   },
   "dependencies": {
