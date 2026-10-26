@@ -86,7 +86,14 @@ const fetchMock = async (input, init = {}) => {
           },
           {
             stop: { uicCode: "8400003" },
-            plannedArrivalDateTime: "2026-10-20T07:50:00+02:00",
+            arrival: {
+              plannedDateTime: "2026-10-20T07:50:00+02:00",
+              actualDateTime: "2026-10-20T07:52:30+02:00"
+            },
+            departure: {
+              plannedTime: "2026-10-20T07:51:00+02:00",
+              actualTime: "2026-10-20T07:53:30+02:00"
+            },
             plannedTrack: "2",
             passing: false
           }
@@ -152,6 +159,16 @@ assert.equal(route.stops[0].departureDelaySeconds, 60,
   "departure delay should be calculated from planned and actual times");
 assert.equal(route.stops[1].plannedArrivalDateTime, "2026-10-20T05:42:00.000Z");
 assert.equal(route.stops[1].platform, "8");
+assert.equal(route.stops[2].plannedArrivalDateTime, "2026-10-20T05:50:00.000Z",
+  "nested arrival.plannedDateTime must supply the planned station time");
+assert.equal(route.stops[2].actualArrivalDateTime, "2026-10-20T05:52:30.000Z",
+  "nested arrival.actualDateTime must be exposed as the live time");
+assert.equal(route.stops[2].arrivalDelaySeconds, 150,
+  "nested actual/planned times must produce the station delay in seconds");
+assert.equal(route.stops[2].plannedDepartureDateTime, "2026-10-20T05:51:00.000Z",
+  "nested departure.plannedTime must be supported");
+assert.equal(route.stops[2].actualDepartureDateTime, "2026-10-20T05:53:30.000Z",
+  "nested departure.actualTime must be supported");
 assert.deepEqual(route.legs[0].legGeometry.coordinates[0], [5.1, 52.1],
   "a reversed track segment must be oriented in the journey direction");
 assert.deepEqual(route.legs[1].legGeometry.coordinates[0], [4.9, 52.3],
