@@ -735,6 +735,16 @@
     });
   }
 
+  // On a nationwide map many buses and trams can share nearly the same
+  // coordinates. Lift rail-bound modes above the bus layer so a bus marker
+  // doesn't visually hide a U-OV tram near Utrecht Science Park.
+  function markerZIndexOffset(mode) {
+    if (mode === "tram") return 2400;
+    if (mode === "metro") return 1800;
+    if (mode === "bus") return 300;
+    return 0;
+  }
+
   function renderMarkers() {
     if (!state.map || !state.layer || !window.L) return;
     const vehicles = visibleVehicles();
@@ -759,6 +769,7 @@
       if (!marker) {
         marker = window.L.marker([vehicle.latitude, vehicle.longitude], {
           icon: markerIcon(window.L, vehicle.mode),
+          zIndexOffset: markerZIndexOffset(vehicle.mode),
           title: (vehicle.routeName || MODES[vehicle.mode]?.label || "OV-voertuig") +
             (vehicle.vehicleId ? " · " + vehicle.vehicleId : "")
         });
@@ -775,6 +786,7 @@
         marker.__ovliveVehicle = vehicle;
         marker.setLatLng([vehicle.latitude, vehicle.longitude]);
         marker.setIcon(markerIcon(window.L, vehicle.mode));
+        marker.setZIndexOffset(markerZIndexOffset(vehicle.mode));
         marker.setPopupContent(vehiclePopup(vehicle));
         marker.setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35);
       }
