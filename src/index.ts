@@ -41,7 +41,7 @@ const OPENOV = {
   tripUpdates: "https://gtfs.openov.nl/gtfs-rt/tripUpdates.pb",
   alerts: "https://gtfs.openov.nl/gtfs-rt/alerts.pb",
   trainUpdates: "https://gtfs.openov.nl/gtfs-rt/trainUpdates.pb",
-  vehiclePositions: "https://gtfs.openov.nl/gtfs-rt/vehiclePositions.pb"
+  vehiclePositions: "https://gtfs.ovapi.nl/nl/vehiclePositions.pb"
 };
 
 const TRANSITOUS = "https://api.transitous.org/api/v6";
@@ -3101,9 +3101,8 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
 }
 
 
-const LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000;
-const LIVE_MAP_OPENOV_CACHE_TTL_SECONDS = 15;
-const LIVE_MAP_OPENOV_MAX_POSITIONS = 2000;
+const LIVE_MAP_OPENOV_CACHE_TTL_MS = 30_000;
+const LIVE_MAP_OPENOV_CACHE_TTL_SECONDS = 30;
 
 type LiveMapOpenovCachedBody = {
   body: string;
@@ -3277,14 +3276,14 @@ async function handleLiveMapOpenovApi(
           "accept-encoding": "gzip"
         },
         signal: AbortSignal.timeout(12_000),
-        cf: { cacheTtl: 5, cacheEverything: true }
+        cf: { cacheTtl: 30, cacheEverything: true }
       });
 
       if (!response.ok) {
         const status = response.status === 429 ? 429 : 502;
         const body = JSON.stringify({
           ok: false,
-          source: "OpenOV / OVapi GTFS-Realtime",
+          source: "NDOV-loket / OVapi GTFS-Realtime",
           upstreamStatus: response.status,
           checkedAt: new Date().toISOString(),
           error: response.status === 429
@@ -3318,9 +3317,9 @@ async function handleLiveMapOpenovApi(
       // GTFS-RT-objectboom op te bouwen en opnieuw een CPU-limit te riskeren.
       const decoded = decodeOpenovVehiclePositions(bytes);
       const decodeDurationMs = Number((performance.now() - decodeStartedAt).toFixed(2));
-      // Avoid sorting the entire national feed on the CPU-limited Worker.
-      // Every returned point is independently age-checked by the UI; a stable
-      // capped source-order sample is preferable to an expensive global sort.
+      // Keep every valid vehicle position from the national feed. The earlier
+      // cap could hide vehicles at the end of a large feed; sampling is only
+      // retained as an ordering helper and receives the full position count.
       const validPositions = decoded.entities.filter((entity: any) =>
         Number.isFinite(entity.latitude) &&
         Number.isFinite(entity.longitude) &&
@@ -3341,7 +3340,7 @@ async function handleLiveMapOpenovApi(
       }).length;
       const entities = selectOpenovPositionsWithTramPriority(
         validPositions,
-        LIVE_MAP_OPENOV_MAX_POSITIONS,
+        validPositions.length,
         tramRouteIds
       );
 
@@ -3377,7 +3376,7 @@ async function handleLiveMapOpenovApi(
 
       const body = JSON.stringify({
         ok: true,
-        source: "OpenOV / OVapi GTFS-Realtime",
+        source: "NDOV-loket / OVapi GTFS-Realtime",
         checkedAt: new Date().toISOString(),
         feedTimestamp: typeof feedTimestamp === "number" && feedTimestamp > 0
           ? new Date(feedTimestamp * 1000).toISOString()
@@ -3416,7 +3415,7 @@ async function handleLiveMapOpenovApi(
         status: 502,
         body: JSON.stringify({
           ok: false,
-          source: "OpenOV / OVapi GTFS-Realtime",
+          source: "NDOV-loket / OVapi GTFS-Realtime",
           checkedAt: new Date().toISOString(),
           error: "De snelle voertuigdecoder kon de feed niet veilig verwerken."
         }),
