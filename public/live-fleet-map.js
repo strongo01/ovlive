@@ -888,7 +888,10 @@
     }
 
     const realtimeTime = update?.[isArrival ? "arrivalTime" : "departureTime"];
-    if (realtimeTime !== null && realtimeTime !== undefined && realtimeTime !== "") {
+    const hasRealtimeTime = typeof realtimeTime === "number"
+      ? Number.isFinite(realtimeTime) && realtimeTime > 0
+      : realtimeTime !== null && realtimeTime !== undefined && String(realtimeTime).trim() !== "";
+    if (hasRealtimeTime) {
       const delay = stopDelayLabel(
         update?.[isArrival ? "effectiveArrivalDelaySeconds" : "effectiveDepartureDelaySeconds"] ??
         update?.[isArrival ? "arrivalDelaySeconds" : "departureDelaySeconds"]
