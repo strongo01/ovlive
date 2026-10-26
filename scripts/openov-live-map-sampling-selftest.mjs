@@ -14,7 +14,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const moduleUrl = "data:text/javascript;base64," +
   Buffer.from(compiled).toString("base64");
-const { selectDiverseOpenovLiveMapPositions } = await import(moduleUrl);
+const { selectDiverseOpenovLiveMapPositions, selectOpenovPositionsWithTramPriority } = await import(moduleUrl);
 
 // The feed is grouped by operator/route: thousands of buses can precede the
 // Utrecht tram records. Sampling route groups must still retain the tram routes.
@@ -62,3 +62,35 @@ assert.deepEqual(selectDiverseOpenovLiveMapPositions(allPositions, 0), []);
 console.log("PASS: national live-map sampling preserves U-OV tram routes after bus-heavy feed sections");
 console.log("PASS: sampling covers both the beginning and end of feeds with over 2,000 distinct route groups");
 console.log("PASS: small feeds remain complete and entries are never duplicated");
+
+
+// Tram rows are all retained even when the nationwide source exceeds its
+// 2,000-position response limit and bus records dominate the source order.
+const tramRouteIds = new Set(["uov-20", "uov-21", "uov-22"]);
+const tramRows = Array.from({ length: 90 }, (_, index) => ({
+  entityId: `uov-tram-entity-${index}`,
+  vehicleId: `uov-tram-${index}`,
+  routeId: `nl-OpenOV_${["uov-20", "uov-21", "uov-22"][index % 3]}`,
+  mode: "tram"
+}));
+const busRows = Array.from({ length: 4400 }, (_, index) => ({
+  entityId: `national-bus-${index}`,
+  vehicleId: `bus-${index}`,
+  routeId: `bus-route-${index}`,
+  mode: "bus"
+}));
+const prioritizedSample = selectOpenovPositionsWithTramPriority(
+  [...busRows, ...tramRows],
+  2000,
+  tramRouteIds
+);
+assert.equal(prioritizedSample.length, 2000);
+assert.equal(prioritizedSample.filter((row) => row.mode === "tram").length, tramRows.length,
+  "every tram position with a known tram route must survive nationwide sampling");
+assert.ok(tramRouteIds.size === new Set(
+  prioritizedSample.filter((row) => row.mode === "tram")
+    .map((row) => row.routeId.replace(/^nl-OpenOV_/i, ""))
+).size, "all known tram route groups must be represented");
+assert.equal(prioritizedSample.filter((row) => row.mode === "bus").length, 2000 - tramRows.length);
+assert.equal(new Set(prioritizedSample).size, prioritizedSample.length,
+  "tram prioritization must not duplicate any position");
