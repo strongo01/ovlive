@@ -870,13 +870,21 @@
     return seconds > 0 ? "+" + minutes + " min" : "−" + minutes + " min";
   }
 
+  function formatStopClock(value) {
+    if (typeof value === "string") {
+      const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+      if (match) return match[1].padStart(2, "0") + ":" + match[2];
+    }
+    return formatClock(value);
+  }
+
   function stopEventLabel(stop, update, kind, vehicle) {
     const isArrival = kind === "arrival";
     if (vehicle?.sourceKey === "ns") {
       const actual = stop?.[isArrival ? "actualArrivalDateTime" : "actualDepartureDateTime"];
       const planned = stop?.[isArrival ? "plannedArrivalDateTime" : "plannedDepartureDateTime"];
-      if (actual) return "Werkelijk " + formatClock(actual);
-      return planned ? "Gepland " + formatClock(planned) : "";
+      if (actual) return "Werkelijk " + formatStopClock(actual);
+      return planned ? "Gepland " + formatStopClock(planned) : "";
     }
 
     const realtimeTime = update?.[isArrival ? "arrivalTime" : "departureTime"];
@@ -885,13 +893,13 @@
         update?.[isArrival ? "effectiveArrivalDelaySeconds" : "effectiveDepartureDelaySeconds"] ??
         update?.[isArrival ? "arrivalDelaySeconds" : "departureDelaySeconds"]
       );
-      return "Verwacht " + formatClock(realtimeTime) + (delay ? " (" + delay + ")" : "");
+      return "Verwacht " + formatStopClock(realtimeTime) + (delay ? " (" + delay + ")" : "");
     }
 
     const scheduled = stop?.[isArrival
       ? "targetArrival"
       : "targetDeparture"] ?? stop?.[isArrival ? "expectedArrival" : "expectedDeparture"];
-    return scheduled ? "Dienstregeling " + formatClock(scheduled) : "";
+    return scheduled ? "Dienstregeling " + formatStopClock(scheduled) : "";
   }
 
   function renderVehicleStopTimeline(vehicle) {
@@ -929,7 +937,7 @@
       const stopId = normalizeStopKey(stop?.userStopCode ?? stop?.stopId ?? stop?.stationCode ?? stop?.id);
       const update = stopId ? updatesById.get(stopId) : null;
       const relationship = String(update?.scheduleRelationship ?? stop?.status ?? "").toUpperCase();
-      let statusText = "Haltevolgorde";
+      let statusText = "Passage niet bevestigd";
       let statusClass = "is-upcoming";
       let glyph = "→";
 
@@ -981,7 +989,9 @@
       ? "Werkelijke haltepassages alleen waar NS die expliciet meldt; tijden anders volgens dienstregeling."
       : stopUpdates.length
         ? "Verwachte aankomst-/vertrektijden alleen bij haltes met een expliciete OpenOV-update. Haltevoortgang is een GPS-inschatting."
-        : "Haltes en tijden volgens dienstregeling; er is geen bevestigde realtime-halte-update voor deze rit gevonden.";
+        : detail.realtimeError
+          ? "Realtime-haltegegevens tijdelijk niet beschikbaar; tijden volgens dienstregeling."
+          : "Haltes en tijden volgens dienstregeling; er is geen bevestigde realtime-halte-update voor deze rit gevonden.";
     const overflow = stops.length > 60
       ? "<p>De eerste 60 van " + stops.length + " haltes worden getoond.</p>" : "";
     return "<section class=\"live-fleet-stop-timeline\"><strong>Halteverloop · " +
