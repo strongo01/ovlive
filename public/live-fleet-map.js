@@ -45,6 +45,7 @@
     routeSourceCache: new Map(),
     routeRequestToken: 0,
     routeGeometryCache: new Map(),
+    routeStopDetails: new Map(),
     locationMarker: null,
     refreshing: false,
     timer: null,
@@ -312,6 +313,20 @@
     const tripId = normalizedId(rawTripId);
     if (!tripId) return null;
     return { tripId: startDate + "_" + timeParts.join(":") + "_nl-OpenOV_" + tripId, routeId };
+  }
+
+  function vehicleRouteCacheKey(vehicle) {
+    if (vehicle?.sourceKey === "ns") {
+      const trainNumber = String(vehicle?.trainNumber ?? vehicle?.tripId ?? vehicle?.vehicleId ?? "").trim();
+      if (!/^\d{1,6}$/.test(trainNumber)) return null;
+      const sourceTime = Date.parse(String(vehicle?.observedAt ?? ""));
+      const dateTime = Number.isFinite(sourceTime)
+        ? new Date(sourceTime).toISOString()
+        : new Date().toISOString();
+      return "ns-route|" + trainNumber + "|" + dateTime.slice(0, 16);
+    }
+    const identity = vehicleRouteIdentity(vehicle);
+    return identity ? identity.tripId + "|" + identity.routeId : null;
   }
 
   function routeModeMatches(vehicleMode, candidateMode) {
@@ -695,6 +710,184 @@
     });
   }
 
+  function normalizeStopKey(value) {
+    return String(value ?? "").replace(/^nl-OpenOV_/i, "").trim();
+  }
+
+  function approximateDistanceMeters(latitudeA, longitudeA, latitudeB, longitudeB) {
+    const radians = value => value * Math.PI / 180;
+    const x = radians(longitudeB - longitudeA) * Math.cos(radians((latitudeA + latitudeB) / 2));
+    const y = radians(latitudeB - latitudeA);
+    return 6_371_000 * Math.sqrt(x * x + y * y);
+  }
+
+  function stopProgressForVehicle(stops, vehicle) {
+    if (vehicle?.sourceKey === "ns") {
+      const now = Date.now();
+      let lastActualIndex = -1;
+      for (let index = 0; index < stops.length; index += 1) {
+        const actualArrival = Date.parse(String(stops[index]?.actualArrivalDateTime ?? ""));
+        const actualDeparture = Date.parse(String(stops[index]?.actualDepartureDateTime ?? ""));
+        if ((Number.isFinite(actualArrival) && actualArrival <= now) ||
+            (Number.isFinite(actualDeparture) && actualDeparture <= now)) {
+          lastActualIndex = index;
+        }
+      }
+      return lastActualIndex >= 0
+        ? { index: lastActualIndex, distanceMeters: null, source: "NS-werkelijke tijden" }
+        : null;
+    }
+
+    const latitude = finiteNumber(vehicle?.latitude);
+    const longitude = finiteNumber(vehicle?.longitude);
+    if (latitude === null || longitude === null) return null;
+
+    let closest = null;
+    stops.forEach((stop, index) => {
+      const stopLatitude = finiteNumber(stop?.latitude);
+      const stopLongitude = finiteNumber(stop?.longitude);
+      if (stopLatitude === null || stopLongitude === null ||
+          Math.abs(stopLatitude) > 90 || Math.abs(stopLongitude) > 180) return;
+      const distanceMeters = approximateDistanceMeters(
+        latitude, longitude, stopLatitude, stopLongitude
+      );
+      if (!closest || distanceMeters < closest.distanceMeters) {
+        closest = { index, distanceMeters, source: "GPS-inschatting" };
+      }
+    });
+    // Do not claim passed stops if the nearest timetable stop is far from the GPS point.
+    return closest && closest.distanceMeters <= 2_500 ? closest : null;
+  }
+
+  function stopDelayLabel(secondsValue) {
+    const seconds = finiteNumber(secondsValue);
+    if (seconds === null || Math.abs(seconds) < 45) return "";
+    const minutes = Math.round(Math.abs(seconds) / 60);
+    if (minutes === 0) return "";
+    return seconds > 0 ? "+" + minutes + " min" : "−" + minutes + " min";
+  }
+
+  function stopEventLabel(stop, update, kind, vehicle) {
+    const isArrival = kind === "arrival";
+    if (vehicle?.sourceKey === "ns") {
+      const actual = stop?.[isArrival ? "actualArrivalDateTime" : "actualDepartureDateTime"];
+      const planned = stop?.[isArrival ? "plannedArrivalDateTime" : "plannedDepartureDateTime"];
+      if (actual) return "Werkelijk " + formatClock(actual);
+      return planned ? "Gepland " + formatClock(planned) : "";
+    }
+
+    const realtimeTime = update?.[isArrival ? "arrivalTime" : "departureTime"];
+    if (realtimeTime !== null && realtimeTime !== undefined && realtimeTime !== "") {
+      const delay = stopDelayLabel(
+        update?.[isArrival ? "effectiveArrivalDelaySeconds" : "effectiveDepartureDelaySeconds"] ??
+        update?.[isArrival ? "arrivalDelaySeconds" : "departureDelaySeconds"]
+      );
+      return "Verwacht " + formatClock(realtimeTime) + (delay ? " (" + delay + ")" : "");
+    }
+
+    const scheduled = stop?.[isArrival
+      ? "targetArrival"
+      : "targetDeparture"] ?? stop?.[isArrival ? "expectedArrival" : "expectedDeparture"];
+    return scheduled ? "Dienstregeling " + formatClock(scheduled) : "";
+  }
+
+  function renderVehicleStopTimeline(vehicle) {
+    if (state.selectedRouteKey !== vehicle?.key) return "";
+    const cacheKey = vehicleRouteCacheKey(vehicle);
+    if (!cacheKey) {
+      return "<section class=\"live-fleet-stop-timeline\"><strong>Halteverloop</strong>" +
+        "<p>Voor deze positie is geen exacte rit-ID beschikbaar. Daarom wordt geen haltevolgorde gegokt.</p></section>";
+    }
+    const detail = state.routeStopDetails.get(cacheKey);
+    if (!detail || detail.status === "loading") {
+      return "<section class=\"live-fleet-stop-timeline\"><strong>Halteverloop</strong>" +
+        "<p>De haltevolgorde wordt opgehaald…</p></section>";
+    }
+    if (detail.status === "error" && !Array.isArray(detail.stops)) {
+      return "<section class=\"live-fleet-stop-timeline\"><strong>Halteverloop</strong><p>" +
+        escapeHtml(detail.error || "Haltegegevens zijn niet beschikbaar.") + "</p></section>";
+    }
+
+    const stops = Array.isArray(detail.stops) ? detail.stops : [];
+    if (!stops.length) {
+      const warning = detail.error || "De bron heeft voor deze exacte rit geen haltevolgorde teruggegeven.";
+      return "<section class=\"live-fleet-stop-timeline\"><strong>Halteverloop</strong><p>" +
+        escapeHtml(warning) + "</p></section>";
+    }
+
+    const stopUpdates = Array.isArray(detail.stopUpdates) ? detail.stopUpdates : [];
+    const updatesById = new Map();
+    for (const update of stopUpdates) {
+      const key = normalizeStopKey(update?.stopId);
+      if (key) updatesById.set(key, update);
+    }
+    const progress = stopProgressForVehicle(stops, vehicle);
+    const rows = stops.slice(0, 60).map((stop, index) => {
+      const stopId = normalizeStopKey(stop?.userStopCode ?? stop?.stopId ?? stop?.stationCode ?? stop?.id);
+      const update = stopId ? updatesById.get(stopId) : null;
+      const relationship = String(update?.scheduleRelationship ?? stop?.status ?? "").toUpperCase();
+      let statusText = "Haltevolgorde";
+      let statusClass = "is-upcoming";
+      let glyph = "→";
+
+      if (stop?.cancelled === true || ["CANCELLED", "SKIPPED", "NO_SERVICE"].includes(relationship)) {
+        statusText = "Vervallen / overgeslagen";
+        statusClass = "is-cancelled";
+        glyph = "×";
+      } else if (vehicle?.sourceKey === "ns") {
+        if (progress && index < progress.index) {
+          statusText = "Al geweest · NS-tijd";
+          statusClass = "is-passed";
+          glyph = "✓";
+        } else if (progress && index === progress.index) {
+          statusText = "Laatste halte met werkelijke tijd";
+          statusClass = "is-current";
+          glyph = "●";
+        } else {
+          statusText = "Nog te gaan / tijd niet bevestigd";
+        }
+      } else if (progress && index < progress.index) {
+        statusText = "Al geweest · GPS-inschatting";
+        statusClass = "is-passed";
+        glyph = "✓";
+      } else if (progress && index === progress.index) {
+        statusText = progress.distanceMeters !== null && progress.distanceMeters <= 300
+          ? "Bij / vlak bij deze halte"
+          : "Dichtstbijzijnde halte";
+        statusClass = "is-current";
+        glyph = "●";
+      } else if (progress) {
+        statusText = "Nog te gaan";
+      }
+
+      const timeLabels = [
+        stopEventLabel(stop, update, "arrival", vehicle),
+        stopEventLabel(stop, update, "departure", vehicle)
+      ].filter(Boolean);
+      const times = timeLabels.length
+        ? "<div class=\"live-fleet-stop-times\">" + timeLabels.map(escapeHtml).join(" · ") + "</div>"
+        : "";
+      return "<li class=\"live-fleet-stop " + statusClass + "\"><span class=\"live-fleet-stop-glyph\">" +
+        glyph + "</span><div class=\"live-fleet-stop-details\"><strong>" +
+        escapeHtml(stop?.name ?? stop?.stopName ?? stop?.stationName ?? "Onbekende halte") +
+        "</strong><span class=\"live-fleet-stop-status\">" + escapeHtml(statusText) +
+        "</span>" + times + "</div></li>";
+    }).join("");
+
+    const sourceCaption = vehicle?.sourceKey === "ns"
+      ? "Werkelijke haltepassages alleen waar NS die expliciet meldt; tijden anders volgens dienstregeling."
+      : stopUpdates.length
+        ? "Verwachte aankomst-/vertrektijden alleen bij haltes met een expliciete OpenOV-update. Haltevoortgang is een GPS-inschatting."
+        : "Haltes en tijden volgens dienstregeling; er is geen bevestigde realtime-halte-update voor deze rit gevonden.";
+    const overflow = stops.length > 60
+      ? "<p>De eerste 60 van " + stops.length + " haltes worden getoond.</p>" : "";
+    return "<section class=\"live-fleet-stop-timeline\"><strong>Halteverloop · " +
+      stops.length + " haltes</strong><p class=\"live-fleet-stop-source\">" +
+      escapeHtml(sourceCaption) + "</p><ol class=\"live-fleet-stop-list\">" +
+      rows + "</ol>" + overflow + (detail.error
+        ? "<p>" + escapeHtml(detail.error) + "</p>" : "") + "</section>";
+  }
+
   function vehiclePopup(vehicle) {
     const routeIdentity = vehicleRouteIdentity(vehicle);
     const routeStatus = state.selectedRouteKey === vehicle.key
@@ -722,7 +915,8 @@
     const heading = vehicle.routeName || vehicle.routeId || vehicle.routeName === "" && vehicle.mode === "train"
       ? (vehicle.routeName || "Lijn onbekend")
       : MODES[vehicle.mode]?.label || "OV-voertuig";
-    return "<strong>" + escapeHtml(heading) + "</strong>" + meta;
+    return "<strong>" + escapeHtml(heading) + "</strong>" + meta +
+      renderVehicleStopTimeline(vehicle);
   }
 
   function markerIcon(L, mode) {
