@@ -65,6 +65,24 @@ assert.ok(script.includes("startDate: String(row.startDate") &&
   script.includes('addLine(item.split.remaining, "#ef4444"') &&
   script.includes("showVehicleRoute(currentVehicle)"),
   "tapping an exact OpenOV vehicle must load and draw its route in red");
+assert.ok(script.includes("function renderVehicleStopTimeline") &&
+  script.includes("state.routeStopDetails") &&
+  script.includes("function stopProgressForVehicle") &&
+  script.includes("GPS-inschatting") &&
+  script.includes("function loadRealtimeStopUpdates") &&
+  script.includes('kind: "tripUpdates"') &&
+  script.includes('fetch("/api/realtime?"'),
+  "selecting a live vehicle must show its ordered stops, estimated past/current/next progress, and exact-trip realtime stop predictions");
+assert.ok(worker.includes("latitude: stopLatitude") &&
+  worker.includes("longitude: stopLongitude") &&
+  worker.includes("place.lat") &&
+  worker.includes("place.lon"),
+  "exact trip stop data must preserve stop coordinates so the live map can estimate progress without inventing stop order");
+assert.ok(html.includes(".live-fleet-stop-timeline") &&
+  html.includes(".live-fleet-stop-list") &&
+  html.includes(".live-fleet-stop.is-passed"),
+  "live-map stop timeline must have scrollable and visually distinct passed, current, and upcoming stops");
+
 assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("function tripIdMatchesForShape") &&
   script.includes("payload.requestedTripId") &&
