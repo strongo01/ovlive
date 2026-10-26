@@ -4025,12 +4025,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       (routeFilters.length > 0 || tripFilters.length > 0)
       ? { routeIds: routeFilters, tripIds: tripFilters }
       : undefined;
+    const tripUpdateFilters = (kind === "tripUpdates" || kind === "trainUpdates") &&
+      (routeFilters.length > 0 || tripFilters.length > 0)
+      ? { routeIds: routeFilters, tripIds: tripFilters }
+      : undefined;
 
     try {
       const data = await getOpenovFeed(
         feedUrl,
         kind as keyof typeof OPENOV,
-        vehiclePositionFilters
+        vehiclePositionFilters ?? tripUpdateFilters
       );
       const { entities = [], ...meta } = data as any;
 
