@@ -680,14 +680,24 @@
     if (!state.map || !state.routeLayer || !vehicle?.key) return;
     const token = ++state.routeRequestToken;
     state.selectedRouteKey = vehicle.key;
-    state.routeStatus = "Route wordt opgehaald…";
+    state.routeStatus = "Route en halteverloop worden opgehaald…";
     state.routeSource = "";
     state.routeLayer.clearLayers();
+    const stopCacheKey = vehicleRouteCacheKey(vehicle);
+    if (stopCacheKey && !state.routeStopDetails.has(stopCacheKey)) {
+      state.routeStopDetails.set(stopCacheKey, {
+        status: "loading",
+        stops: [],
+        stopUpdates: []
+      });
+    }
     refreshVehiclePopup(vehicle.key);
 
     try {
       const geometries = await loadVehicleRouteGeometry(vehicle);
       if (token !== state.routeRequestToken || state.selectedRouteKey !== vehicle.key) return;
+      refreshVehiclePopup(vehicle.key);
+      refreshOpenovStopUpdates(vehicle);
       const vehiclePoint = [finiteNumber(vehicle.latitude), finiteNumber(vehicle.longitude)];
       const splits = geometries.map(points => ({
         points,
@@ -744,7 +754,14 @@
         : "🔴 Rood = route van deze rit. De GPS-positie ligt te ver van de route of dicht bij het begin om het afgelegde deel betrouwbaar grijs te markeren.") + sourceLabel;
     } catch (error) {
       if (token !== state.routeRequestToken || state.selectedRouteKey !== vehicle.key) return;
-      state.routeStatus = error instanceof Error ? error.message : "De ritroute kon niet worden getoond.";
+      const message = error instanceof Error ? error.message : "De ritroute kon niet worden getoond.";
+      state.routeStatus = message;
+      if (stopCacheKey) {
+        const existing = state.routeStopDetails.get(stopCacheKey);
+        state.routeStopDetails.set(stopCacheKey, existing && Array.isArray(existing.stops) && existing.stops.length
+          ? { ...existing, status: "loaded", error: message }
+          : { status: "error", stops: [], stopUpdates: [], error: message });
+      }
     }
     refreshVehiclePopup(vehicle.key);
   }
