@@ -490,6 +490,16 @@
           ("De NS-treinroute kon niet worden opgehaald (HTTP " + response.status + ")."));
       }
 
+      state.routeSource = String(payload.source ?? "NS Reisinformatie + SpoorKaart API");
+      state.routeSourceCache.set(cacheKey, state.routeSource);
+      state.routeStopDetails.set(cacheKey, {
+        status: "loaded",
+        stops: Array.isArray(payload.stops) ? payload.stops : [],
+        stopUpdates: [],
+        source: state.routeSource,
+        checkedAt: Date.now()
+      });
+
       const geometries = payload.legs
         .map((candidate, index) => ({
           sequence: Number.isFinite(Number(candidate?.sequence)) ? Number(candidate.sequence) : index,
@@ -555,6 +565,14 @@
           !tripIdMatchesForShape(resolvedTripId, identity.tripId)) {
         throw new Error("Transitous heeft geen geometrie bevestigd voor de exact geselecteerde rit.");
       }
+
+      state.routeStopDetails.set(cacheKey, {
+        status: "loaded",
+        stops: Array.isArray(payload.stops) ? payload.stops : [],
+        stopUpdates: [],
+        source: String(payload.stopTimesSource ?? "Transitous"),
+        checkedAt: Date.now()
+      });
 
       // Once the /trip response is tied to this exact service instance, retain
       // every drawable transit leg it returned. Do not discard correct geometry
