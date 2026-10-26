@@ -338,10 +338,31 @@ function normalizeTransitousLineSearchStops(legValue: unknown): Array<Record<str
       place.userStopCode, place.UserStopCode, place.stopCode, place.stop_code,
       place.code, place.stop?.code
     ) ?? openovId ?? (/^\d+$/.test(rawId ?? "") ? rawId : null);
+    const readCoordinate = (...values: unknown[]): number | null => {
+      for (const value of values) {
+        if (value === null || value === undefined || value === "") continue;
+        const number = Number(value);
+        if (Number.isFinite(number)) return number;
+      }
+      return null;
+    };
+    const stopLatitude = readCoordinate(
+      place.lat, place.latitude, place.stop?.lat, place.stop?.latitude,
+      place.location?.lat, place.location?.latitude
+    );
+    const stopLongitude = readCoordinate(
+      place.lon, place.lng, place.longitude, place.stop?.lon, place.stop?.lng,
+      place.stop?.longitude, place.stop?.location?.lon, place.location?.lon,
+      place.location?.lng, place.location?.longitude
+    );
     return {
       name: firstText(place.name, place.stopName, place.displayName, place.label) ?? "",
       userStopCode: stopCode,
       timingPointCode: stopCode,
+      latitude: stopLatitude !== null && stopLatitude >= -90 && stopLatitude <= 90
+        ? stopLatitude : null,
+      longitude: stopLongitude !== null && stopLongitude >= -180 && stopLongitude <= 180
+        ? stopLongitude : null,
       expectedArrival: arrival,
       targetArrival: scheduledArrival,
       expectedDeparture: departure,
