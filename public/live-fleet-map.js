@@ -21,6 +21,7 @@
   const mapElement = $("liveFleetMap");
   const statusElement = $("liveFleetStatus");
   const refreshButton = $("liveFleetRefresh");
+  const stopTimelineElement = $("liveFleetStopTimeline");
   if (!panel || !mapElement || !statusElement || !refreshButton) return;
 
   const state = {
@@ -674,6 +675,7 @@
     const marker = state.markers.get(key);
     const vehicle = marker?.__ovliveVehicle;
     if (marker && vehicle) marker.setPopupContent(vehiclePopup(vehicle));
+    renderSelectedStopTimeline();
   }
 
   async function showVehicleRoute(vehicle) {
@@ -1028,6 +1030,26 @@
         ? "<p>" + escapeHtml(detail.error) + "</p>" : "") + "</section>";
   }
 
+  function renderSelectedStopTimeline() {
+    if (!stopTimelineElement) return;
+    const selectedKey = state.selectedRouteKey;
+    const marker = selectedKey ? state.markers.get(selectedKey) : null;
+    const vehicle = marker?.__ovliveVehicle;
+    if (!selectedKey || !vehicle) {
+      stopTimelineElement.hidden = true;
+      stopTimelineElement.innerHTML = "";
+      return;
+    }
+    const markup = renderVehicleStopTimeline(vehicle);
+    if (!markup) {
+      stopTimelineElement.hidden = true;
+      stopTimelineElement.innerHTML = "";
+      return;
+    }
+    stopTimelineElement.innerHTML = markup;
+    stopTimelineElement.hidden = false;
+  }
+
   function vehiclePopup(vehicle) {
     const routeIdentity = vehicleRouteIdentity(vehicle);
     const routeStatus = state.selectedRouteKey === vehicle.key
@@ -1056,7 +1078,7 @@
       ? (vehicle.routeName || "Lijn onbekend")
       : MODES[vehicle.mode]?.label || "OV-voertuig";
     return "<strong>" + escapeHtml(heading) + "</strong>" + meta +
-      renderVehicleStopTimeline(vehicle);
+      "<div class=\"live-fleet-route-status\">Het halteverloop staat onder de kaart.</div>";
   }
 
   function markerIcon(L, mode) {
@@ -1125,6 +1147,9 @@
         marker.setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35);
       }
     }
+    // The selected vehicle may have received a fresh GPS position while its
+    // separate stop timeline remains below the map, outside the marker popup.
+    renderSelectedStopTimeline();
   }
 
   function modeCountText(vehicles) {
