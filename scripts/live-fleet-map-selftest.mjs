@@ -19,8 +19,12 @@ assert.ok(html.includes('data-live-fleet-mode="train"') &&
   html.includes('data-live-fleet-mode="metro"') &&
   html.includes('data-live-fleet-mode="ferry"'),
   "the map must provide filters for train, bus, tram, metro, and ferry");
-assert.ok(script.includes('const POLL_MS = 20_000;'),
-  "the country-wide vehicle map must use a conservative 20-second poll");
+assert.ok(script.includes('const POLL_MS = 30_000;'),
+  "the country-wide vehicle map must poll at roughly 30 seconds");
+assert.ok(script.includes('const MAX_POSITION_AGE_SECONDS = 300;'),
+  "positions up to five minutes old remain visible instead of vanishing after two minutes");
+assert.ok(worker.includes('vehiclePositions: "https://gtfs.ovapi.nl/nl/vehiclePositions.pb"'),
+  "the live map must use the current NDOV/OVapi position feed rather than the stale 2018 OpenOV endpoint");
 assert.ok(script.includes("if (state.refreshing || state.destroyed) return;"),
   "manual and automatic refreshes must not overlap");
 assert.ok(script.includes("Promise.allSettled([") &&
@@ -33,10 +37,10 @@ assert.ok(script.includes('"/api/live-map/openov"') &&
 assert.ok(script.includes("if (document.hidden && !manual) return;") &&
   script.includes('document.addEventListener("visibilitychange"'),
   "automatic refresh must pause while the browser tab is hidden");
-assert.ok(script.includes("const backoff = [20_000, 30_000, 45_000, 60_000]"),
+assert.ok(script.includes("const backoff = [30_000, 45_000, 60_000, 90_000]"),
   "repeated full failures must apply progressive retry backoff");
-assert.ok(script.includes('setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35)'),
-  "last-known markers must visibly fade when their source is unavailable");
+assert.ok(script.includes('marker.setOpacity(vehicle.ageSeconds > 120 ? 0.45 : (state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35))'),
+  "older positions must remain visible but fade after two minutes; unavailable sources also fade");
 assert.ok(script.includes("function markerZIndexOffset(mode)") &&
   script.includes('if (mode === "tram") return 2400;') &&
   script.includes("zIndexOffset: markerZIndexOffset(vehicle.mode)") &&
@@ -113,8 +117,9 @@ assert.ok(worker.includes("selectOpenovPositionsWithTramPriority") &&
   worker.includes("ndov-openov-route-crosswalk/route-metadata.json") &&
   worker.includes("validTramPositionCount") &&
   worker.includes("returnedTramPositionCount") &&
+  worker.includes("validPositions.length,\n        tramRouteIds") &&
   !worker.includes(".slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS)"),
-  "the capped national feed must preserve all metadata-identified tram positions and report tram counts");
+  "the current NDOV feed must return all valid positions and retain tram metrics");
 
 assert.ok(script.includes('return mode !== "WALK" && mode !== "FOOT";') &&
   !script.includes("candidate.modeMatches && candidate.points.length > 1"),
