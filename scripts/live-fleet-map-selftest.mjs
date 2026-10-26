@@ -66,6 +66,11 @@ assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("payload.resolvedTripId") &&
   script.includes("tripIdMatchesForShape(resolvedTripId, identity.tripId)"),
   "the map must validate the exact trip request/resolution before drawing route geometry");
+assert.ok(worker.includes("selectDiverseOpenovLiveMapPositions") &&
+  worker.includes("validPositionCount: validPositions.length") &&
+  !worker.includes(".slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS)"),
+  "the capped national map feed must sample across route groups instead of taking the first source-order positions");
+
 assert.ok(script.includes('return mode !== "WALK" && mode !== "FOOT";') &&
   !script.includes("candidate.modeMatches && candidate.points.length > 1"),
   "verified exact-trip geometry must not be discarded by inconsistent per-leg mode labels");
