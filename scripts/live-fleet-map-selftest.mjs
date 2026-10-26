@@ -78,6 +78,9 @@ assert.ok(worker.includes("latitude: stopLatitude") &&
   worker.includes("place.lat") &&
   worker.includes("place.lon"),
   "exact trip stop data must preserve stop coordinates so the live map can estimate progress without inventing stop order");
+assert.ok(worker.includes("const tripUpdateFilters") &&
+  worker.includes("vehiclePositionFilters ?? tripUpdateFilters"),
+  "selected vehicle stop predictions must use targeted trip-update decoding instead of decoding the whole realtime feed");
 assert.ok(html.includes(".live-fleet-stop-timeline") &&
   html.includes(".live-fleet-stop-list") &&
   html.includes(".live-fleet-stop.is-passed"),
