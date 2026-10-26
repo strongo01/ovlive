@@ -858,8 +858,22 @@
         closest = { index, distanceMeters, source: "GPS-inschatting" };
       }
     });
-    // Do not claim passed stops if the nearest timetable stop is far from the GPS point.
-    return closest && closest.distanceMeters <= 2_500 ? closest : null;
+    // GPS stop coordinates are preferable. If the source has no usable nearby
+    // coordinates, use absolute timetable instants only as an explicitly unconfirmed
+    // fallback rather than silently claiming that a vehicle passed a stop.
+    if (closest && closest.distanceMeters <= 2_500) return closest;
+
+    const now = Date.now();
+    let lastScheduledIndex = -1;
+    stops.forEach((stop, index) => {
+      const timeValue = stop?.targetDeparture ?? stop?.expectedDeparture ??
+        stop?.targetArrival ?? stop?.expectedArrival;
+      const timestamp = Date.parse(String(timeValue ?? ""));
+      if (Number.isFinite(timestamp) && timestamp <= now) lastScheduledIndex = index;
+    });
+    return lastScheduledIndex >= 0
+      ? { index: lastScheduledIndex, distanceMeters: null, source: "Dienstregeling (niet bevestigd)" }
+      : null;
   }
 
   function stopDelayLabel(secondsValue) {
@@ -960,6 +974,16 @@
         } else {
           statusText = "Nog te gaan / tijd niet bevestigd";
         }
+      } else if (progress?.source === "Dienstregeling (niet bevestigd)" && index < progress.index) {
+        statusText = "Volgens dienstregeling voorbij · niet bevestigd";
+        statusClass = "is-estimated";
+        glyph = "≈";
+      } else if (progress?.source === "Dienstregeling (niet bevestigd)" && index === progress.index) {
+        statusText = "Laatste geplande halte tot nu toe · niet bevestigd";
+        statusClass = "is-estimated";
+        glyph = "≈";
+      } else if (progress?.source === "Dienstregeling (niet bevestigd)" && index > progress.index) {
+        statusText = "Nog te gaan volgens dienstregeling";
       } else if (progress && index < progress.index) {
         statusText = "Al geweest · GPS-inschatting";
         statusClass = "is-passed";
