@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const POLL_MS = 20_000;
-  const MAX_POSITION_AGE_SECONDS = 120;
+  const POLL_MS = 30_000;
+  const MAX_POSITION_AGE_SECONDS = 300;
   const OPENOV_ENDPOINT = "/api/live-map/openov";
   const NS_ENDPOINT = "/api/ns/vehicle-positions?all=1";
   const ROUTE_METADATA_ENDPOINT = "/ndov-openov-route-crosswalk/route-metadata.json";
@@ -198,10 +198,12 @@
 
       const routeId = normalizedId(row.routeId);
       const routeInfo = metadata && routeId ? metadata[routeId] : null;
-      const mode = modeFromRouteType(routeInfo?.routeType);
-      // Rail vehicles come from the dedicated NS source below, which carries
-      // train number and GPS metadata more directly than OpenOV.
-      if (mode === "train") continue;
+      const reportedMode = modeFromRouteType(routeInfo?.routeType);
+      // The NDOV/OVapi vehiclePositions feed contains buses, trams, metros and
+      // some ferries, not trains. If route metadata from another GTFS variant
+      // collides and calls one a train, keep the reported vehicle as unknown
+      // rather than silently dropping a real vehicle from the national feed.
+      const mode = reportedMode === "train" ? "other" : reportedMode;
 
       const vehicleId = String(row.vehicleId ?? "").trim();
       const tripId = normalizedId(row.tripId);
@@ -1135,7 +1137,7 @@
           const currentVehicle = marker.__ovliveVehicle;
           if (currentVehicle) void showVehicleRoute(currentVehicle);
         });
-        marker.setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35);
+        marker.setOpacity(vehicle.ageSeconds > 120 ? 0.45 : (state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35));
         marker.addTo(state.layer);
         state.markers.set(vehicle.key, marker);
       } else {
@@ -1144,7 +1146,7 @@
         marker.setIcon(markerIcon(window.L, vehicle.mode));
         marker.setZIndexOffset(markerZIndexOffset(vehicle.mode));
         marker.setPopupContent(vehiclePopup(vehicle));
-        marker.setOpacity(state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35);
+        marker.setOpacity(vehicle.ageSeconds > 120 ? 0.45 : (state.sourceStatus[vehicle.sourceKey]?.ok ? 1 : 0.35));
       }
     }
     // The selected vehicle may have received a fresh GPS position while its
@@ -1254,7 +1256,7 @@
             sourceKey: sourceName,
             error: "De feed-timestamp bevestigt geen verse voertuigposities."
           };
-          problems.push("OpenOV-feed niet vers; laatst bekende punten blijven zichtbaar");
+          problems.push("NDOV/OVapi-feed niet vers; laatst bekende punten blijven zichtbaar");
         } else {
           state.sourceVehicles[sourceName] = sourceResult.vehicles;
           state.sourceStatus[sourceName] = {
@@ -1278,10 +1280,10 @@
     const allVisible = visibleVehicles();
     const currentCheckedAt = new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const openovStatus = state.sourceStatus.openov.ok
-      ? "OpenOV " + (state.sourceStatus.openov.freshness || "onbekend") +
+      ? "NDOV/OVapi " + (state.sourceStatus.openov.freshness || "onbekend") +
         (state.sourceStatus.openov.ageSeconds === null ? "" : " (" + state.sourceStatus.openov.ageSeconds + " s oud)") +
         " · cache " + (state.sourceStatus.openov.cache || "onbekend")
-      : "OpenOV niet actueel/bevestigd";
+      : "NDOV/OVapi niet actueel/bevestigd";
     const nsStatus = state.sourceStatus.ns.ok ? "NS beschikbaar" : "NS niet actueel/beschikbaar";
     const openovIsStale = state.sourceStatus.openov.ok &&
       state.sourceStatus.openov.freshness !== "fresh";
@@ -1305,7 +1307,7 @@
     refreshButton.disabled = false;
     refreshButton.textContent = "↻ Ververs nu";
 
-    const backoff = [20_000, 30_000, 45_000, 60_000][Math.min(state.failureStreak, 4) - 1];
+    const backoff = [30_000, 45_000, 60_000, 90_000][Math.min(state.failureStreak, 4) - 1];
     scheduleNextRefresh(state.failureStreak > 0 ? backoff : POLL_MS);
   }
 
