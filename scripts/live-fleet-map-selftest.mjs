@@ -83,8 +83,10 @@ assert.ok(worker.includes("const tripUpdateFilters") &&
   "selected vehicle stop predictions must use targeted trip-update decoding instead of decoding the whole realtime feed");
 assert.ok(html.includes(".live-fleet-stop-timeline") &&
   html.includes(".live-fleet-stop-list") &&
-  html.includes(".live-fleet-stop.is-passed"),
-  "live-map stop timeline must have scrollable and visually distinct passed, current, and upcoming stops");
+  html.includes(".live-fleet-stop.is-passed") &&
+  html.includes(".live-fleet-stop.is-estimated") &&
+  script.includes("Dienstregeling (niet bevestigd)"),
+  "live-map stop timeline must distinguish GPS-estimated progress from unconfirmed timetable-only progress");
 
 assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("function tripIdMatchesForShape") &&
