@@ -81,7 +81,11 @@ assert.ok(html.includes('id="liveFleetStopTimeline"') &&
   html.includes(".live-fleet-stop-panel[hidden]") &&
   html.includes("grid-template-columns:repeat(auto-fit"),
   "the stop timeline must live below the map in a responsive, hidden-until-selected panel rather than in marker popups");
-assert.ok(!script.includes('renderVehicleStopTimeline(vehicle);'),
+const vehiclePopupStart = script.indexOf("function vehiclePopup(vehicle)");
+const vehiclePopupEnd = script.indexOf("function markerIcon", vehiclePopupStart);
+const vehiclePopupSource = script.slice(vehiclePopupStart, vehiclePopupEnd);
+assert.ok(vehiclePopupStart >= 0 && vehiclePopupEnd > vehiclePopupStart &&
+  !vehiclePopupSource.includes("renderVehicleStopTimeline(vehicle)"),
   "stop details must not make the map marker popup tall or cluttered");
 assert.ok(worker.includes("latitude: stopLatitude") &&
   worker.includes("longitude: stopLongitude") &&
