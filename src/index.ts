@@ -4697,27 +4697,44 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const candidateDiagnostics: Array<{ tripId: string; status: number; detail: string }> = [];
     let sawSuccessfulReplyWithoutGeometry = false;
 
-    const extractTransitShapes = (itinerary: any) => {
+    const drawableTransitLegs = (itinerary: any) => {
       const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
-      return legs
-        .filter((leg: any) =>
-          String(leg?.mode ?? "").toUpperCase() !== "WALK" &&
-          String(leg?.mode ?? "").toUpperCase() !== "FOOT" &&
-          leg?.legGeometry &&
-          (typeof leg.legGeometry === "string" ||
-           typeof leg.legGeometry?.points === "string" ||
-           (Array.isArray(leg.legGeometry?.coordinates) &&
-            leg.legGeometry.coordinates.length > 1) ||
-           (Array.isArray(leg.legGeometry) && leg.legGeometry.length > 1))
-        )
-        .slice(0, 12)
-        .map((leg: any) => ({
-          tripId: String(leg?.tripId ?? ""),
-          routeId: String(leg?.routeId ?? ""),
-          mode: String(leg?.mode ?? ""),
-          legGeometry: leg.legGeometry
-        }));
+      return legs.filter((leg: any) =>
+        String(leg?.mode ?? "").toUpperCase() !== "WALK" &&
+        String(leg?.mode ?? "").toUpperCase() !== "FOOT" &&
+        leg?.legGeometry &&
+        (typeof leg.legGeometry === "string" ||
+         typeof leg.legGeometry?.points === "string" ||
+         (Array.isArray(leg.legGeometry?.coordinates) &&
+          leg.legGeometry.coordinates.length > 1) ||
+         (Array.isArray(leg.legGeometry) && leg.legGeometry.length > 1))
+      ).slice(0, 12);
     };
+
+    const extractTransitShapes = (itinerary: any) =>
+      drawableTransitLegs(itinerary).map((leg: any) => ({
+        tripId: String(leg?.tripId ?? ""),
+        routeId: String(leg?.routeId ?? ""),
+        mode: String(leg?.mode ?? ""),
+        legGeometry: leg.legGeometry
+      }));
+
+    // Return the timetable stops from the exact /trip response alongside its
+    // geometry. This is a fallback for vehicles whose realtime feed has no
+    // stop_time_update; it is explicitly timetable data, not a live prediction.
+    const extractTransitStops = (
+      itinerary: any,
+      fallbackTripId: string,
+      fallbackRouteId: string
+    ) => drawableTransitLegs(itinerary).flatMap((leg: any) =>
+      normalizeTransitousLineSearchStops(leg).map((stop: Record<string, any>) => ({
+        ...stop,
+        tripId: String(leg?.tripId ?? fallbackTripId),
+        routeId: String(leg?.routeId ?? fallbackRouteId),
+        mode: String(leg?.mode ?? ""),
+        source: "Transitous timetable"
+      }))
+    );
 
     try {
       for (let candidateIndex = 0; candidateIndex < boundedCandidates.length; candidateIndex++) {
@@ -4776,7 +4793,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 ok: true,
                 requestedTripId: tripId,
                 resolvedTripId: candidateTripId,
-                legs: shapes
+                legs: shapes,
+                stops: extractTransitStops(itinerary, candidateTripId, routeId),
+                stopTimesSource: "Transitous timetable; realtime stop predictions are not implied"
               }, 200, {
                 ...headers,
                 "cache-control": "public, max-age=1800",
