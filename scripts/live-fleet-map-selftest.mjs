@@ -71,8 +71,18 @@ assert.ok(script.includes("function renderVehicleStopTimeline") &&
   script.includes("GPS-inschatting") &&
   script.includes("function loadRealtimeStopUpdates") &&
   script.includes('kind: "tripUpdates"') &&
-  script.includes('fetch("/api/realtime?"'),
-  "selecting a live vehicle must show its ordered stops, estimated past/current/next progress, and exact-trip realtime stop predictions");
+  script.includes('fetch("/api/realtime?"') &&
+  script.includes('const stopTimelineElement = $("liveFleetStopTimeline")') &&
+  script.includes("function renderSelectedStopTimeline()") &&
+  script.includes("renderSelectedStopTimeline();"),
+  "selecting a live vehicle must render its ordered stops in the separate panel beneath the map and load exact-trip realtime stop predictions");
+assert.ok(html.includes('id="liveFleetStopTimeline"') &&
+  html.indexOf('id="liveFleetStopTimeline"') > html.indexOf('id="liveFleetMap"') &&
+  html.includes(".live-fleet-stop-panel[hidden]") &&
+  html.includes("grid-template-columns:repeat(auto-fit"),
+  "the stop timeline must live below the map in a responsive, hidden-until-selected panel rather than in marker popups");
+assert.ok(!script.includes('renderVehicleStopTimeline(vehicle);'),
+  "stop details must not make the map marker popup tall or cluttered");
 assert.ok(worker.includes("latitude: stopLatitude") &&
   worker.includes("longitude: stopLongitude") &&
   worker.includes("place.lat") &&
