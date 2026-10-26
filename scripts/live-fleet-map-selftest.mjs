@@ -66,10 +66,13 @@ assert.ok(script.includes("Geen exacte ritkoppeling beschikbaar") &&
   script.includes("payload.resolvedTripId") &&
   script.includes("tripIdMatchesForShape(resolvedTripId, identity.tripId)"),
   "the map must validate the exact trip request/resolution before drawing route geometry");
-assert.ok(worker.includes("selectDiverseOpenovLiveMapPositions") &&
-  worker.includes("validPositionCount: validPositions.length") &&
+assert.ok(worker.includes("selectOpenovPositionsWithTramPriority") &&
+  worker.includes("getLiveMapTramRouteIds(env)") &&
+  worker.includes("ndov-openov-route-crosswalk/route-metadata.json") &&
+  worker.includes("validTramPositionCount") &&
+  worker.includes("returnedTramPositionCount") &&
   !worker.includes(".slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS)"),
-  "the capped national map feed must sample across route groups instead of taking the first source-order positions");
+  "the capped national feed must preserve all metadata-identified tram positions and report tram counts");
 
 assert.ok(script.includes('return mode !== "WALK" && mode !== "FOOT";') &&
   !script.includes("candidate.modeMatches && candidate.points.length > 1"),
