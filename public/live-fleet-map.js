@@ -631,8 +631,8 @@
       if (parts.length < 2 || parts.length > 3 || parts.some(part => !/^\d{1,2}$/.test(part))) {
         return "";
       }
-      return parts.map((part, index) => part.padStart(2, "0") ||
-        (index === 2 ? "00" : "")).concat().join(":");
+      const [hour, minute, second = "0"] = parts;
+      return [hour.padStart(2, "0"), minute.padStart(2, "0"), second.padStart(2, "0")].join(":");
     };
     const targetTime = normalizeTime(vehicle.startTime);
     const matched = payload.entities.find(entity => {
