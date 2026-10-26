@@ -4696,6 +4696,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     let lastUpstreamDetail = "";
     const candidateDiagnostics: Array<{ tripId: string; status: number; detail: string }> = [];
     let sawSuccessfulReplyWithoutGeometry = false;
+    let timetableStops: Array<Record<string, any>> = [];
 
     const drawableTransitLegs = (itinerary: any) => {
       const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
@@ -4796,14 +4797,19 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           if (candidateResponse.ok) {
             const itinerary: any = await candidateResponse.json().catch(() => null);
             const shapes = extractTransitShapes(itinerary);
+            const candidateStops = extractTransitStops(itinerary, candidateTripId, routeId);
+            if (candidateStops.length > timetableStops.length) {
+              timetableStops = candidateStops;
+            }
             if (shapes.length > 0) {
               // This is the first alias that actually yielded drawable geometry.
+              // Preserve the best stop list observed for this same exact trip.
               return json({
                 ok: true,
                 requestedTripId: tripId,
                 resolvedTripId: candidateTripId,
                 legs: shapes,
-                stops: extractTransitStops(itinerary, candidateTripId, routeId),
+                stops: candidateStops.length ? candidateStops : timetableStops,
                 stopTimesSource: "Transitous timetable; realtime stop predictions are not implied"
               }, 200, {
                 ...headers,
@@ -4865,7 +4871,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           requestedTripId: tripId,
           resolvedTripId: tripId,
           routeSource: "OpenOV GTFS-static (exact trip-ID + route-ID)",
-          legs: [staticShape]
+          legs: [staticShape],
+          stops: timetableStops,
+          stopTimesSource: "Transitous timetable; realtime stop predictions are not implied"
         }, 200, {
           ...headers,
           "cache-control": "public, max-age=1800",
@@ -4879,6 +4887,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           requestedTripId: tripId,
           resolvedTripId: null,
           legs: [],
+          stops: timetableStops,
+          stopTimesSource: "Transitous timetable; realtime stop predictions are not implied",
           routeWarning: "Transitous accepteerde de rit-ID, maar leverde voor geen van de exacte ID-schrijfwijzen routegeometrie terug. Er is ook geen exacte ritvorm gevonden in de lokale OpenOV-GTFS-index."
         }, 200, {
           ...headers,
