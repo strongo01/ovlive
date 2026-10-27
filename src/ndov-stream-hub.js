@@ -1691,9 +1691,15 @@ export class NdovFeedHub extends DurableObject {
       return;
     }
 
-    // Only enabled streams are hydrated, and each stream is loaded in its own
-    // invocation rather than during constructor initialization.
-    for (const stream of streams) await this.ensureStreamLoaded(stream);
+    // Only hydrate one cold stream per alarm invocation. This spreads expensive
+    // cache decompression across separate CPU budgets instead of loading both
+    // KV78 and BISON snapshots in a single alarm after a cold start.
+    const nextUnloaded = streams.find((stream) => !this.loadedStreams.has(stream));
+    if (nextUnloaded) {
+      await this.ensureStreamLoaded(nextUnloaded);
+      await this.ctx.storage.setAlarm(Date.now() + 1000);
+      return;
+    }
 
     // De laatste sessie van een UTC-dag wordt afgekapt bij middernacht.
     const sessionSeconds = Math.max(
