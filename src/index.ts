@@ -3403,12 +3403,50 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const target = new URL("https://ndov-hub.local/" + action);
       target.searchParams.set("stream", stream);
       for (const [name, value] of params) target.searchParams.append(name, value);
-      const response = await stub.fetch(target.toString());
-      const data = await response.json().catch(() => ({})) as Record<string, any>;
-      if (!response.ok) {
-        throw new Error(String(data.error ?? (stream + "/" + action + " gaf HTTP " + response.status + ".")));
+
+      // The NDOV Durable Object may briefly return a 5xx during a busy write/read
+      // cycle. Retry only one server failure, never a 4xx, to absorb a transient
+      // blip without creating an unbounded retry storm.
+      let lastError: Error | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let response: Response;
+        try {
+          response = await stub.fetch(target.toString());
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          if (attempt === 0) {
+            console.warn("[NDOV_TRIP_HUB_RETRY]", JSON.stringify({
+              stream, action, attempt: 1, reason: lastError.message.slice(0, 160)
+            }));
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            continue;
+          }
+          throw lastError;
+        }
+
+        const data = await response.json().catch(() => ({})) as Record<string, any>;
+        if (response.ok) return data;
+
+        const message = String(
+          data.error ?? (stream + "/" + action + " gaf HTTP " + response.status + ".")
+        );
+        lastError = new Error(message);
+
+        if (response.status < 500 || attempt === 1) {
+          throw lastError;
+        }
+
+        console.warn("[NDOV_TRIP_HUB_RETRY]", JSON.stringify({
+          stream,
+          action,
+          attempt: 1,
+          status: response.status,
+          reason: message.slice(0, 160)
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 120));
       }
-      return data;
+
+      throw lastError ?? new Error(stream + "/" + action + " is tijdelijk niet beschikbaar.");
     };
 
     const rowIdentity = (row: Record<string, any>) => {
@@ -3701,7 +3739,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         checkedAt: new Date().toISOString(),
         error: "De NDOV-halterijen zijn tijdelijk niet beschikbaar.",
         detail: error instanceof Error ? error.message : "Onbekende fout"
-      }, 503, { ...headers, "cache-control": "no-store" });
+      }, 503, {
+        ...headers,
+        "cache-control": "no-store",
+        "retry-after": "2",
+        "x-ovlive-error-kind": "ndov-trip-lookup"
+      });
     }
   }
 
