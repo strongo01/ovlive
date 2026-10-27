@@ -23,8 +23,8 @@ assert.match(planCancellationSource, /for \(const key of keys\) \{\s*if \(openov
 
 assert.doesNotMatch(planCancellationSource, /idFromName\(["'](?:bison|kv78)["']\)/,
   'all NDOV plan reads must use the shared collector object, not retired per-stream objects');
-assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 8,
-  'snapshot, mutation, event, KV78 snapshot/exact-row/vehicle-row, bounded metro line-time lookup, and on-demand identity diagnostic reads must all use the shared collector object');
+assert.equal((planCancellationSource.match(/idFromName\(NDOV_SHARED_OBJECT_NAME\)/g) ?? []).length, 10,
+  'snapshot, mutation, event, KV78 snapshot/exact-row/vehicle-row, bounded metro line-time lookup, on-demand diagnostics, and durable stop-name cache read/write must use the shared collector object');
 assert.match(planCancellationSource, /target\.searchParams\.set\("stream", "bison"\)/,
   'BISON identity diagnostics must select the shared BISON stream');
 assert.match(planCancellationSource, /target\.searchParams\.set\("identityDiagnostics", "1"\)/,
