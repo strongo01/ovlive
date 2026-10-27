@@ -3567,10 +3567,39 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         const n = Number(value);
         return Number.isFinite(n) ? Math.round(n) : null;
       };
+      const clockSeconds = (value: unknown): number | null => {
+        const match = String(value ?? "").trim().match(/^(\d{1,3}):(\d{2}):(\d{2})$/);
+        if (!match) return null;
+        const hour = Number(match[1]), minute = Number(match[2]), second = Number(match[3]);
+        if (minute > 59 || second > 59) return null;
+        return (hour * 3600 + minute * 60 + second) % 86400;
+      };
+      const localNowParts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+      }).formatToParts(new Date());
+      const localPart = (name: string) => Number(localNowParts.find((part) => part.type === name)?.value);
+      const localNowSeconds = localPart("hour") * 3600 + localPart("minute") * 60 + localPart("second");
       const nearestStop = stops.find((row) => {
-        const expected = Date.parse(String(row.expectedArrivalTime ?? row.expectedDepartureTime ?? ""));
-        return Number.isFinite(expected) && expected >= Date.now() - 60_000;
+        const expected = clockSeconds(row.expectedArrivalTime ?? row.expectedDepartureTime);
+        if (expected === null) return false;
+        return expected - localNowSeconds >= -60;
       }) ?? firstStop;
+
+      const kv78ClockToLocalISO = (value: unknown, operationDate: unknown): string | null => {
+        const raw = String(value ?? "").trim();
+        if (!raw) return null;
+        if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(raw)) return raw.replace(" ", "T");
+        const time = raw.match(/^(\d{1,3}):(\d{2}):(\d{2})$/);
+        const date = String(operationDate ?? "").trim().match(/^(\d{4})-?(\d{2})-?(\d{2})$/);
+        if (!time || !date) return null;
+        const hours = Number(time[1]), minutes = Number(time[2]), seconds = Number(time[3]);
+        if (minutes > 59 || seconds > 59 || hours > 71) return null;
+        const dayOffset = Math.floor(hours / 24);
+        const dateValue = new Date(Date.UTC(Number(date[1]), Number(date[2]) - 1, Number(date[3]) + dayOffset));
+        const pad = (n: number) => String(n).padStart(2, "0");
+        return dateValue.getUTCFullYear() + "-" + pad(dateValue.getUTCMonth() + 1) + "-" + pad(dateValue.getUTCDate()) +
+          "T" + pad(hours % 24) + ":" + pad(minutes) + ":" + pad(seconds);
+      };
       const delaySeconds = numericDelay(
         firstWithValue(newestEvent?.punctualitySeconds,
           nearestStop?.arrivalDelaySeconds, nearestStop?.departureDelaySeconds)
@@ -3648,6 +3677,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             row.userStopName,
             row.userStopCode ? "Haltecode " + row.userStopCode : null
           ),
+          expectedArrival: kv78ClockToLocalISO(row.expectedArrivalTime, row.operationDate),
+          expectedDeparture: kv78ClockToLocalISO(row.expectedDepartureTime, row.operationDate),
+          targetArrival: kv78ClockToLocalISO(row.targetArrivalTime, row.operationDate),
+          targetDeparture: kv78ClockToLocalISO(row.targetDepartureTime, row.operationDate),
           isCurrent: Boolean(newestEvent?.userStopCode &&
             String(newestEvent.userStopCode).trim() === String(row.userStopCode ?? "").trim()),
           isAtStop: ["ARRIVED", "ONSTOP", "ATSTOP"].includes(
