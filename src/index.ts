@@ -4458,7 +4458,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               // journey detail endpoint does not resolve. Reconstruct its documented
               // resolvable key from the detail route's agency + service + line + trip.
               const localServiceLevelCode = String(actual.LocalServiceLevelCode ?? "").trim() ||
-                String(actual.OperationDate ?? "").replace(/\\D/g, "");
+                String(actual.OperationDate ?? "").replace(/\D/g, "");
               const journeyPlanningNumber = String(
                 actual.LinePlanningNumber ?? meta.LinePlanningNumber ?? ""
               ).trim();
