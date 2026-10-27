@@ -33,6 +33,9 @@ let lastKv6NoExactMatchDiagnosticAt = 0;
 const MAX_OPENOV_ROUTE_CACHE_ENTRIES = 2;
 const MAX_TRIP_CROSSWALK_SHARD_CACHE_ENTRIES = 4;
 const MAX_STOP_ASSIGNMENT_SHARD_CACHE_ENTRIES = 4;
+const KV78_STOP_NAME_CACHE_TTL_MS = 10 * 60 * 1000;
+const KV78_STOP_NAME_CACHE_MAX_ENTRIES = 2000;
+const kv78StopNameCache = new Map();
 const MAX_OPENOV_STOP_PLACE_SHARD_CACHE_ENTRIES = 4;
 const MAX_OPENOV_SERVICE_SIDECAR_CACHE_ENTRIES = 8;
 const openovServiceSidecarCache = new Map();
@@ -1281,6 +1284,7 @@ async function getStopAssignmentIndex(env, keys = []) {
       assignments: Object.create(null),
       requestedShardCount: 0,
       loadedShardCount: 0,
+      loadedShardNumbers: [],
       partial: false,
       generatedAt: null,
     };
@@ -1334,6 +1338,7 @@ async function getStopAssignmentIndex(env, keys = []) {
     assignments,
     requestedShardCount: shardNumbers.length,
     loadedShardCount: selectedShardNumbers.length,
+    loadedShardNumbers: selectedShardNumbers,
     partial: selectedShardNumbers.length < shardNumbers.length,
   };
 }
@@ -1586,51 +1591,106 @@ function resolveKv78StopAssignment(row, context) {
  */
 export async function resolveNdovKv78StopNames(rows, env) {
   const sourceRows = Array.isArray(rows) ? rows : [];
-  const keys = [...new Set(sourceRows.map((row) => {
+  const cacheKeyForRow = (row) => {
     const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
     const stopCode = String(row?.userStopCode ?? "").trim();
-    return owner && stopCode ? `${owner}|${stopCode}` : null;
-  }).filter(Boolean))];
+    const operationDate = normalizeOperatingDate(row?.operationDate);
+    return owner && stopCode ? {
+      assetKey: owner + "|" + stopCode,
+      cacheKey: owner + "|" + stopCode + "|" + operationDate,
+    } : null;
+  };
+  const entries = sourceRows.map((row) => ({ row, keys: cacheKeyForRow(row) }));
+  const now = Date.now();
+  const unresolvedAssetKeys = new Set();
 
-  if (!keys.length) {
-    return {
-      rows: sourceRows.map((row) => ({ ...row, resolvedStopName: null })),
-      crosswalk: { requestedShardCount: 0, loadedShardCount: 0, partial: false, generatedAt: null },
-    };
+  for (const entry of entries) {
+    if (!entry.keys) continue;
+    const cached = getLruCacheValue(kv78StopNameCache, entry.keys.cacheKey);
+    if (cached && cached.expiresAtMs > now) continue;
+    if (cached) kv78StopNameCache.delete(entry.keys.cacheKey);
+    unresolvedAssetKeys.add(entry.keys.assetKey);
   }
 
-  const index = await getStopAssignmentIndex(env, keys);
-  const namedRows = sourceRows.map((row) => {
-    const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
-    const stopCode = String(row?.userStopCode ?? "").trim();
-    const key = `${owner}|${stopCode}`;
-    const active = (index.assignments?.[key] ?? [])
-      .filter((record) => assignmentIsActive(record, row?.operationDate));
-    const uniqueQuays = new Map();
-    for (const record of active) {
-      const name = String(record?.quayName ?? "").trim();
-      const quayIdentity = String(record?.quayRef ?? record?.quayCode ?? name).trim();
-      if (name && quayIdentity) uniqueQuays.set(quayIdentity, record);
+  let index = {
+    assignments: Object.create(null),
+    requestedShardCount: 0,
+    loadedShardCount: 0,
+    loadedShardNumbers: [],
+    partial: false,
+    generatedAt: null,
+    shardCount: 0,
+  };
+  if (unresolvedAssetKeys.size) {
+    index = await getStopAssignmentIndex(env, [...unresolvedAssetKeys]);
+    const loadedShards = new Set(index.loadedShardNumbers ?? []);
+
+    for (const assetKey of unresolvedAssetKeys) {
+      const shardNumber = stopAssignmentShardNumber(assetKey, Number(index.shardCount));
+      // Don't cache a negative result when its shard was not loaded. It will be
+      // retried on a later refresh, at no more than two new static assets per call.
+      if (!loadedShards.has(shardNumber)) continue;
+
+      const records = index.assignments?.[assetKey] ?? [];
+      const operationDates = entries
+        .filter((entry) => entry.keys?.assetKey === assetKey)
+        .map((entry) => normalizeOperatingDate(entry.row?.operationDate));
+      const active = records.filter((record) =>
+        operationDates.some((date) => assignmentIsActive(record, date))
+      );
+
+      const uniqueQuays = new Map();
+      for (const record of active) {
+        const name = String(record?.quayName ?? "").trim();
+        const quayIdentity = String(record?.quayRef ?? record?.quayCode ?? name).trim();
+        if (name && quayIdentity) uniqueQuays.set(quayIdentity, record);
+      }
+      const assignment = uniqueQuays.size === 1 ? [...uniqueQuays.values()][0] : null;
+      const cachedValue = {
+        expiresAtMs: now + KV78_STOP_NAME_CACHE_TTL_MS,
+        resolvedStopName: assignment ? String(assignment.quayName).trim() : null,
+        stopPlaceCode: assignment?.stopPlaceCode ?? null,
+        stopPlaceRef: assignment?.stopPlaceRef ?? null,
+        quayCode: assignment?.quayCode ?? null,
+        quayRef: assignment?.quayRef ?? null,
+        stopNameMatchStatus: assignment
+          ? "official_psa_chb_unique"
+          : active.length ? "ambiguous_or_unavailable" : "unmapped",
+      };
+      setBoundedLruCacheValue(
+        kv78StopNameCache,
+        assetKey + "|" + (operationDates[0] ?? ""),
+        cachedValue,
+        KV78_STOP_NAME_CACHE_MAX_ENTRIES
+      );
     }
-    const assignment = uniqueQuays.size === 1 ? [...uniqueQuays.values()][0] : null;
+  }
+
+  const namedRows = entries.map(({ row, keys }) => {
+    const cached = keys ? getLruCacheValue(kv78StopNameCache, keys.cacheKey) : null;
     return {
       ...row,
-      resolvedStopName: assignment ? String(assignment.quayName).trim() : null,
-      stopPlaceCode: assignment?.stopPlaceCode ?? null,
-      stopPlaceRef: assignment?.stopPlaceRef ?? null,
-      quayCode: assignment?.quayCode ?? null,
-      quayRef: assignment?.quayRef ?? null,
-      stopNameMatchStatus: assignment ? "official_psa_chb_unique" : active.length ? "ambiguous_or_unavailable" : "unmapped",
+      resolvedStopName: cached?.resolvedStopName ?? null,
+      stopPlaceCode: cached?.stopPlaceCode ?? null,
+      stopPlaceRef: cached?.stopPlaceRef ?? null,
+      quayCode: cached?.quayCode ?? null,
+      quayRef: cached?.quayRef ?? null,
+      stopNameMatchStatus: cached?.stopNameMatchStatus ?? "not_loaded",
     };
   });
 
+  const remainingUnresolved = entries.some(({ keys }) =>
+    keys && !kv78StopNameCache.has(keys.cacheKey)
+  );
   return {
     rows: namedRows,
     crosswalk: {
       generatedAt: index.generatedAt ?? null,
       requestedShardCount: index.requestedShardCount ?? 0,
       loadedShardCount: index.loadedShardCount ?? 0,
-      partial: index.partial === true,
+      partial: index.partial === true || remainingUnresolved,
+      resolvedStopNameCount: namedRows.filter((row) => row.resolvedStopName).length,
+      cachedStopNameCount: entries.filter(({ keys }) => keys && kv78StopNameCache.has(keys.cacheKey)).length,
     },
   };
 }
