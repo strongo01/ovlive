@@ -4220,11 +4220,15 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // even when a popular line has more results than the general search limit.
     const requestedTripNumber = String(url.searchParams.get("tripNumber") ?? "").trim();
     const requestedOperatorCode = String(url.searchParams.get("operatorCode") ?? "").trim();
+    // agencyId identifies the GTFS/OpenOV agency namespace (for example CXX),
+    // while OVAPI Actual.OperatorCode may use a different value (for example UOV).
+    const requestedAgencyId = String(url.searchParams.get("agencyId") ?? "").trim();
     if (
       (requestedTripNumber && !/^[A-Za-z0-9_-]{1,64}$/.test(requestedTripNumber)) ||
-      (requestedOperatorCode && !/^[A-Za-z0-9_-]{1,32}$/.test(requestedOperatorCode))
+      (requestedOperatorCode && !/^[A-Za-z0-9_-]{1,32}$/.test(requestedOperatorCode)) ||
+      (requestedAgencyId && !/^[A-Za-z0-9_-]{1,32}$/.test(requestedAgencyId))
     ) {
-      return json({ error: "Ongeldig exact ritnummer of vervoerderscode." }, 400, {
+      return json({ error: "Ongeldig ritnummer, vervoerderscode of agency-ID." }, 400, {
         ...headers,
         "cache-control": "no-store"
       });
@@ -4292,15 +4296,40 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       if (matchingLines.length) {
         // Veel Nederlandse vervoerders gebruiken hetzelfde openbare lijnnummer.
         // Onderzoek daarom veel meer dan de eerste 24 routes, in begrensde batches.
-        const allRouteKeys = [...new Set(
-          matchingLines.map(([key]) => key).filter(key => /^[A-Za-z0-9_-]+$/.test(key))
-        )];
+        // The public directory can list a route as NL_U073_1 even though
+        // its detail endpoint is exposed under the actual feed agency prefix:
+        // CXX_U073_1. Keep explicit keys, synthesize aliases for matching GTFS
+        // agencies, and try generic NL keys last.
+        const matchingAgencyIds = [...new Set([
+          requestedAgencyId,
+          ...Object.values(routeMetadata)
+            .filter((route) =>
+              String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL") === needle
+            )
+            .map((route) => String(route?.agencyId ?? "").trim())
+        ]
+          .map((value) => value.trim().toUpperCase())
+          .filter((value) => /^[A-Za-z0-9_-]{1,32}$/.test(value)))];
+        const directRouteKeys = matchingLines
+          .map(([key]) => key)
+          .filter((key) => /^[A-Za-z0-9_-]+$/.test(key) && !/^NL_/i.test(key));
+        const genericRouteKeys = matchingLines
+          .map(([key]) => key)
+          .filter((key) => /^[A-Za-z0-9_-]+$/.test(key) && /^NL_/i.test(key));
+        const synthesizedRouteKeys = matchingAgencyIds.flatMap((agencyId) =>
+          genericRouteKeys.map((key) => agencyId + "_" + key.replace(/^NL_/i, ""))
+        );
+        const allRouteKeys = [...new Set([
+          ...directRouteKeys,
+          ...synthesizedRouteKeys,
+          ...genericRouteKeys
+        ])];
         const MAX_OVAPI_LINE_SEARCH_ROUTES = 160;
         const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;
         const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;
         const routeKeys = allRouteKeys.slice(0, MAX_OVAPI_LINE_SEARCH_ROUTES);
         if (allRouteKeys.length > routeKeys.length) {
-          warnings.push("OVAPI: er zijn " + allRouteKeys.length + " routevarianten voor lijn " + query +
+          warnings.push("OVAPI: er zijn " + allRouteKeys.length + " kandidaat-lijnsleutels voor lijn " + query +
             "; vanwege een limiet zijn de eerste " + MAX_OVAPI_LINE_SEARCH_ROUTES + " gecontroleerd.");
         }
         if (routeKeys.length) {
@@ -4405,6 +4434,15 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               const expectedTime = expectedDepartureTime || expectedArrivalTime;
               const tripId = String(actualId ?? "");
               const currentStopCode = String(actual.UserStopCode ?? actual.TimingPointCode ?? "").trim();
+              const rawLatitude = actual.Latitude;
+              const rawLongitude = actual.Longitude;
+              const numericLatitude = rawLatitude == null || String(rawLatitude).trim() === "" ? NaN : Number(rawLatitude);
+              const numericLongitude = rawLongitude == null || String(rawLongitude).trim() === "" ? NaN : Number(rawLongitude);
+              const latitude = Number.isFinite(numericLatitude) && numericLatitude >= -90 && numericLatitude <= 90
+                ? numericLatitude : null;
+              const longitude = Number.isFinite(numericLongitude) && numericLongitude >= -180 && numericLongitude <= 180
+                ? numericLongitude : null;
+              const routeAgencyCode = String(routeKey.split("_")[0] ?? "").trim() || null;
               const permalink = operatorCode && vehicleNumber &&
                 /^[A-Za-z0-9_-]+$/.test(operatorCode) && /^[A-Za-z0-9_-]+$/.test(vehicleNumber)
                   ? "https://ovzoeker.nl/voertuig/" + operatorCode + ":" + vehicleNumber
@@ -4416,6 +4454,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 destination: destination || "Bestemming onbekend",
                 operatorCode: operatorCode || null,
                 operatorName: operatorName || null,
+                // Preserve the endpoint namespace separately from Actual.OperatorCode.
+                // For example, routeAgencyCode=CXX while operatorCode=UOV.
+                routeAgencyCode,
+                latitude,
+                longitude,
                 mode,
                 vehicleNumber: vehicleNumber || null,
                 tripNumber: journeyNumber || null,
