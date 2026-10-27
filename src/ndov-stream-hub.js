@@ -322,6 +322,8 @@ export class NdovFeedHub extends DurableObject {
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
       rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
     }]));
+    this.loadedStreams = new Set();
+    this.loadingStreams = new Map();
     this.ready = ctx.blockConcurrencyWhile(async () => {
       // Eerst de oude opslag veiligstellen, pas daarna state laden.
       if (ctx.id?.name === NDOV_SHARED_OBJECT_NAME) {
@@ -330,10 +332,28 @@ export class NdovFeedHub extends DurableObject {
         }
       }
 
-      for (const stream of Object.keys(CONFIG)) {
-        await this.loadStreamState(stream);
-      }
+      // Keep constructor initialization small. Hydrating both durable feed caches
+      // here can exceed blockConcurrencyWhile's initialization timeout and reset
+      // the collector object before any request can be served.
     });
+  }
+
+  async ensureStreamLoaded(stream) {
+    if (this.loadedStreams.has(stream)) return;
+    const existing = this.loadingStreams.get(stream);
+    if (existing) return existing;
+
+    const loading = this.loadStreamState(stream).then(() => {
+      this.loadedStreams.add(stream);
+    });
+    this.loadingStreams.set(stream, loading);
+    try {
+      await loading;
+    } finally {
+      if (this.loadingStreams.get(stream) === loading) {
+        this.loadingStreams.delete(stream);
+      }
+    }
   }
 
   async loadStreamState(stream) {
@@ -696,6 +716,12 @@ export class NdovFeedHub extends DurableObject {
         return Response.json({ ok: false, error: 'Stop-name cache is only available for KV78.' }, { status: 400 });
       }
       return handleNdovStopNameCacheRequest(this.ctx.storage, request);
+    }
+
+    // The stop-name and migration endpoints do not need the in-memory feed
+    // caches. All ordinary feed endpoints lazily hydrate just their own stream.
+    if (!url.pathname.startsWith('/migration/')) {
+      await this.ensureStreamLoaded(stream);
     }
 
     if (url.pathname === '/migration/manifest') {
@@ -1633,6 +1659,8 @@ export class NdovFeedHub extends DurableObject {
     const streams = [];
     for (const stream of Object.keys(CONFIG)) {
       const state = this.stateFor(stream);
+      // Read only the enable flags first; a disabled stream's sizeable cache
+      // must not be inflated just because the shared object's alarm fired.
       state.continuousEnabled =
         (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       if (state.continuousEnabled) streams.push(stream);
@@ -1662,6 +1690,10 @@ export class NdovFeedHub extends DurableObject {
       }
       return;
     }
+
+    // Only enabled streams are hydrated, and each stream is loaded in its own
+    // invocation rather than during constructor initialization.
+    for (const stream of streams) await this.ensureStreamLoaded(stream);
 
     // De laatste sessie van een UTC-dag wordt afgekapt bij middernacht.
     const sessionSeconds = Math.max(
