@@ -1594,7 +1594,7 @@ export async function resolveNdovKv78StopNames(rows, env) {
   const cacheKeyForRow = (row) => {
     const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
     const stopCode = String(row?.userStopCode ?? "").trim();
-    const operationDate = normalizeOperatingDate(row?.operationDate);
+    const operationDate = normalizeDate(row?.operationDate);
     return owner && stopCode ? {
       assetKey: owner + "|" + stopCode,
       cacheKey: owner + "|" + stopCode + "|" + operationDate,
@@ -1634,7 +1634,7 @@ export async function resolveNdovKv78StopNames(rows, env) {
       const records = index.assignments?.[assetKey] ?? [];
       const operationDates = entries
         .filter((entry) => entry.keys?.assetKey === assetKey)
-        .map((entry) => normalizeOperatingDate(entry.row?.operationDate));
+        .map((entry) => normalizeDate(entry.row?.operationDate));
       const active = records.filter((record) =>
         operationDates.some((date) => assignmentIsActive(record, date))
       );
