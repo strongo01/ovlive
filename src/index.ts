@@ -11,7 +11,7 @@ import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
 import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
 
-import { applyNdovCancellationsToPlan, prepareNsTrainIdentities } from "./ndov-plan-cancellation.js";
+import { applyNdovCancellationsToPlan, prepareNsTrainIdentities, resolveNdovKv78StopNames } from "./ndov-plan-cancellation.js";
 import { enrichNsTrainPlan } from "./ns-train-realtime";
 import { fetchNsLiveVehiclePositions } from "./ns-live-vehicle-positions";
 import { fetchNsTrainDetails } from "./ns-train-details";
@@ -3347,6 +3347,330 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   const rateLimitResponse = await enforcePublicApiRateLimit(request, env, headers);
   if (rateLimitResponse) return rateLimitResponse;
+
+  if (url.pathname === "/api/ndov-trip") {
+    const parseIdentity = (value: string) => {
+      const parts = String(value ?? "").split("|").map((part) => part.trim());
+      if (parts.length !== 5) return null;
+      const [rawOwner, rawDate, rawLine, rawJourney, rawReinforcement] = parts;
+      const dateMatch = rawDate.match(/^(\d{4})-?(\d{2})-?(\d{2})$/);
+      const owner = rawOwner.toUpperCase();
+      const line = rawLine.toUpperCase();
+      const journey = rawJourney;
+      const reinforcement = rawReinforcement || "0";
+      if (
+        !/^[A-Z0-9_-]{1,16}$/.test(owner) ||
+        !dateMatch ||
+        !/^[A-Z0-9_-]{1,32}$/.test(line) ||
+        !/^[A-Z0-9_-]{1,64}$/.test(journey) ||
+        !/^[A-Z0-9_-]{1,32}$/.test(reinforcement)
+      ) return null;
+      const date = dateMatch[1] + dateMatch[2] + dateMatch[3];
+      const parsedDate = new Date(Date.UTC(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3])));
+      if (
+        parsedDate.getUTCFullYear() !== Number(dateMatch[1]) ||
+        parsedDate.getUTCMonth() + 1 !== Number(dateMatch[2]) ||
+        parsedDate.getUTCDate() !== Number(dateMatch[3])
+      ) return null;
+      return { owner, date, line, journey, reinforcement, key: [owner, date, line, journey, reinforcement].join("|") };
+    };
+
+    const requested = parseIdentity(String(url.searchParams.get("identity") ?? ""));
+    if (!requested) {
+      return json({
+        ok: false,
+        source: "NDOV Loket KV78Turbo",
+        error: "Geef identity=DataOwnerCode|YYYYMMDD|LinePlanningNumber|JourneyNumber|FortifyOrderNumber op."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
+    const scheduledTimes = url.searchParams.getAll("scheduledTime").slice(0, 20).map((value) => value.trim());
+    if (scheduledTimes.some((value) => !/^\d{1,3}:[0-5]\d:[0-5]\d$/.test(value))) {
+      return json({
+        ok: false,
+        source: "NDOV Loket KV78Turbo",
+        error: "Alle scheduledTime-waarden moeten HH:mm:ss zijn."
+      }, 400, { ...headers, "cache-control": "no-store" });
+    }
+
+    const readHub = async (
+      stream: "kv78" | "bison",
+      action: "rows" | "events" | "mutations",
+      params: Array<[string, string]>
+    ): Promise<Record<string, any>> => {
+      const id = env.NDOV_FEEDS.idFromName(NDOV_SHARED_OBJECT_NAME);
+      const stub = env.NDOV_FEEDS.get(id);
+      const target = new URL("https://ndov-hub.local/" + action);
+      target.searchParams.set("stream", stream);
+      for (const [name, value] of params) target.searchParams.append(name, value);
+      const response = await stub.fetch(target.toString());
+      const data = await response.json().catch(() => ({})) as Record<string, any>;
+      if (!response.ok) {
+        throw new Error(String(data.error ?? (stream + "/" + action + " gaf HTTP " + response.status + ".")));
+      }
+      return data;
+    };
+
+    const rowIdentity = (row: Record<string, any>) => {
+      const owner = String(row.dataOwnerCode ?? "").trim().toUpperCase();
+      const rawDate = String(row.operationDate ?? "").trim();
+      const dateMatch = rawDate.match(/^(\d{4})-?(\d{2})-(\d{2})$/);
+      const date = dateMatch ? (dateMatch[1] + dateMatch[2] + dateMatch[3]) : rawDate.replace(/-/g, "");
+      const line = String(row.linePlanningNumber ?? "").trim().toUpperCase();
+      const journey = String(row.journeyNumber ?? "").trim();
+      const reinforcement = String(row.fortifyOrderNumber ?? row.reinforcementNumber ?? "0").trim() || "0";
+      if (!owner || !/^\d{8}$/.test(date) || !line || !journey) return null;
+      return [owner, date, line, journey, reinforcement].join("|");
+    };
+
+    const pickLatestStopRows = (input: any[]) => {
+      const latest = new Map<string, Record<string, any>>();
+      for (const candidate of input) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const row = candidate as Record<string, any>;
+        const sequence = String(row.userStopOrderNumber ?? "").trim();
+        const stopCode = String(row.userStopCode ?? "").trim();
+        const key = sequence + "|" + stopCode;
+        const received = Date.parse(String(row.receivedAt ?? ""));
+        const existing = latest.get(key);
+        const existingReceived = existing ? Date.parse(String(existing.receivedAt ?? "")) : Number.NEGATIVE_INFINITY;
+        if (!existing || (Number.isFinite(received) ? received : 0) >= (Number.isFinite(existingReceived) ? existingReceived : 0)) {
+          latest.set(key, row);
+        }
+      }
+      return [...latest.values()].sort((a, b) => {
+        const sa = Number(a.userStopOrderNumber);
+        const sb = Number(b.userStopOrderNumber);
+        if (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb) return sa - sb;
+        return String(a.userStopCode ?? "").localeCompare(String(b.userStopCode ?? ""));
+      });
+    };
+
+    try {
+      let identity = requested.key;
+      let matchStatus = "exact_identity";
+      let response = await readHub("kv78", "rows", [["identity", identity]]);
+      let rows = Array.isArray(response.rows) ? response.rows : [];
+      let fallbackCandidateCount = 0;
+
+      // OpenOV entity IDs expose owner/line/journey but not necessarily
+      // FortifyOrderNumber. Resolve that missing component only from matching
+      // official KV78 rows whose scheduled stop times agree with this exact trip.
+      if (!rows.length && scheduledTimes.length) {
+        const fallback = await readHub("kv78", "rows", [
+          ["lineLookup", "1"],
+          ["owner", requested.owner],
+          ["date", requested.date],
+          ["line", requested.line],
+          ...scheduledTimes.map((time): [string, string] => ["scheduledTime", time]),
+        ]);
+        const candidates = (Array.isArray(fallback.rows) ? fallback.rows : []).filter((row: Record<string, any>) =>
+          String(row.dataOwnerCode ?? "").trim().toUpperCase() === requested.owner &&
+          String(row.linePlanningNumber ?? "").trim().toUpperCase() === requested.line &&
+          String(row.journeyNumber ?? "").trim() === requested.journey &&
+          String(row.operationDate ?? "").replace(/-/g, "") === requested.date
+        );
+        const identities = [...new Set(candidates.map(rowIdentity).filter((value): value is string => Boolean(value)))];
+        fallbackCandidateCount = identities.length;
+        if (identities.length === 1) {
+          identity = identities[0];
+          matchStatus = "schedule_resolved_exact_identity";
+          response = await readHub("kv78", "rows", [["identity", identity]]);
+          rows = Array.isArray(response.rows) ? response.rows : [];
+        } else if (identities.length > 1) {
+          return json({
+            ok: true,
+            source: "NDOV Loket KV78Turbo",
+            requestedIdentity: requested.key,
+            matchedIdentity: null,
+            matchStatus: "ambiguous",
+            fallbackCandidateCount: identities.length,
+            checkedAt: new Date().toISOString(),
+            rows: [],
+            error: "Meerdere officiële KV78-ritidentiteiten passen bij de exacte OpenOV-rit; er worden geen halteprognoses gegokt."
+          }, 200, { ...headers, "cache-control": "no-store" });
+        }
+      }
+
+      const selectedRows = pickLatestStopRows(
+        rows.filter((row: Record<string, any>) => rowIdentity(row) === identity)
+      ).slice(0, 80);
+      if (!selectedRows.length) {
+        return json({
+          ok: true,
+          source: "NDOV Loket KV78Turbo",
+          requestedIdentity: requested.key,
+          matchedIdentity: null,
+          matchStatus: "not_found",
+          fallbackCandidateCount,
+          checkedAt: new Date().toISOString(),
+          returnedCount: 0,
+          rows: [],
+          error: "Geen verse KV78-halterijen voor deze exacte rit gevonden. Dit is geen bevestiging dat de rit op tijd rijdt."
+        }, 200, { ...headers, "cache-control": "no-store" });
+      }
+
+      const rowTimes = selectedRows
+        .map((row) => Date.parse(String(row.receivedAt ?? "")))
+        .filter(Number.isFinite);
+      const newestReceivedAtMs = rowTimes.length ? Math.max(...rowTimes) : null;
+      const updateAgeSeconds = newestReceivedAtMs === null
+        ? null
+        : Math.max(0, Math.round((Date.now() - newestReceivedAtMs) / 1000));
+      const settled = await Promise.allSettled([
+        resolveNdovKv78StopNames(selectedRows, env),
+        readHub("bison", "events", [["identity", identity]]),
+        readHub("bison", "mutations", [["identity", identity]]),
+      ]);
+
+      let stops = selectedRows;
+      let stopCrosswalk: Record<string, any> = {
+        requestedShardCount: 0, loadedShardCount: 0, partial: true, generatedAt: null,
+        error: "Official PSA/CHB stop-name crosswalk was not read."
+      };
+      if (settled[0].status === "fulfilled") {
+        stops = settled[0].value.rows;
+        stopCrosswalk = settled[0].value.crosswalk;
+      } else {
+        stopCrosswalk.error = settled[0].reason instanceof Error
+          ? settled[0].reason.message : "Stop-name crosswalk unavailable.";
+      }
+
+      const bisonEvents = settled[1].status === "fulfilled" &&
+        Array.isArray(settled[1].value.events) ? settled[1].value.events : [];
+      const bisonMutations = settled[2].status === "fulfilled" &&
+        Array.isArray(settled[2].value.mutations) ? settled[2].value.mutations : [];
+      const newestEvent = [...bisonEvents].sort((a, b) =>
+        (Date.parse(String(b.receivedAt ?? b.punctualityReceivedAt ?? "")) || 0) -
+        (Date.parse(String(a.receivedAt ?? a.punctualityReceivedAt ?? "")) || 0)
+      )[0] ?? null;
+      const newestMutation = [...bisonMutations].sort((a, b) =>
+        (Date.parse(String(b.timestamp ?? "")) || 0) -
+        (Date.parse(String(a.timestamp ?? "")) || 0)
+      )[0] ?? null;
+
+      const cancelled = newestMutation
+        ? (String(newestMutation.eventType ?? "").toUpperCase() === "CANCEL" ? true
+          : String(newestMutation.eventType ?? "").toUpperCase() === "RECOVER" ? false : null)
+        : null;
+
+      const firstWithValue = (...values: unknown[]) => {
+        for (const value of values) {
+          if (value !== null && value !== undefined && String(value).trim() !== "") return value;
+        }
+        return null;
+      };
+      const firstStop = stops[0] ?? {};
+      const lastStop = stops[stops.length - 1] ?? {};
+      const numericDelay = (value: unknown): number | null => {
+        if (value === null || value === undefined || String(value).trim() === "") return null;
+        const n = Number(value);
+        return Number.isFinite(n) ? Math.round(n) : null;
+      };
+      const nearestStop = stops.find((row) => {
+        const expected = Date.parse(String(row.expectedArrivalTime ?? row.expectedDepartureTime ?? ""));
+        return Number.isFinite(expected) && expected >= Date.now() - 60_000;
+      }) ?? firstStop;
+      const delaySeconds = numericDelay(
+        firstWithValue(newestEvent?.punctualitySeconds,
+          nearestStop?.arrivalDelaySeconds, nearestStop?.departureDelaySeconds)
+      );
+      const vehicleNumber = firstWithValue(
+        newestEvent?.vehicleNumber,
+        ...stops.map((row) => row.vehicleNumber)
+      );
+      const blockCode = firstWithValue(newestEvent?.blockCode, ...stops.map((row) => row.blockCode));
+      const numberOfCoaches = firstWithValue(...stops.map((row) => row.numberOfCoaches));
+      const publicLine = firstWithValue(...stops.map((row) => row.linePublicNumber), ...stops.map((row) => row.lineName));
+      const destination = firstWithValue(
+        ...stops.map((row) => row.destinationName),
+        ...stops.map((row) => row.destinationName50),
+        lastStop.timingPointName,
+        lastStop.resolvedStopName
+      );
+
+      const safeVehicleNumber = vehicleNumber == null ? null : String(vehicleNumber).trim();
+      const permalink = safeVehicleNumber && /^[A-Za-z0-9_-]+$/.test(requested.owner) &&
+        /^[A-Za-z0-9_-]+$/.test(safeVehicleNumber)
+        ? "https://ovzoeker.nl/voertuig/" + requested.owner + ":" + safeVehicleNumber : null;
+
+      return json({
+        ok: true,
+        source: "NDOV Loket KV78Turbo",
+        detailSource: {
+          stopTimes: "NDOV Loket KV78Turbo",
+          vehicleObservation: bisonEvents.length ? "NDOV BISON KV6" : null,
+          officialStopNames: "NDOV Loket PSA/CHB"
+        },
+        requestedIdentity: requested.key,
+        matchedIdentity: identity,
+        matchStatus,
+        fallbackCandidateCount,
+        checkedAt: new Date().toISOString(),
+        feed: {
+          updateAgeSeconds,
+          newestReceivedAt: newestReceivedAtMs === null ? null : new Date(newestReceivedAtMs).toISOString(),
+          rowCount: stops.length,
+          state: response.state ?? null,
+          staleCount: response.staleCount ?? null,
+          stopCrosswalk,
+          bisonEventCount: bisonEvents.length,
+          bisonError: settled[1].status === "rejected"
+            ? String(settled[1].reason) : null,
+          mutationError: settled[2].status === "rejected"
+            ? String(settled[2].reason) : null
+        },
+        trip: {
+          dataOwnerCode: requested.owner,
+          operationDate: requested.date,
+          linePlanningNumber: requested.line,
+          journeyNumber: requested.journey,
+          fortifyOrderNumber: identity.split("|")[4] ?? requested.reinforcement,
+          line: firstWithValue(publicLine, requested.line),
+          destination,
+          vehicleNumber: safeVehicleNumber,
+          blockCode: blockCode == null ? null : String(blockCode),
+          numberOfCoaches: numberOfCoaches == null ? null : numberOfCoaches,
+          delaySeconds,
+          cancelled,
+          status: newestEvent?.eventType ?? firstWithValue(...stops.map((row) => row.tripStopStatus)),
+          currentStopCode: firstWithValue(newestEvent?.userStopCode),
+          vehicleLabel: safeVehicleNumber ? "Bus " + safeVehicleNumber : "Rit " + requested.journey,
+          permalink
+        },
+        rows: stops.map((row, index) => ({
+          ...row,
+          stopSequence: Number(row.userStopOrderNumber) || index + 1,
+          name: firstWithValue(
+            row.resolvedStopName,
+            row.timingPointName,
+            row.stopName,
+            row.userStopName,
+            row.userStopCode ? "Haltecode " + row.userStopCode : null
+          ),
+          isCurrent: Boolean(newestEvent?.userStopCode &&
+            String(newestEvent.userStopCode).trim() === String(row.userStopCode ?? "").trim()),
+          isAtStop: ["ARRIVED", "ONSTOP", "ATSTOP"].includes(
+            String(row.tripStopStatus ?? "").trim().toUpperCase()
+          )
+        }))
+      }, 200, { ...headers, "cache-control": "no-store" });
+    } catch (error) {
+      console.error("[NDOV_TRIP_LOOKUP]", JSON.stringify({
+        identity: requested.key,
+        error: error instanceof Error ? error.message : String(error)
+      }));
+      return json({
+        ok: false,
+        source: "NDOV Loket KV78Turbo",
+        requestedIdentity: requested.key,
+        matchStatus: "unavailable",
+        checkedAt: new Date().toISOString(),
+        error: "De NDOV-halterijen zijn tijdelijk niet beschikbaar.",
+        detail: error instanceof Error ? error.message : "Onbekende fout"
+      }, 503, { ...headers, "cache-control": "no-store" });
+    }
+  }
 
   if (url.pathname === "/api/ns/train-details") {
     const trainNumber = String(url.searchParams.get("trainNumber") ?? "").trim();
