@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, parseKv17Payload, parseKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
 import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
+import { handleNdovStopNameCacheRequest } from '../src/ndov-stop-name-cache.mjs';
 
 
 const positionAt = '2026-10-18T20:00:10.000Z';
@@ -257,3 +258,58 @@ console.log('PASS: current KV17 state persists across sessions and older operati
 console.log('PASS: alarm-driven collection, compressed durable state, and exact read endpoints are configured');
 console.log('PASS: stream clients encode greeting, READY and SUBSCRIBE frames');
 console.log('PASS: test parser and protocol offline checks passed');
+
+
+// Durable stop-name cache: a second Worker isolate can reuse official PSA/CHB
+// results, including negative/ambiguous outcomes, without rereading a 1.4 MB shard.
+{
+  const values = new Map();
+  const storage = {
+    async get(key) { return values.get(key); },
+    async put(input, value) {
+      if (typeof input === "string") values.set(input, value);
+      else for (const [key, item] of Object.entries(input)) values.set(key, item);
+    },
+    async delete(keys) {
+      for (const key of (Array.isArray(keys) ? keys : [keys])) values.delete(key);
+    },
+    async list({ prefix, limit }) {
+      return new Map([...values.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(0, limit));
+    },
+  };
+  const testNow = Date.parse("2026-10-27T12:00:00.000Z");
+  const post = new Request("https://ndov-hub.local/stop-name-cache?stream=kv78", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ entries: [{
+      key: "CXX|51111546|2026-10-27",
+      value: {
+        resolvedStopName: "Waterwinpark",
+        stopPlaceCode: "NL:S:51111546",
+        stopPlaceRef: "NL:CHB:STOPPLACE:51111546",
+        quayCode: "A",
+        quayRef: "NL:CHB:QUAY:51111546-A",
+        stopNameMatchStatus: "official_psa_chb_unique",
+      },
+    }] }),
+  });
+  const written = await handleNdovStopNameCacheRequest(storage, post, testNow);
+  const writeData = await written.json();
+  assert.equal(written.status, 200);
+  assert.equal(writeData.storedCount, 1);
+
+  const getURL = new URL("https://ndov-hub.local/stop-name-cache?stream=kv78");
+  getURL.searchParams.append("key", "CXX|51111546|20261027");
+  const read = await handleNdovStopNameCacheRequest(storage, new Request(getURL), testNow + 1000);
+  const readData = await read.json();
+  assert.equal(read.status, 200);
+  assert.equal(readData.entries.length, 1);
+  assert.equal(readData.entries[0].value.resolvedStopName, "Waterwinpark");
+
+  const expired = await handleNdovStopNameCacheRequest(storage, new Request(getURL), testNow + 600_001);
+  assert.equal((await expired.json()).entries.length, 0);
+  console.log("PASS: durable NDOV stop-name cache persists official assignments across Worker isolates and expires old results");
+}
