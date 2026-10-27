@@ -1589,21 +1589,97 @@ function resolveKv78StopAssignment(row, context) {
  * Ambiguous or not-yet-loaded assignments remain unnamed rather than guessed.
  * The existing two-new-shards-per-request budget is deliberately preserved.
  */
-export async function resolveNdovKv78StopNames(rows, env) {
+async function readPersistentNdovKv78StopNames(env, keys) {
+  const namespace = env?.NDOV_FEEDS;
+  if (!namespace || !Array.isArray(keys) || !keys.length) {
+    return { entries: [], error: namespace ? null : "NDOV_FEEDS binding unavailable" };
+  }
+  try {
+    const objectId = namespace.idFromName(NDOV_SHARED_OBJECT_NAME);
+    const stub = namespace.get(objectId);
+    const target = new URL("https://ndov-hub.local/stop-name-cache");
+    target.searchParams.set("stream", "kv78");
+    for (const key of [...new Set(keys)].slice(0, 100)) target.searchParams.append("key", key);
+    const response = await stub.fetch(target.toString());
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.ok !== true || !Array.isArray(data.entries)) {
+      throw new Error(String(data?.error ?? "Persistent stop-name cache read failed."));
+    }
+    return { entries: data.entries, error: null };
+  } catch (error) {
+    return {
+      entries: [],
+      error: error instanceof Error ? error.message : "Persistent stop-name cache read failed.",
+    };
+  }
+}
+
+async function writePersistentNdovKv78StopNames(env, entries) {
+  const namespace = env?.NDOV_FEEDS;
+  if (!namespace || !Array.isArray(entries) || !entries.length) {
+    return { storedCount: 0, error: entries?.length ? "NDOV_FEEDS binding unavailable" : null };
+  }
+  try {
+    const objectId = namespace.idFromName(NDOV_SHARED_OBJECT_NAME);
+    const stub = namespace.get(objectId);
+    const target = new URL("https://ndov-hub.local/stop-name-cache?stream=kv78");
+    const response = await stub.fetch(target.toString(), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ entries: entries.slice(0, 100) }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.ok !== true) {
+      throw new Error(String(data?.error ?? "Persistent stop-name cache write failed."));
+    }
+    return { storedCount: Number(data.storedCount) || 0, error: null };
+  } catch (error) {
+    return {
+      storedCount: 0,
+      error: error instanceof Error ? error.message : "Persistent stop-name cache write failed.",
+    };
+  }
+}
+
+export async function resolveNdovKv78StopNames(rows, env) {{
   const sourceRows = Array.isArray(rows) ? rows : [];
   const cacheKeyForRow = (row) => {
     const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
     const stopCode = String(row?.userStopCode ?? "").trim();
     const operationDate = normalizeDate(row?.operationDate);
-    return owner && stopCode ? {
+    return owner && stopCode && operationDate ? {
       assetKey: owner + "|" + stopCode,
       cacheKey: owner + "|" + stopCode + "|" + operationDate,
     } : null;
   };
   const entries = sourceRows.map((row) => ({ row, keys: cacheKeyForRow(row) }));
   const now = Date.now();
-  const unresolvedAssetKeys = new Set();
 
+  // The Worker isolate cache is only an optimization: requests may land on
+  // another isolate. Read resolved/unmapped results from the shared Durable
+  // Object before spending the two-new-shards-per-request asset budget.
+  const lookupKeys = [];
+  for (const entry of entries) {
+    if (!entry.keys) continue;
+    const cached = getLruCacheValue(kv78StopNameCache, entry.keys.cacheKey);
+    if (cached && cached.expiresAtMs > now) continue;
+    if (cached) kv78StopNameCache.delete(entry.keys.cacheKey);
+    lookupKeys.push(entry.keys.cacheKey);
+  }
+  const persistentRead = await readPersistentNdovKv78StopNames(env, lookupKeys);
+  let persistentCacheHitCount = 0;
+  for (const item of persistentRead.entries) {
+    const key = String(item?.key ?? "");
+    const expiresAtMs = Number(item?.expiresAtMs);
+    if (!key || !Number.isFinite(expiresAtMs) || expiresAtMs <= now || !item?.value) continue;
+    setBoundedLruCacheValue(kv78StopNameCache, key, {
+      ...item.value,
+      expiresAtMs,
+    }, KV78_STOP_NAME_CACHE_MAX_ENTRIES);
+    persistentCacheHitCount += 1;
+  }
+
+  const unresolvedAssetKeys = new Set();
   for (const entry of entries) {
     if (!entry.keys) continue;
     const cached = getLruCacheValue(kv78StopNameCache, entry.keys.cacheKey);
@@ -1621,20 +1697,23 @@ export async function resolveNdovKv78StopNames(rows, env) {
     generatedAt: null,
     shardCount: 0,
   };
+  const persistentUpdates = [];
   if (unresolvedAssetKeys.size) {
     index = await getStopAssignmentIndex(env, [...unresolvedAssetKeys]);
     const loadedShards = new Set(index.loadedShardNumbers ?? []);
 
     for (const assetKey of unresolvedAssetKeys) {
       const shardNumber = stopAssignmentShardNumber(assetKey, Number(index.shardCount));
-      // Don't cache a negative result when its shard was not loaded. It will be
-      // retried on a later refresh, at no more than two new static assets per call.
+      // A key is cached only after its assignment shard was actually loaded.
+      // Persist negative/ambiguous outcomes too, so another Worker isolate does
+      // not repeatedly spend its asset budget on the same unresolvable codes.
       if (!loadedShards.has(shardNumber)) continue;
 
       const records = index.assignments?.[assetKey] ?? [];
-      const operationDates = entries
+      const operationDates = [...new Set(entries
         .filter((entry) => entry.keys?.assetKey === assetKey)
-        .map((entry) => normalizeDate(entry.row?.operationDate));
+        .map((entry) => normalizeDate(entry.row?.operationDate))
+        .filter(Boolean))];
       const active = records.filter((record) =>
         operationDates.some((date) => assignmentIsActive(record, date))
       );
@@ -1657,15 +1736,30 @@ export async function resolveNdovKv78StopNames(rows, env) {
           ? "official_psa_chb_unique"
           : active.length ? "ambiguous_or_unavailable" : "unmapped",
       };
-      setBoundedLruCacheValue(
-        kv78StopNameCache,
-        assetKey + "|" + (operationDates[0] ?? ""),
-        cachedValue,
-        KV78_STOP_NAME_CACHE_MAX_ENTRIES
-      );
+      for (const operationDate of operationDates) {
+        const cacheKey = assetKey + "|" + operationDate;
+        setBoundedLruCacheValue(
+          kv78StopNameCache,
+          cacheKey,
+          cachedValue,
+          KV78_STOP_NAME_CACHE_MAX_ENTRIES
+        );
+        persistentUpdates.push({
+          key: cacheKey,
+          value: {
+            resolvedStopName: cachedValue.resolvedStopName,
+            stopPlaceCode: cachedValue.stopPlaceCode,
+            stopPlaceRef: cachedValue.stopPlaceRef,
+            quayCode: cachedValue.quayCode,
+            quayRef: cachedValue.quayRef,
+            stopNameMatchStatus: cachedValue.stopNameMatchStatus,
+          },
+        });
+      }
     }
   }
 
+  const persistentWrite = await writePersistentNdovKv78StopNames(env, persistentUpdates);
   const namedRows = entries.map(({ row, keys }) => {
     const cached = keys ? getLruCacheValue(kv78StopNameCache, keys.cacheKey) : null;
     return {
@@ -1691,6 +1785,10 @@ export async function resolveNdovKv78StopNames(rows, env) {
       partial: index.partial === true || remainingUnresolved,
       resolvedStopNameCount: namedRows.filter((row) => row.resolvedStopName).length,
       cachedStopNameCount: entries.filter(({ keys }) => keys && kv78StopNameCache.has(keys.cacheKey)).length,
+      persistentCacheHitCount,
+      persistentCacheStoredCount: persistentWrite.storedCount,
+      persistentCacheReadError: persistentRead.error,
+      persistentCacheWriteError: persistentWrite.error,
     },
   };
 }
