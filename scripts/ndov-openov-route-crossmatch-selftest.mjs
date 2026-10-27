@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue, selectCachedCrosswalkShardNumbers, prioritizeKv78AssignmentCandidateRows, matchKv78RowByScheduleTime } from '../src/ndov-plan-cancellation.js';
+import { matchOpenovRoutePattern, applyNdovCancellationsToPlan, openovTripStartBucket, getLruCacheValue, setBoundedLruCacheValue, selectCachedCrosswalkShardNumbers, prioritizeKv78AssignmentCandidateRows, matchKv78RowByScheduleTime, resolveNdovKv78StopNames } from '../src/ndov-plan-cancellation.js';
 
 assert.equal(openovTripStartBucket('20261011_11:59_nl-OpenOV_390000001'), '00');
 assert.equal(openovTripStartBucket('20261011_12:00_nl-OpenOV_390000001'), '12');
@@ -426,3 +426,48 @@ assert.ok(!assetFetchPaths.includes('/ndov-openov-route-crosswalk/routes/route-1
 console.log("PASS: route/time/stop matching fetches service sidecars only for exact candidate shards");
 console.log("PASS: exact route/time/stop crossmatch attaches fresh KV6 to BUS/TRAM/SUBWAY/METRO");
 console.log("PASS: per-mode coverage counters preserve each operator and exact trip identity");
+
+
+// Regression test for the live /api/ndov-trip name-enrichment path.
+// The operation date must be normalized before looking up official PSA/CHB
+// assignments; a missing helper previously made this whole enrichment fail.
+{
+  const resolverEnv = {
+    ASSETS: {
+      async fetch(request) {
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/ndov-stop-crosswalk/manifest.json") {
+          return Response.json({
+            schemaVersion: 1,
+            generatedAt: "2026-10-27T00:00:00Z",
+            shardCount: 1,
+          });
+        }
+        if (pathname === "/ndov-stop-crosswalk/shards/stop-assignments-0.json") {
+          return Response.json({
+            assignments: {
+              "CXX|51112550": [{
+                quayName: "Testhalte U-OV",
+                quayRef: "TEST-QUAY-1",
+                quayCode: "TEST-1",
+                stopPlaceCode: "NL:S:12345",
+                validFrom: "2026-01-01",
+                validThru: "2026-12-31",
+              }],
+            },
+          });
+        }
+        return new Response("unexpected crosswalk asset: " + pathname, { status: 404 });
+      },
+    },
+  };
+  const result = await resolveNdovKv78StopNames([{
+    dataOwnerCode: "CXX",
+    userStopCode: "51112550",
+    operationDate: "2026-10-27",
+  }], resolverEnv);
+  assert.equal(result.rows[0].resolvedStopName, "Testhalte U-OV");
+  assert.equal(result.rows[0].stopPlaceCode, "NL:S:12345");
+  assert.equal(result.crosswalk.resolvedStopNameCount, 1);
+  console.log("PASS: NDOV KV78 stop-name resolver normalizes service date and resolves a unique active PSA/CHB assignment");
+}
