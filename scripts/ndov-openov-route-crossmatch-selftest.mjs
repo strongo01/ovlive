@@ -471,3 +471,79 @@ console.log("PASS: per-mode coverage counters preserve each operator and exact t
   assert.equal(result.crosswalk.resolvedStopNameCount, 1);
   console.log("PASS: NDOV KV78 stop-name resolver normalizes service date and resolves a unique active PSA/CHB assignment");
 }
+
+
+// A new module instance represents a different Worker isolate. Resolved and
+// negative stop-name results must come from the shared Durable Object, not the
+// prior isolate's in-memory Maps.
+{
+  const isolatedResolver = await import("../src/ndov-plan-cancellation.js?persistent-cache-isolate-test");
+  const persistentValues = new Map();
+  const fetchedAssets = [];
+  const persistentStub = {
+    async fetch(input, init = {}) {
+      const url = new URL(typeof input === "string" ? input : input.url);
+      if (url.pathname !== "/stop-name-cache") return new Response("not found", { status: 404 });
+      if ((init.method ?? "GET") === "GET") {
+        const entries = url.searchParams.getAll("key").flatMap((key) => {
+          const item = persistentValues.get(key);
+          return item && item.expiresAtMs > Date.now() ? [{ key, ...item }] : [];
+        });
+        return Response.json({ ok: true, entries });
+      }
+      const body = JSON.parse(init.body);
+      for (const item of body.entries) {
+        persistentValues.set(item.key, {
+          value: item.value,
+          expiresAtMs: Date.now() + 600_000,
+        });
+      }
+      return Response.json({ ok: true, storedCount: body.entries.length });
+    },
+  };
+  const env = {
+    ASSETS: {
+      async fetch(request) {
+        const pathname = new URL(request.url).pathname;
+        fetchedAssets.push(pathname);
+        if (pathname === "/ndov-stop-crosswalk/manifest.json") {
+          return Response.json({ generatedAt: "2026-10-27T00:00:00Z", shardCount: 1 });
+        }
+        if (pathname === "/ndov-stop-crosswalk/shards/stop-assignments-0.json") {
+          return Response.json({ assignments: {
+            "CXX|51112550": [{
+              quayName: "Testhalte persistent",
+              quayRef: "TEST-PERSISTENT-QUAY",
+              quayCode: "P1",
+              stopPlaceCode: "NL:S:12345",
+              validFrom: "2026-01-01",
+              validThru: "2026-12-31",
+            }],
+          } });
+        }
+        return new Response("unexpected asset " + pathname, { status: 404 });
+      },
+    },
+    NDOV_FEEDS: {
+      idFromName(name) { return name; },
+      get() { return persistentStub; },
+    },
+  };
+  const rows = [{
+    dataOwnerCode: "CXX",
+    userStopCode: "51112550",
+    operationDate: "2026-10-27",
+  }];
+  const first = await isolatedResolver.resolveNdovKv78StopNames(rows, env);
+  assert.equal(first.rows[0].resolvedStopName, "Testhalte persistent");
+  assert.equal(first.crosswalk.persistentCacheStoredCount, 1);
+  const assetReadsAfterFirst = fetchedAssets.length;
+
+  const secondModule = await import("../src/ndov-plan-cancellation.js?persistent-cache-isolate-test-2");
+  const second = await secondModule.resolveNdovKv78StopNames(rows, env);
+  assert.equal(second.rows[0].resolvedStopName, "Testhalte persistent");
+  assert.equal(second.crosswalk.persistentCacheHitCount, 1);
+  assert.equal(fetchedAssets.length, assetReadsAfterFirst,
+    "a fresh Worker isolate must not reread the 1.4 MB PSA/CHB shard");
+  console.log("PASS: persistent stop-name cache survives a fresh Worker isolate and avoids repeated PSA/CHB shard downloads");
+}
