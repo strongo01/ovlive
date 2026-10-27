@@ -1579,6 +1579,62 @@ function resolveKv78StopAssignment(row, context) {
     matchMethod: "PSA/CHB StopPlace + dienstregelingstijd (haltezijde niet bevestigd)",
   };
 }
+/**
+ * Add stop names only from the official NDOV PSA/CHB assignment crosswalk.
+ * Ambiguous or not-yet-loaded assignments remain unnamed rather than guessed.
+ * The existing two-new-shards-per-request budget is deliberately preserved.
+ */
+export async function resolveNdovKv78StopNames(rows, env) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const keys = [...new Set(sourceRows.map((row) => {
+    const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
+    const stopCode = String(row?.userStopCode ?? "").trim();
+    return owner && stopCode ? `${owner}|${stopCode}` : null;
+  }).filter(Boolean))];
+
+  if (!keys.length) {
+    return {
+      rows: sourceRows.map((row) => ({ ...row, resolvedStopName: null })),
+      crosswalk: { requestedShardCount: 0, loadedShardCount: 0, partial: false, generatedAt: null },
+    };
+  }
+
+  const index = await getStopAssignmentIndex(env, keys);
+  const namedRows = sourceRows.map((row) => {
+    const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
+    const stopCode = String(row?.userStopCode ?? "").trim();
+    const key = `${owner}|${stopCode}`;
+    const active = (index.assignments?.[key] ?? [])
+      .filter((record) => assignmentIsActive(record, row?.operationDate));
+    const uniqueQuays = new Map();
+    for (const record of active) {
+      const name = String(record?.quayName ?? "").trim();
+      const quayIdentity = String(record?.quayRef ?? record?.quayCode ?? name).trim();
+      if (name && quayIdentity) uniqueQuays.set(quayIdentity, record);
+    }
+    const assignment = uniqueQuays.size === 1 ? [...uniqueQuays.values()][0] : null;
+    return {
+      ...row,
+      resolvedStopName: assignment ? String(assignment.quayName).trim() : null,
+      stopPlaceCode: assignment?.stopPlaceCode ?? null,
+      stopPlaceRef: assignment?.stopPlaceRef ?? null,
+      quayCode: assignment?.quayCode ?? null,
+      quayRef: assignment?.quayRef ?? null,
+      stopNameMatchStatus: assignment ? "official_psa_chb_unique" : active.length ? "ambiguous_or_unavailable" : "unmapped",
+    };
+  });
+
+  return {
+    rows: namedRows,
+    crosswalk: {
+      generatedAt: index.generatedAt ?? null,
+      requestedShardCount: index.requestedShardCount ?? 0,
+      loadedShardCount: index.loadedShardCount ?? 0,
+      partial: index.partial === true,
+    },
+  };
+}
+
 function wallClockSeconds(value) {
   const text = String(value ?? "").trim();
   const m = text.match(/^(\d{1,3}):(\d{2}):(\d{2})$/);
