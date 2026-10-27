@@ -12,6 +12,7 @@ import {
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
+import { handleNdovStopNameCacheRequest } from './ndov-stop-name-cache.mjs';
 import { amsterdamClockSeconds, continuousCollectorHealth, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
@@ -689,6 +690,13 @@ export class NdovFeedHub extends DurableObject {
     const stream = url.searchParams.get('stream') || 'kv78';
     if (!CONFIG[stream]) return Response.json({ ok: false, error: 'unknown stream' }, { status: 400 });
     const state = this.stateFor(stream);
+
+    if (url.pathname === '/stop-name-cache') {
+      if (stream !== 'kv78') {
+        return Response.json({ ok: false, error: 'Stop-name cache is only available for KV78.' }, { status: 400 });
+      }
+      return handleNdovStopNameCacheRequest(this.ctx.storage, request);
+    }
 
     if (url.pathname === '/migration/manifest') {
       // Alleen de oude, expliciet benoemde objecten mogen exporteren.
