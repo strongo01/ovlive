@@ -144,6 +144,14 @@ assert.match(hubSource, /const AUTO_SESSION_SECONDS = 600/);
 assert.match(hubSource, /const AUTO_REST_MS = 5 \* 1000/);
 assert.match(hubSource, /async alarm\(\)/);
 assert.match(hubSource, /return AUTO_REST_MS/);
+// Large durable feed snapshots must not be inflated for both streams inside the
+// constructor's 30-second blockConcurrencyWhile initialization window.
+assert.match(hubSource, /this\.loadedStreams = new Set\(\)/);
+assert.match(hubSource, /this\.loadingStreams = new Map\(\)/);
+assert.match(hubSource, /async ensureStreamLoaded\(stream\)/);
+assert.doesNotMatch(hubSource, /for \(const stream of Object\.keys\(CONFIG\)\) \{\s*await this\.loadStreamState\(stream\);\s*\}/);
+assert.match(hubSource, /if \(!url\.pathname\.startsWith\('\/migration\/'\)\) \{\s*await this\.ensureStreamLoaded\(stream\);\s*\}/);
+assert.match(hubSource, /for \(const stream of streams\) await this\.ensureStreamLoaded\(stream\);/);
 assert.match(hubSource, /async persistFullKv78Rows\(stream, force = false\)/);
 assert.match(hubSource, /async persistFullMutations\(stream, force = false\)/);
 assert.match(hubSource, /new CompressionStream\('gzip'\)/);
