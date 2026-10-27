@@ -4324,13 +4324,24 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           ...synthesizedRouteKeys,
           ...genericRouteKeys
         ])];
+        // Exact app lookups are scoped to the OpenOV/GTFS agency namespace.
+        // Do not return another operator's same-numbered line when agencyId=CXX.
+        const requestedAgencyPrefix = requestedAgencyId.trim().toUpperCase();
+        const candidateRouteKeys = requestedAgencyPrefix
+          ? allRouteKeys.filter((key) =>
+              key.toLocaleUpperCase("en-US").startsWith(requestedAgencyPrefix + "_")
+            )
+          : allRouteKeys;
         const MAX_OVAPI_LINE_SEARCH_ROUTES = 160;
         const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;
         const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;
-        const routeKeys = allRouteKeys.slice(0, MAX_OVAPI_LINE_SEARCH_ROUTES);
-        if (allRouteKeys.length > routeKeys.length) {
-          warnings.push("OVAPI: er zijn " + allRouteKeys.length + " kandidaat-lijnsleutels voor lijn " + query +
+        const routeKeys = candidateRouteKeys.slice(0, MAX_OVAPI_LINE_SEARCH_ROUTES);
+        if (candidateRouteKeys.length > routeKeys.length) {
+          warnings.push("OVAPI: er zijn " + candidateRouteKeys.length + " kandidaat-lijnsleutels voor lijn " + query +
             "; vanwege een limiet zijn de eerste " + MAX_OVAPI_LINE_SEARCH_ROUTES + " gecontroleerd.");
+        }
+        if (requestedAgencyPrefix && routeKeys.length === 0) {
+          warnings.push("OVAPI: geen lijnsleutels gevonden voor agencyId=" + requestedAgencyPrefix + " en lijn " + query + ".");
         }
         if (routeKeys.length) {
           const routeBatches: string[][] = [];
@@ -4498,8 +4509,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         }
       }
 
-      // OVAPI's journey endpoint returns the remaining stop sequence. Fetch all
-      // selected journeys in one comma-separated request instead of one request per bus.
+      // The OVAPI journey endpoint documents one journey ID per request.
+      // A comma-separated batch can fail as a whole (HTTP 404), hiding valid
+      // journeys too. Fetch individually with bounded concurrency so one bad
+      // or expired journey ID cannot erase the other stop timelines.
       const deduplicatedCandidates = new Map<string, typeof ovapiCandidates[number]>();
       for (const candidate of ovapiCandidates) {
         const existing = deduplicatedCandidates.get(candidate.unique);
@@ -4514,23 +4527,51 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         .map((candidate) => candidate.journeyKey)
         .filter((key) => /^[A-Za-z0-9_-]+$/.test(key)))];
       const journeysByKey: Record<string, any> = {};
-      if (journeyKeys.length) {
-        try {
-          const journeysResponse = await fetch("http://v0.ovapi.nl/journey/" + journeyKeys.join(","), {
-            headers: {
-              "accept": "application/json",
-              "user-agent": env.APP_NAME + "/" + env.APP_VERSION + " (" + env.APP_CONTACT + ")"
-            },
-            signal: AbortSignal.timeout(8000),
-            cf: { cacheEverything: true, cacheTtl: 10 }
-          });
-          if (!journeysResponse.ok) {
-            throw new Error("OVAPI gaf HTTP " + journeysResponse.status + " terug voor ritdetails.");
+      let journeyLookupFailures = 0;
+      const JOURNEY_LOOKUP_CONCURRENCY = 4;
+      for (let index = 0; index < journeyKeys.length; index += JOURNEY_LOOKUP_CONCURRENCY) {
+        const batch = journeyKeys.slice(index, index + JOURNEY_LOOKUP_CONCURRENCY);
+        const batchResults = await Promise.all(batch.map(async (key) => {
+          try {
+            const journeyResponse = await fetch("http://v0.ovapi.nl/journey/" + encodeURIComponent(key), {
+              headers: {
+                "accept": "application/json",
+                "user-agent": env.APP_NAME + "/" + env.APP_VERSION + " (" + env.APP_CONTACT + ")"
+              },
+              signal: AbortSignal.timeout(8000),
+              cf: { cacheEverything: true, cacheTtl: 10 }
+            });
+            if (!journeyResponse.ok) {
+              return { key, journey: null, error: "HTTP " + journeyResponse.status };
+            }
+            const payload = await journeyResponse.json() as Record<string, any>;
+            const journey = payload[key] ??
+              (payload && typeof payload === "object" && payload.Stops ? payload : null) ??
+              null;
+            return { key, journey, error: journey ? "" : "geen ritobject in respons" };
+          } catch (error) {
+            return {
+              key,
+              journey: null,
+              error: error instanceof Error ? error.message : "onbekende fout"
+            };
           }
-          Object.assign(journeysByKey, await journeysResponse.json() as Record<string, any>);
-        } catch (error) {
-          warnings.push("OVAPI-ritdetails tijdelijk niet beschikbaar: " +
-            (error instanceof Error ? error.message : "onbekende fout"));
+        }));
+        for (const result of batchResults) {
+          if (result.journey) {
+            journeysByKey[result.key] = result.journey;
+          } else {
+            journeyLookupFailures += 1;
+          }
+        }
+      }
+      if (journeyLookupFailures > 0) {
+        if (Object.keys(journeysByKey).length === 0) {
+          warnings.push("OVAPI-ritdetails niet beschikbaar voor " + journeyLookupFailures +
+            " rit(ten); de individuele journey-aanvragen leverden geen bruikbare respons op.");
+        } else {
+          warnings.push("OVAPI-ritdetails gedeeltelijk beschikbaar: " + Object.keys(journeysByKey).length +
+            " van " + journeyKeys.length + " ritten opgehaald.");
         }
       }
 
