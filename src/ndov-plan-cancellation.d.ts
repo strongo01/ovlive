@@ -21,3 +21,15 @@ export declare function prepareNsTrainIdentities<T extends Record<string, any>>(
   plan: T,
   env: NdovPlanCancellationEnv,
 ): Promise<T>;
+export declare function resolveNdovKv78StopNames(
+  rows: Array<Record<string, any>>,
+  env: NdovPlanCancellationEnv,
+): Promise<{
+  rows: Array<Record<string, any>>;
+  crosswalk: {
+    generatedAt: string | null;
+    requestedShardCount: number;
+    loadedShardCount: number;
+    partial: boolean;
+  };
+}>;
