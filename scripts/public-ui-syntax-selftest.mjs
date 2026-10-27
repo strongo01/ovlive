@@ -1142,6 +1142,11 @@ assert.ok(workerSource.includes("function normalizeTransitousLineSearchStops(") 
   workerSource.includes('stopDataSource: "Transitous-dienstregeling"'),
   "OpenOV fallback search results must include timetable stops without falsely labelling them as confirmed realtime predictions");
 
+const destinationHelperStart = html.indexOf("function firstNonEmptyDestinationText(");
+const destinationHelperEnd = html.indexOf("\nfunction stopTimeDestination(", destinationHelperStart);
+assert.ok(destinationHelperStart >= 0 && destinationHelperEnd > destinationHelperStart,
+  "the exact destination normalizer used by line-search cards must remain testable");
+
 const lineCardStart = html.indexOf("function lineSearchTimestampMs(value) {");
 const lineCardEnd = html.indexOf("\nfunction displayLineSearchResults(", lineCardStart);
 assert.ok(lineCardStart >= 0 && lineCardEnd > lineCardStart,
@@ -1152,6 +1157,7 @@ const FixedDate = class extends Date {
 };
 const lineCardContext = { esc: value => String(value ?? ""), Date: FixedDate };
 new vm.Script(
+  html.slice(destinationHelperStart, destinationHelperEnd).trim() + "\n" +
   html.slice(lineCardStart, lineCardEnd).trim() +
   "\nthis.renderLineSearchCard = renderLineSearchCard;" +
   "\nthis.lineSearchStopEta = lineSearchStopEta;" +
