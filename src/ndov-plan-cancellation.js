@@ -1641,7 +1641,7 @@ async function writePersistentNdovKv78StopNames(env, entries) {
   }
 }
 
-export async function resolveNdovKv78StopNames(rows, env) {{
+export async function resolveNdovKv78StopNames(rows, env) {
   const sourceRows = Array.isArray(rows) ? rows : [];
   const cacheKeyForRow = (row) => {
     const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
