@@ -4454,6 +4454,25 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               const longitude = Number.isFinite(numericLongitude) && numericLongitude >= -180 && numericLongitude <= 180
                 ? numericLongitude : null;
               const routeAgencyCode = String(routeKey.split("_")[0] ?? "").trim() || null;
+              // The Actuals map key can use the generic NL namespace, which the
+              // journey detail endpoint does not resolve. Reconstruct its documented
+              // resolvable key from the detail route's agency + service + line + trip.
+              const localServiceLevelCode = String(actual.LocalServiceLevelCode ?? "").trim() ||
+                String(actual.OperationDate ?? "").replace(/\\D/g, "");
+              const journeyPlanningNumber = String(
+                actual.LinePlanningNumber ?? meta.LinePlanningNumber ?? ""
+              ).trim();
+              const fortifyOrderNumber = String(actual.FortifyOrderNumber ?? "0").trim();
+              const journeyKey = routeAgencyCode && localServiceLevelCode &&
+                journeyPlanningNumber && journeyNumber
+                ? [
+                    routeAgencyCode,
+                    localServiceLevelCode,
+                    journeyPlanningNumber,
+                    journeyNumber,
+                    fortifyOrderNumber || "0"
+                  ].join("_")
+                : tripId;
               const permalink = operatorCode && vehicleNumber &&
                 /^[A-Za-z0-9_-]+$/.test(operatorCode) && /^[A-Za-z0-9_-]+$/.test(vehicleNumber)
                   ? "https://ovzoeker.nl/voertuig/" + operatorCode + ":" + vehicleNumber
@@ -4503,16 +4522,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 actual.DataOwnerCode ?? meta.DataOwnerCode ?? "",
                 journeyNumber || actualId
               ].join("|");
-              ovapiCandidates.push({ unique, journeyKey: tripId, row });
+              ovapiCandidates.push({ unique, journeyKey, row });
             }
           }
         }
       }
 
-      // The OVAPI journey endpoint documents one journey ID per request.
-      // A comma-separated batch can fail as a whole (HTTP 404), hiding valid
-      // journeys too. Fetch individually with bounded concurrency so one bad
-      // or expired journey ID cannot erase the other stop timelines.
+      // OVAPI's documented journey key is
+      // {DataOwnerCode}_{LocalServiceLevelCode}_{LinePlanningNumber}_{JourneyNumber}_{FortifyOrderNumber}.
+      // Query the corrected operator-prefixed keys in one request first (the API's
+      // recommended pattern); if the batch fails or omits an item, retry only the
+      // missing keys individually so one unavailable journey cannot hide the rest.
       const deduplicatedCandidates = new Map<string, typeof ovapiCandidates[number]>();
       for (const candidate of ovapiCandidates) {
         const existing = deduplicatedCandidates.get(candidate.unique);
@@ -4527,10 +4547,38 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         .map((candidate) => candidate.journeyKey)
         .filter((key) => /^[A-Za-z0-9_-]+$/.test(key)))];
       const journeysByKey: Record<string, any> = {};
+      let batchJourneyError = "";
+      if (journeyKeys.length) {
+        try {
+          const journeysResponse = await fetch("http://v0.ovapi.nl/journey/" + journeyKeys.join(","), {
+            headers: {
+              "accept": "application/json",
+              "user-agent": env.APP_NAME + "/" + env.APP_VERSION + " (" + env.APP_CONTACT + ")"
+            },
+            signal: AbortSignal.timeout(10000),
+            cf: { cacheEverything: true, cacheTtl: 10 }
+          });
+          if (!journeysResponse.ok) {
+            batchJourneyError = "HTTP " + journeysResponse.status;
+          } else {
+            const payload = await journeysResponse.json() as Record<string, any>;
+            for (const key of journeyKeys) {
+              const journey = payload[key] ??
+                (journeyKeys.length === 1 && payload && typeof payload === "object" && payload.Stops
+                  ? payload
+                  : null);
+              if (journey && typeof journey === "object") journeysByKey[key] = journey;
+            }
+          }
+        } catch (error) {
+          batchJourneyError = error instanceof Error ? error.message : "onbekende fout";
+        }
+      }
+      const missingJourneyKeys = journeyKeys.filter((key) => !journeysByKey[key]);
       let journeyLookupFailures = 0;
       const JOURNEY_LOOKUP_CONCURRENCY = 4;
-      for (let index = 0; index < journeyKeys.length; index += JOURNEY_LOOKUP_CONCURRENCY) {
-        const batch = journeyKeys.slice(index, index + JOURNEY_LOOKUP_CONCURRENCY);
+      for (let index = 0; index < missingJourneyKeys.length; index += JOURNEY_LOOKUP_CONCURRENCY) {
+        const batch = missingJourneyKeys.slice(index, index + JOURNEY_LOOKUP_CONCURRENCY);
         const batchResults = await Promise.all(batch.map(async (key) => {
           try {
             const journeyResponse = await fetch("http://v0.ovapi.nl/journey/" + encodeURIComponent(key), {
@@ -4542,19 +4590,15 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               cf: { cacheEverything: true, cacheTtl: 10 }
             });
             if (!journeyResponse.ok) {
-              return { key, journey: null, error: "HTTP " + journeyResponse.status };
+              return { key, journey: null };
             }
             const payload = await journeyResponse.json() as Record<string, any>;
             const journey = payload[key] ??
               (payload && typeof payload === "object" && payload.Stops ? payload : null) ??
               null;
-            return { key, journey, error: journey ? "" : "geen ritobject in respons" };
-          } catch (error) {
-            return {
-              key,
-              journey: null,
-              error: error instanceof Error ? error.message : "onbekende fout"
-            };
+            return { key, journey: journey && typeof journey === "object" ? journey : null };
+          } catch {
+            return { key, journey: null };
           }
         }));
         for (const result of batchResults) {
@@ -4566,13 +4610,15 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         }
       }
       if (journeyLookupFailures > 0) {
-        if (Object.keys(journeysByKey).length === 0) {
-          warnings.push("OVAPI-ritdetails niet beschikbaar voor " + journeyLookupFailures +
-            " rit(ten); de individuele journey-aanvragen leverden geen bruikbare respons op.");
-        } else {
-          warnings.push("OVAPI-ritdetails gedeeltelijk beschikbaar: " + Object.keys(journeysByKey).length +
+        const fetched = Object.keys(journeysByKey).length;
+        warnings.push(fetched === 0
+          ? "OVAPI-ritdetails niet beschikbaar voor " + journeyLookupFailures +
+            " rit(ten); controleer de rit-ID's en beschikbaarheid van de bron."
+          : "OVAPI-ritdetails gedeeltelijk beschikbaar: " + fetched +
             " van " + journeyKeys.length + " ritten opgehaald.");
-        }
+      } else if (batchJourneyError && missingJourneyKeys.length === 0) {
+        warnings.push("OVAPI-batchaanvraag voor ritdetails gaf " + batchJourneyError +
+          "; individuele terugvalaanvragen leverden de gevraagde ritten wel.");
       }
 
       for (const candidate of selectedCandidates) {
