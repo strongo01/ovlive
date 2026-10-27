@@ -116,6 +116,21 @@ export function parseKv78Payload(text, envelope = '') {
       showCancelledStop: record.ShowCancelledStop ?? null,
       messageType: record.MessageType,
       messageContent: record.MessageContent,
+      // Preserve optional source-provided display/vehicle fields when present.
+      // Names are later resolved only through the official PSA/CHB crosswalk.
+      destinationCode: record.DestinationCode ?? null,
+      destinationName: record.DestinationName ?? record.DestinationName50 ?? null,
+      linePublicNumber: record.LinePublicNumber ?? null,
+      lineName: record.LineName ?? null,
+      transportType: record.TransportType ?? null,
+      operatorCode: record.OperatorCode ?? record.DataOwnerCode ?? null,
+      operatorName: record.OperatorName ?? null,
+      blockCode: record.BlockCode ?? null,
+      numberOfCoaches: record.NumberOfCoaches ?? null,
+      timingPointName: record.TimingPointName ?? null,
+      timingPointTown: record.TimingPointTown ?? null,
+      timingPointCode: record.TimingPointCode ?? null,
+      stopAreaCode: record.StopAreaCode ?? null,
     });
   }
   return rows;
