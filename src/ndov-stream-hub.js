@@ -1628,6 +1628,7 @@ export class NdovFeedHub extends DurableObject {
           KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
         );
         if (!scheduleInfo.relevant) {
+          this.removeKv78RowFromIndexes(state, key);
           state.rows.delete(key);
           state.rowCacheStats.schedulePrunedRows += 1;
         }
