@@ -1459,7 +1459,7 @@ export class NdovFeedHub extends DurableObject {
           : { mode: 'vehicle', vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
         returnedCount: returnedRows.length,
         truncated,
-        staleCount: rows.length - fresh.length,
+        staleCount: candidateRows.length - fresh.length,
         rows: returnedRows,
       }, { headers: { 'cache-control': 'no-store' } });
     }
