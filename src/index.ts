@@ -4548,11 +4548,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const decodeLimit = heavyKind && !hasRouteOrTripFilter
       ? Math.min(limit, 300)
       : limit;
+    // Exact trip/route requests must search the whole compact protobuf stream.
+    // A 1,600-entity cap can silently miss a valid trip later in the national
+    // feed and leave its stop progression stale or empty. The selective decoder
+    // only materializes matches, so reserve scan caps for unfiltered samples.
     const maxScannedEntities = heavyKind && !hasRouteOrTripFilter
       ? Math.min(1200, Math.max(350, decodeLimit * 2))
-      : heavyKind
-        ? 1600
-        : undefined;
+      : undefined;
 
     const requestFilters: OpenovFeedFilters | undefined =
       kind === "vehiclePositions" || kind === "tripUpdates" || kind === "trainUpdates"
