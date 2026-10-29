@@ -181,7 +181,7 @@ assert.match(
 );
 assert.match(
   worker,
-  /decodeOpenovTripUpdates\(bytes, normalizedTripUpdateFilters\)/,
+  /decodeOpenovTripUpdates\(\s*bytes,\s*normalizedTripUpdateFilters,\s*boundedTripOptions\s*\)/,
   "De planner moet de selectieve protobuf-decoder gebruiken voor ritupdates"
 );
 assert.match(
