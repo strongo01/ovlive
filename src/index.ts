@@ -5499,6 +5499,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     let lastUpstreamDetail = "";
     const candidateDiagnostics: Array<{ tripId: string; status: number; detail: string }> = [];
     let sawSuccessfulReplyWithoutGeometry = false;
+    let transitStopsForExactTrip: any[] = [];
 
     const extractTransitShapes = (itinerary: any) => {
       const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
@@ -5520,6 +5521,65 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           mode: String(leg?.mode ?? ""),
           legGeometry: leg.legGeometry
         }));
+    };
+
+    const extractTransitStops = (itinerary: any) => {
+      const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
+      const stops: any[] = [];
+
+      for (const leg of legs) {
+        const mode = String(leg?.mode ?? "").toUpperCase();
+        if (mode === "WALK" || mode === "FOOT" || !String(leg?.tripId ?? "").trim()) continue;
+
+        const places = [
+          leg?.from,
+          ...(Array.isArray(leg?.intermediateStops) ? leg.intermediateStops : []),
+          leg?.to,
+        ];
+        for (const place of places) {
+          if (!place || typeof place !== "object") continue;
+          const name = String(place.name ?? place.displayName ?? "").trim();
+          if (!name) continue;
+
+          const stopId = String(place.stopId ?? "").trim() || null;
+          const stopCode = String(place.stopCode ?? "").trim() || null;
+          const numberValue = (value: unknown) => {
+            if (value === null || value === undefined || String(value).trim() === "") return null;
+            const number = Number(value);
+            return Number.isFinite(number) ? number : null;
+          };
+          const stop = {
+            stopId,
+            stopCode,
+            name,
+            latitude: numberValue(place.lat),
+            longitude: numberValue(place.lon),
+            scheduledArrival: String(place.scheduledArrival ?? place.arrival ?? "").trim() || null,
+            scheduledDeparture: String(place.scheduledDeparture ?? place.departure ?? "").trim() || null,
+            timetableOnly: true,
+            source: "Transitous exact-trip timetable",
+          };
+          const previous = stops[stops.length - 1];
+          const sameStop = Boolean(
+            previous && stopId && previous.stopId &&
+            String(previous.stopId).trim().toLowerCase() === stopId.toLowerCase()
+          );
+          if (sameStop) {
+            stops[stops.length - 1] = {
+              ...previous,
+              stopCode: previous.stopCode ?? stopCode,
+              scheduledArrival: previous.scheduledArrival ?? stop.scheduledArrival,
+              scheduledDeparture: stop.scheduledDeparture ?? previous.scheduledDeparture,
+              latitude: previous.latitude ?? stop.latitude,
+              longitude: previous.longitude ?? stop.longitude,
+            };
+          } else {
+            stops.push(stop);
+          }
+          if (stops.length >= 200) return stops;
+        }
+      }
+      return stops;
     };
 
     try {
@@ -5573,12 +5633,18 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           if (candidateResponse.ok) {
             const itinerary: any = await candidateResponse.json().catch(() => null);
             const shapes = extractTransitShapes(itinerary);
+            const exactStops = extractTransitStops(itinerary);
+            if (exactStops.length > transitStopsForExactTrip.length) {
+              transitStopsForExactTrip = exactStops;
+            }
             if (shapes.length > 0) {
               // This is the first alias that actually yielded drawable geometry.
               return json({
                 ok: true,
                 requestedTripId: tripId,
                 resolvedTripId: candidateTripId,
+                routeSource: "Transitous MOTIS v6 /trip",
+                stops: exactStops,
                 legs: shapes
               }, 200, {
                 ...headers,
@@ -5640,6 +5706,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           requestedTripId: tripId,
           resolvedTripId: tripId,
           routeSource: "OpenOV GTFS-static (exact trip-ID + route-ID)",
+          stops: transitStopsForExactTrip,
           legs: [staticShape]
         }, 200, {
           ...headers,
@@ -5653,6 +5720,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           ok: true,
           requestedTripId: tripId,
           resolvedTripId: null,
+          stops: transitStopsForExactTrip,
           legs: [],
           routeWarning: "Transitous accepteerde de rit-ID, maar leverde voor geen van de exacte ID-schrijfwijzen routegeometrie terug. Er is ook geen exacte ritvorm gevonden in de lokale OpenOV-GTFS-index."
         }, 200, {
