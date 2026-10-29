@@ -5540,24 +5540,33 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         ];
         for (const place of places) {
           if (!place || typeof place !== "object") continue;
-          const name = String(place.name ?? place.displayName ?? "").trim();
-          if (!name) continue;
-
+          const officialName = String(place.name ?? place.displayName ?? "").trim();
           const stopId = String(place.stopId ?? "").trim() || null;
           const stopCode = String(place.stopCode ?? "").trim() || null;
+          const scheduledArrival = String(place.scheduledArrival ?? "").trim() || null;
+          const scheduledDeparture = String(place.scheduledDeparture ?? "").trim() || null;
           const numberValue = (value: unknown) => {
             if (value === null || value === undefined || String(value).trim() === "") return null;
             const number = Number(value);
             return Number.isFinite(number) ? number : null;
           };
+          const latitude = numberValue(place.lat);
+          const longitude = numberValue(place.lon);
+          // Never drop an intermediate stop just because this provider omitted
+          // its public name; keep it visible as explicitly unidentified instead.
+          if (!officialName && !stopId && !stopCode &&
+              !scheduledArrival && !scheduledDeparture &&
+              latitude === null && longitude === null) continue;
+          const name = officialName || (stopCode ? "Haltecode " + stopCode
+            : stopId ? "Halte " + stopId : "Halte onbekend");
           const stop = {
             stopId,
             stopCode,
             name,
-            latitude: numberValue(place.lat),
-            longitude: numberValue(place.lon),
-            scheduledArrival: String(place.scheduledArrival ?? "").trim() || null,
-            scheduledDeparture: String(place.scheduledDeparture ?? "").trim() || null,
+            latitude,
+            longitude,
+            scheduledArrival,
+            scheduledDeparture,
             timetableOnly: true,
             source: "Transitous exact-trip timetable",
           };
@@ -5567,8 +5576,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             String(previous.stopId).trim().toLowerCase() === stopId.toLowerCase()
           );
           if (sameStop) {
+            const previousName = String(previous.name ?? "").trim();
+            const previousHasPublicName = previousName !== "" &&
+              !previousName.toLowerCase().startsWith("haltecode ") &&
+              !previousName.toLowerCase().startsWith("halte ") &&
+              previousName.toLowerCase() !== "halte onbekend";
             stops[stops.length - 1] = {
               ...previous,
+              name: previousHasPublicName ? previous.name : stop.name,
               stopCode: previous.stopCode ?? stopCode,
               scheduledArrival: previous.scheduledArrival ?? stop.scheduledArrival,
               scheduledDeparture: stop.scheduledDeparture ?? previous.scheduledDeparture,
