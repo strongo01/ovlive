@@ -364,19 +364,26 @@ export class NdovFeedHub extends DurableObject {
       state.rows = new Map(chunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
     } else state.rows = new Map(savedRows ?? []);
 
-    // Re-key legacy snapshots by canonical trip + stop identity. This collapses
-    // duplicate rows that differed only by LocalServiceLevelCode without losing
-    // any fields needed for exact trip/stop/time matching.
+    // Re-key legacy snapshots by canonical trip + stop identity. Build the
+    // ephemeral indexes during the same pass, rather than scanning 30k rows a
+    // second time during a cold Durable Object startup (Free CPU limit: 10 ms).
     if (stream === 'kv78') {
       const canonicalRows = new Map();
+      state.rowsByIdentity.clear();
+      state.rowsByOwnerDateLine.clear();
+      state.rowIdentityByCacheKey.clear();
+      state.rowOwnerDateLineByCacheKey.clear();
       for (const [savedKey, row] of state.rows.entries()) {
         const cacheKey = kv78RowCacheKey(row) ?? String(savedKey);
-        if (canonicalRows.has(cacheKey)) state.rowCacheStats.duplicateRowsCollapsed += 1;
+        if (canonicalRows.has(cacheKey)) {
+          state.rowCacheStats.duplicateRowsCollapsed += 1;
+          this.removeKv78RowFromIndexes(state, cacheKey);
+        }
         canonicalRows.delete(cacheKey);
         canonicalRows.set(cacheKey, row);
+        this.addKv78RowToIndexes(state, cacheKey, row);
       }
       state.rows = canonicalRows;
-      this.rebuildKv78RowIndexes(state);
     }
 
     state.events = new Map();
@@ -720,16 +727,6 @@ export class NdovFeedHub extends DurableObject {
       keys?.delete(cacheKey);
       if (keys?.size === 0) state.rowsByOwnerDateLine.delete(ownerDateLine);
       state.rowOwnerDateLineByCacheKey.delete(cacheKey);
-    }
-  }
-
-  rebuildKv78RowIndexes(state) {
-    state.rowsByIdentity.clear();
-    state.rowsByOwnerDateLine.clear();
-    state.rowIdentityByCacheKey.clear();
-    state.rowOwnerDateLineByCacheKey.clear();
-    for (const [cacheKey, row] of state.rows.entries()) {
-      this.addKv78RowToIndexes(state, cacheKey, row);
     }
   }
 
