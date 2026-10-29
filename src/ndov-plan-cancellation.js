@@ -11,6 +11,8 @@ const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
 // Share the Free Worker subrequest budget with Transitous, realtime feeds, route
 // shards, service calendars and Durable Object calls. Partial maps stay unconfirmed.
 const MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 2;
+// The dedicated selected-trip details endpoint can spend a slightly larger, throttled budget for stop names.
+const MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST = 4;
 const MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 2;
 const AMSTERDAM_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Amsterdam",
@@ -1276,7 +1278,7 @@ function stopAssignmentShardNumber(key, shardCount) {
   return hash % shardCount;
 }
 
-async function getStopAssignmentIndex(env, keys = []) {
+async function getStopAssignmentIndex(env, keys = [], options = {}) {
   const validKeys = [...new Set((Array.isArray(keys) ? keys : [])
     .filter((key) => typeof key === "string" && key.includes("|")))];
   if (!validKeys.length) {
@@ -1304,10 +1306,14 @@ async function getStopAssignmentIndex(env, keys = []) {
   const shardNumbers = [...new Set(validKeys.map((key) => stopAssignmentShardNumber(key, shardCount)))];
   // The public plan endpoint shares its subrequest budget with route shards and live feeds.
   // Unloaded assignment records remain explicitly unverified instead of exhausting the Worker.
+  const requestedBudget = Number(options?.maxNewShards);
+  const maxNewShards = Number.isInteger(requestedBudget)
+    ? Math.max(0, Math.min(MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST, requestedBudget))
+    : MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST;
   const selectedShardNumbers = selectCachedCrosswalkShardNumbers(
     shardNumbers,
     stopAssignmentShardCache,
-    MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST
+    maxNewShards
   );
   const assignments = Object.create(null);
   await Promise.all(selectedShardNumbers.map(async (shardNumber) => {
@@ -1703,7 +1709,9 @@ export async function resolveNdovKv78StopNames(rows, env, options = {}) {
   };
   const persistentUpdates = [];
   if (unresolvedAssetKeys.size && allowAssetReads) {
-    index = await getStopAssignmentIndex(env, [...unresolvedAssetKeys]);
+    index = await getStopAssignmentIndex(env, [...unresolvedAssetKeys], {
+      maxNewShards: MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST,
+    });
     const loadedShards = new Set(index.loadedShardNumbers ?? []);
 
     for (const assetKey of unresolvedAssetKeys) {
