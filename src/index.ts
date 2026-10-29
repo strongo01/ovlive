@@ -3303,10 +3303,10 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
 
 const LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000;
 const LIVE_MAP_OPENOV_CACHE_TTL_SECONDS = 15;
-const LIVE_MAP_OPENOV_MAX_POSITIONS = 2000;
-// The Workers Free plan allows only 10 ms CPU per request. Bound the scan of
-// the national vehicle feed when the requested in-country sample is not found.
-const LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES = 2500;
+// Keep this response deliberately smaller: JSON serialization and protobuf
+// traversal both count against the Free Workers CPU budget.
+const LIVE_MAP_OPENOV_MAX_POSITIONS = 400;
+const LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES = 900;
 
 type LiveMapOpenovCachedBody = {
   body: string;
@@ -5784,7 +5784,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         // OpenOV/NDOV enrichment loads route shards for many bus/tram legs.
         await prepareNsTrainIdentities(planData, env);
         await enrichNsTrainPlan(planData, env);
-        planData = await enrichTransitousPlan(planData);
+        // Vehicle positions are served by the dedicated, cached live-map
+        // endpoint. Do not decode a second nationwide position feed in the same
+        // route-planning request; the separate realtime refresh also omits it.
+        planData = await enrichTransitousPlan(planData, { includeVehiclePositions: false });
         await applyNdovCancellationsToPlan(planData, env, {
           includeIdentityDiagnostics: url.searchParams.get("ndovIdentityDiagnostics") === "1",
         });
