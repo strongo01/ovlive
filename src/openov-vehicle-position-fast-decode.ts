@@ -27,6 +27,10 @@ export interface DecodedOpenovVehicleFeed {
   /** Number of VehiclePosition messages seen, before optional trip filtering. */
   sourceEntityCount: number;
   entities: DecodedOpenovVehiclePosition[];
+  /** Present for bounded scans; true means later feed entities were intentionally skipped. */
+  truncated?: boolean;
+  /** Present for bounded scans; counts FeedMessage.entity records inspected. */
+  scannedEntityCount?: number;
 }
 
 export interface OpenovVehiclePositionFilters {
@@ -34,6 +38,17 @@ export interface OpenovVehiclePositionFilters {
   tripIds?: ReadonlySet<string>;
   /** Normalized GTFS route IDs; "nl-OpenOV_" prefixes are not required. */
   routeIds?: ReadonlySet<string>;
+  /** Stop once this many matching vehicles have been materialized. */
+  maxResults?: number;
+  /** Hard CPU guard: stop after inspecting this many FeedMessage.entity records. */
+  maxScannedEntities?: number;
+  /** Optional geographic window; out-of-window positions are skipped before trip/vehicle details are decoded. */
+  bounds?: {
+    minLatitude: number;
+    maxLatitude: number;
+    minLongitude: number;
+    maxLongitude: number;
+  };
 }
 
 function normalizedFilterId(value: unknown): string {
@@ -293,33 +308,41 @@ function decodeVehiclePosition(
   end: number,
   filters?: OpenovVehiclePositionFilters
 ): Omit<DecodedOpenovVehiclePosition, "entityId"> | null {
-  let trip: ReturnType<typeof decodeTripDescriptor> | undefined;
-  let positionField: Field | undefined;
+  let tripField: Field | undefined;
+  let position: { latitude?: number; longitude?: number } | undefined;
   let stopIdField: Field | undefined;
   let vehicleField: Field | undefined;
   // VehiclePosition scalar/string defaults are 0 and "" in protobufjs.
   let timestamp = 0;
   let offset = start;
 
-  // Keep the raw nested-field boundaries until we know whether this exact trip
-  // is requested. For map requests, thousands of unrelated coordinates and
-  // vehicle descriptors need not be decoded into temporary JS objects.
+  // Keep descriptor boundaries rather than decoding strings immediately. On a
+  // map request, reject out-of-area coordinates before doing the more expensive
+  // trip/vehicle string decoding, and stop a bounded scan without reading the
+  // rest of a large national feed.
   while (offset < end) {
     const field = readField(bytes, offset, end);
     if (field.wireType === 2) {
       if (field.number === 1) {
-        // Apply the exact filter before materializing the full descriptor. For
-        // the thousands of unrelated vehicles we only need to inspect tripId
-        // (and routeId when needed), not startTime/date/direction metadata.
         if (!matchesVehiclePositionDescriptor(
           bytes,
           field.contentStart,
           field.contentEnd,
           filters
         )) return null;
-        trip = decodeTripDescriptor(bytes, field.contentStart, field.contentEnd);
-      } else if (field.number === 2) positionField = field;
-      else if (field.number === 7) stopIdField = field;
+        tripField = field;
+      } else if (field.number === 2) {
+        position = decodePosition(bytes, field.contentStart, field.contentEnd);
+        const bounds = filters?.bounds;
+        if (bounds && (
+          !Number.isFinite(position.latitude) ||
+          !Number.isFinite(position.longitude) ||
+          Number(position.latitude) < bounds.minLatitude ||
+          Number(position.latitude) > bounds.maxLatitude ||
+          Number(position.longitude) < bounds.minLongitude ||
+          Number(position.longitude) > bounds.maxLongitude
+        )) return null;
+      } else if (field.number === 7) stopIdField = field;
       else if (field.number === 8) vehicleField = field;
     } else if (field.number === 5 && field.wireType === 0) {
       // VehiclePosition.timestamp = field 5, uint64 epoch seconds.
@@ -328,11 +351,12 @@ function decodeVehiclePosition(
     offset = field.nextOffset;
   }
 
-  if (!matchesVehiclePositionFilters(trip, filters)) return null;
-
-  const position = positionField
-    ? decodePosition(bytes, positionField.contentStart, positionField.contentEnd)
+  const trip = tripField
+    ? decodeTripDescriptor(bytes, tripField.contentStart, tripField.contentEnd)
     : undefined;
+  if (!matchesVehiclePositionFilters(trip, filters)) return null;
+  if (filters?.bounds && !position) return null;
+
   const vehicle = vehicleField
     ? decodeVehicleDescriptor(bytes, vehicleField.contentStart, vehicleField.contentEnd)
     : undefined;
@@ -389,7 +413,16 @@ export function decodeOpenovVehiclePositions(
 ): DecodedOpenovVehicleFeed {
   let feedTimestamp: number | undefined;
   let sourceEntityCount = 0;
+  let scannedEntityCount = 0;
+  let truncated = false;
   const entities: DecodedOpenovVehiclePosition[] = [];
+  const maxResults = Number.isInteger(filters?.maxResults) && Number(filters?.maxResults) > 0
+    ? Number(filters?.maxResults)
+    : undefined;
+  const maxScannedEntities = Number.isInteger(filters?.maxScannedEntities) &&
+      Number(filters?.maxScannedEntities) > 0
+    ? Number(filters?.maxScannedEntities)
+    : undefined;
   let offset = 0;
 
   while (offset < bytes.byteLength) {
@@ -398,18 +431,37 @@ export function decodeOpenovVehiclePositions(
     if (field.number === 1 && field.wireType === 2) {
       feedTimestamp = decodeHeaderTimestamp(bytes, field.contentStart, field.contentEnd);
     } else if (field.number === 2 && field.wireType === 2) {
-      // FeedMessage.entity = field 2. Decode the message only far enough to
-      // find its VehiclePosition payload and skip other entity variants.
+      // Never scan the full national feed when the caller requests a bounded
+      // preview. maxScannedEntities is an explicit CPU guard, not a feed count.
+      if (maxScannedEntities !== undefined && scannedEntityCount >= maxScannedEntities) {
+        truncated = true;
+        break;
+      }
+      scannedEntityCount += 1;
       const decoded = decodeFeedEntity(bytes, field.contentStart, field.contentEnd, filters);
       if (decoded.isVehiclePosition) sourceEntityCount += 1;
       const entity = decoded.entity;
       if (entity && (entity.vehicleId || entity.tripId || entity.latitude != null)) {
         entities.push(entity);
+        if (maxResults !== undefined && entities.length >= maxResults) {
+          truncated = field.nextOffset < bytes.byteLength;
+          offset = field.nextOffset;
+          break;
+        }
       }
     }
 
     offset = field.nextOffset;
   }
 
+  if (maxResults !== undefined || maxScannedEntities !== undefined) {
+    return {
+      feedTimestamp,
+      sourceEntityCount,
+      entities,
+      truncated,
+      scannedEntityCount
+    };
+  }
   return { feedTimestamp, sourceEntityCount, entities };
 }
