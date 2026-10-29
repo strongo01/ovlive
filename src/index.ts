@@ -217,6 +217,80 @@ interface OpenovRouteMetadataEntry {
 
 let openovLineSearchRouteMetadataPromise: Promise<Record<string, OpenovRouteMetadataEntry>> | null = null;
 
+let openovLineSearchRouteMetadataIndexSource: Record<string, OpenovRouteMetadataEntry> | null = null;
+let openovLineSearchRouteMetadataIndex = new Map<string, OpenovRouteMetadataEntry[]>();
+
+function openovRoutesForPublicLine(
+  routeMetadata: Record<string, OpenovRouteMetadataEntry>,
+  line: unknown
+): OpenovRouteMetadataEntry[] {
+  const wantedLine = String(line ?? "").trim().toLocaleLowerCase("nl-NL");
+  if (!wantedLine) return [];
+
+  // Build this once per loaded metadata object. The previous implementation
+  // called Object.values(...).filter(...) for every live Actual row, multiplying
+  // thousands of route scans by hundreds of vehicles on one line search.
+  if (openovLineSearchRouteMetadataIndexSource !== routeMetadata) {
+    const index = new Map<string, OpenovRouteMetadataEntry[]>();
+    for (const route of Object.values(routeMetadata)) {
+      const key = String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL");
+      if (!key) continue;
+      const bucket = index.get(key);
+      if (bucket) bucket.push(route);
+      else index.set(key, [route]);
+    }
+    openovLineSearchRouteMetadataIndexSource = routeMetadata;
+    openovLineSearchRouteMetadataIndex = index;
+  }
+
+  return openovLineSearchRouteMetadataIndex.get(wantedLine) ?? [];
+}
+
+const OVAPI_LINE_DIRECTORY_CACHE_TTL_MS = 60_000;
+let ovapiLineDirectoryCache: {
+  expiresAtMs: number;
+  data: Record<string, any>;
+} | null = null;
+let ovapiLineDirectoryInflight: Promise<Record<string, any>> | null = null;
+
+async function getOvapiLineDirectory(env: Env): Promise<Record<string, any>> {
+  const now = Date.now();
+  if (ovapiLineDirectoryCache && ovapiLineDirectoryCache.expiresAtMs > now) {
+    return ovapiLineDirectoryCache.data;
+  }
+  if (ovapiLineDirectoryInflight) return ovapiLineDirectoryInflight;
+
+  const task = (async () => {
+    const response = await fetch("http://v0.ovapi.nl/line/", {
+      headers: {
+        "accept": "application/json",
+        "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+      },
+      signal: AbortSignal.timeout(9000),
+      cf: { cacheEverything: true, cacheTtl: 60 }
+    });
+    if (!response.ok) {
+      throw new Error("OVAPI gaf HTTP " + response.status + " terug voor de lijnenlijst.");
+    }
+    const data = await response.json() as Record<string, any>;
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("OVAPI gaf geen geldige lijnenlijst terug.");
+    }
+    ovapiLineDirectoryCache = {
+      expiresAtMs: Date.now() + OVAPI_LINE_DIRECTORY_CACHE_TTL_MS,
+      data
+    };
+    return data;
+  })();
+
+  ovapiLineDirectoryInflight = task;
+  try {
+    return await task;
+  } finally {
+    if (ovapiLineDirectoryInflight === task) ovapiLineDirectoryInflight = null;
+  }
+}
+
 async function getOpenovLineSearchRouteMetadata(
   env: Env
 ): Promise<Record<string, OpenovRouteMetadataEntry>> {
@@ -275,9 +349,7 @@ function openovAgencyNameForLine(
   const wantedLine = String(line ?? "").trim().toLocaleLowerCase("nl-NL");
   if (!wantedLine) return "";
   const wantedOperator = String(operatorCode ?? "").trim().toLocaleLowerCase("nl-NL");
-  const matches = Object.values(routeMetadata).filter((route) =>
-    String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL") === wantedLine
-  );
+  const matches = openovRoutesForPublicLine(routeMetadata, wantedLine);
   const operatorMatches = wantedOperator
     ? matches.filter((route) =>
         String(route?.agencyId ?? "").trim().toLocaleLowerCase("nl-NL") === wantedOperator
@@ -4865,16 +4937,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // OVAPI provides public line names/destinations and live journey passes.
     // Ask the API for details only for the exact public line number entered.
     try {
-      const directoryResponse = await fetch("http://v0.ovapi.nl/line/", {
-        headers: {
-          "accept": "application/json",
-          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
-        },
-        signal: AbortSignal.timeout(9000),
-        cf: { cacheEverything: true, cacheTtl: 60 }
-      });
-      if (!directoryResponse.ok) throw new Error("OVAPI gaf HTTP " + directoryResponse.status + " terug voor de lijnenlijst.");
-      const directory = await directoryResponse.json() as Record<string, any>;
+      const directory = await getOvapiLineDirectory(env);
       ovapiAvailable = true;
       const matchingLines = Object.entries(directory).filter(([, value]) => {
         const meta = value?.Line && typeof value.Line === "object" ? value.Line : value;
@@ -4890,10 +4953,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         // agencies, and try generic NL keys last.
         const matchingAgencyIds = [...new Set([
           requestedAgencyId,
-          ...Object.values(routeMetadata)
-            .filter((route) =>
-              String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL") === needle
-            )
+          ...openovRoutesForPublicLine(routeMetadata, needle)
             .map((route) => String(route?.agencyId ?? "").trim())
         ]
           .map((value) => value.trim().toUpperCase())
@@ -4920,7 +4980,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               key.toLocaleUpperCase("en-US").startsWith(requestedAgencyPrefix + "_")
             )
           : allRouteKeys;
-        const MAX_OVAPI_LINE_SEARCH_ROUTES = 160;
+        const MAX_OVAPI_LINE_SEARCH_ROUTES = requestedAgencyPrefix ? 80 : 40;
         const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;
         const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;
         const routeKeys = candidateRouteKeys.slice(0, MAX_OVAPI_LINE_SEARCH_ROUTES);
