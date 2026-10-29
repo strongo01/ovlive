@@ -1641,8 +1641,12 @@ async function writePersistentNdovKv78StopNames(env, entries) {
   }
 }
 
-export async function resolveNdovKv78StopNames(rows, env) {
+export async function resolveNdovKv78StopNames(rows, env, options = {}) {
   const sourceRows = Array.isArray(rows) ? rows : [];
+  // The direct trip-detail endpoint prioritizes timely KV78 predictions. It may
+  // reuse memory/DO-cached official names, but must not parse large static PSA/CHB
+  // crosswalk shards during every cold Worker invocation (10 ms Free CPU budget).
+  const allowAssetReads = options?.allowAssetReads !== false;
   const cacheKeyForRow = (row) => {
     const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
     const stopCode = String(row?.userStopCode ?? "").trim();
@@ -1698,7 +1702,7 @@ export async function resolveNdovKv78StopNames(rows, env) {
     shardCount: 0,
   };
   const persistentUpdates = [];
-  if (unresolvedAssetKeys.size) {
+  if (unresolvedAssetKeys.size && allowAssetReads) {
     index = await getStopAssignmentIndex(env, [...unresolvedAssetKeys]);
     const loadedShards = new Set(index.loadedShardNumbers ?? []);
 
@@ -1757,6 +1761,10 @@ export async function resolveNdovKv78StopNames(rows, env) {
         });
       }
     }
+  } else if (unresolvedAssetKeys.size) {
+    // Leave these names unknown for this response; do not guess from an unrelated
+    // route. A subsequent background/plan enrichment may fill the official cache.
+    index.partial = true;
   }
 
   const persistentWrite = await writePersistentNdovKv78StopNames(env, persistentUpdates);
