@@ -116,15 +116,21 @@ assert.match(
   /const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 12_000;/,
   "De voertuigposities voor de live kaart moeten kort gecachet blijven"
 );
-assert.match(
-  worker,
-  /const LIVE_MAP_OPENOV_MAX_POSITIONS = 400;/,
-  "De live kaart moet het aantal ge-serialiseerde voertuigposities begrenzen"
+const liveMapHandlerStart = worker.indexOf("async function handleLiveMapOpenovApi");
+const liveMapDecodeStart = worker.indexOf(
+  "const decoded = decodeOpenovVehiclePositions(bytes, {",
+  liveMapHandlerStart
 );
-assert.match(
-  worker,
-  /const LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES = 900;/,
-  "De live kaart moet een harde CPU-grens op de nationale protobuf-scan toepassen"
+const liveMapDecodeEnd = worker.indexOf("});", liveMapDecodeStart);
+const liveMapDecodeOptions = liveMapDecodeStart >= 0 && liveMapDecodeEnd > liveMapDecodeStart
+  ? worker.slice(liveMapDecodeStart, liveMapDecodeEnd)
+  : "";
+assert.ok(
+  liveMapDecodeOptions.includes("bounds: {") &&
+    !/maxResults\s*:|maxScannedEntities\s*:/.test(liveMapDecodeOptions) &&
+    !worker.includes("LIVE_MAP_OPENOV_MAX_POSITIONS") &&
+    !worker.includes("LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES"),
+  "De live kaart moet alle voertuigen binnen Nederland uitlezen; de nationale feed mag niet worden afgekapt tot een sample"
 );
 assert.match(
   worker,
