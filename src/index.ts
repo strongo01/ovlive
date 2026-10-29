@@ -2378,7 +2378,8 @@ async function enrichTransitousPlan(
   const vehiclePositionFilters = buildOpenovVehiclePositionFilters(
     openovLegs.filter((leg: any) => {
       const family = openovRealtimeLegFeedFamily(leg);
-      return family !== "train" || family === "unknown";
+      // Unknown modes are already included by the non-train branch.
+      return family !== "train";
     })
   );
   const [tripFeed, trainFeed, alertFeed, vehicleFeed] = await Promise.all([
