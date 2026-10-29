@@ -133,7 +133,7 @@ assert.match(
 );
 assert.match(
   worker,
-  /const MAX_OVAPI_LINE_SEARCH_ROUTES = requestedAgencyPrefix \? 80 : 40;/,
+  /const MAX_OVAPI_LINE_SEARCH_ROUTES = 40;/,
   "Lijnzoeken moet het aantal zware OVAPI-lijnresponses begrenzen"
 );
 assert.match(
