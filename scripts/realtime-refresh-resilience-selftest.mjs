@@ -110,6 +110,36 @@ assert.match(
 );
 assert.match(
   worker,
+  /const LIVE_MAP_OPENOV_MAX_POSITIONS = 400;/,
+  "De live kaart moet het aantal ge-serialiseerde voertuigposities begrenzen"
+);
+assert.match(
+  worker,
+  /const LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES = 900;/,
+  "De live kaart moet een harde CPU-grens op de nationale protobuf-scan toepassen"
+);
+assert.match(
+  worker,
+  /const OVAPI_LINE_DIRECTORY_CACHE_TTL_MS = 60_000;/,
+  "OVAPI's landelijke lijnenlijst mag niet voor elke zoekactie opnieuw worden geparsed"
+);
+assert.match(
+  worker,
+  /const MAX_OVAPI_LINE_SEARCH_ROUTES = requestedAgencyPrefix \? 80 : 40;/,
+  "Lijnzoeken moet het aantal zware OVAPI-lijnresponses begrenzen"
+);
+assert.match(
+  worker,
+  /planData = await enrichTransitousPlan\(planData, \{ includeVehiclePositions: false \}\);/,
+  "De planner mag niet ook de volledige voertuigposities-feed decoderen als de livekaart die apart ophaalt"
+);
+assert.match(
+  worker,
+  /const maxScannedEntities = heavyKind && !hasRouteOrTripFilter[\s\S]{0,150}\? 1600/,
+  "Openbare realtime-inspecties met filters moeten een begrensde protobuf-scan gebruiken"
+);
+assert.match(
+  worker,
   /openovRealtimeFeedIndexCache\.tripEntities === tripEntities/
 );
 assert.match(
