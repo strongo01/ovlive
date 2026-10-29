@@ -82,6 +82,11 @@ assert.ok(worker.includes("const extractTransitStops = (itinerary: any)") &&
   worker.includes("stops: transitStopsForExactTrip"),
   "the exact trip-shape endpoint must expose named scheduled intermediate stops even when live KV78 rows are incomplete");
 
+assert.ok(worker.includes('if (mode === "WALK" || mode === "FOOT") continue;') &&
+  worker.includes("if (!officialName && !stopId && !stopCode") &&
+  worker.includes('scheduledArrival: String(place.scheduledArrival ?? "").trim() || null'),
+  "the exact trip timeline must not discard stops with missing leg IDs or mistake realtime arrival times for scheduled times");
+
 assert.ok(worker.includes("sawSuccessfulReplyWithoutGeometry = true") &&
   worker.includes("if (shapes.length > 0)") &&
   worker.includes("if (candidateResponse?.ok)") &&
