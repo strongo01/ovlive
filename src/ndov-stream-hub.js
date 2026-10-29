@@ -684,7 +684,7 @@ export class NdovFeedHub extends DurableObject {
     const owner = String(row?.dataOwnerCode ?? '').trim().toUpperCase();
     const date = normalizeOperatingDate(row?.operationDate);
     const line = String(row?.linePlanningNumber ?? '').trim().toUpperCase();
-    return owner && /^\\d{8}$/.test(date) && line ? [owner, date, line].join('|') : null;
+    return owner && /^\d{8}$/.test(date) && line ? [owner, date, line].join('|') : null;
   }
 
   addKv78RowToIndexes(state, cacheKey, row) {
