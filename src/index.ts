@@ -5529,7 +5529,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
       for (const leg of legs) {
         const mode = String(leg?.mode ?? "").toUpperCase();
-        if (mode === "WALK" || mode === "FOOT" || !String(leg?.tripId ?? "").trim()) continue;
+        // This endpoint has already been requested for one exact service-instance ID.
+        // Some MOTIS responses omit tripId on a leg, so mode is the safe stop-list filter.
+        if (mode === "WALK" || mode === "FOOT") continue;
 
         const places = [
           leg?.from,
@@ -5554,8 +5556,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             name,
             latitude: numberValue(place.lat),
             longitude: numberValue(place.lon),
-            scheduledArrival: String(place.scheduledArrival ?? place.arrival ?? "").trim() || null,
-            scheduledDeparture: String(place.scheduledDeparture ?? place.departure ?? "").trim() || null,
+            scheduledArrival: String(place.scheduledArrival ?? "").trim() || null,
+            scheduledDeparture: String(place.scheduledDeparture ?? "").trim() || null,
             timetableOnly: true,
             source: "Transitous exact-trip timetable",
           };
