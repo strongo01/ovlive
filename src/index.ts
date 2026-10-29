@@ -4550,7 +4550,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const maxScannedEntities = heavyKind && !hasRouteOrTripFilter
       ? Math.min(1200, Math.max(350, decodeLimit * 2))
       : heavyKind
-        ? 5000
+        ? 1600
         : undefined;
 
     const requestFilters: OpenovFeedFilters | undefined =
@@ -5307,8 +5307,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions", {
         // Line search is a fallback after OVAPI. Inspect a bounded Dutch sample
         // instead of decoding the full nationwide positions feed on every query.
-        maxResults: 1800,
-        maxScannedEntities: 2500,
+        maxResults: 450,
+        maxScannedEntities: 1000,
         bounds: {
           minLatitude: 49,
           maxLatitude: 56,
