@@ -1080,6 +1080,42 @@ const OPENOV_FEED_WAIT_TIMEOUT_MS = 10_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
 const openovFeedCache = new Map<string, OpenovFeedCacheEntry>();
+// Route/trip filters create distinct cache keys. Bound retained decoded object
+// graphs because the Worker isolate has a hard 128 MB memory ceiling.
+const OPENOV_FEED_CACHE_MAX_ENTRIES = 8;
+// Keep a short stale fallback for upstream errors, but never retain old feed
+// variants indefinitely in the isolate.
+const OPENOV_FEED_CACHE_MAX_AGE_MS = 180_000;
+
+function readOpenovFeedCache(key: string): OpenovFeedCacheEntry | undefined {
+  const entry = openovFeedCache.get(key);
+  if (!entry) return undefined;
+  // Map insertion order doubles as a tiny LRU: frequently reused feeds stay put.
+  openovFeedCache.delete(key);
+  openovFeedCache.set(key, entry);
+  return entry;
+}
+
+function pruneOpenovFeedCache(nowMs = Date.now(), preserveKey?: string): void {
+  for (const [key, entry] of openovFeedCache) {
+    if (nowMs - entry.fetchedAtMs > OPENOV_FEED_CACHE_MAX_AGE_MS) {
+      openovFeedCache.delete(key);
+    }
+  }
+
+  while (openovFeedCache.size > OPENOV_FEED_CACHE_MAX_ENTRIES) {
+    let oldestKey: string | undefined;
+    for (const key of openovFeedCache.keys()) {
+      if (key !== preserveKey) {
+        oldestKey = key;
+        break;
+      }
+    }
+    if (oldestKey === undefined) break;
+    openovFeedCache.delete(oldestKey);
+  }
+}
+
 const openovFeedInflight = new Map<string, Promise<any>>();
 const openovFeedInflightStartedAt = new Map<string, number>();
 const OPENOV_FEED_INFLIGHT_MAX_AGE_MS = 18_000;
@@ -1129,8 +1165,9 @@ async function getOpenovFeed(
   filters?: OpenovFeedFilters
 ): Promise<any> {
   const now = Date.now();
+  pruneOpenovFeedCache(now);
   const cacheKey = openovFeedCacheKey(url, kind, filters);
-  const cached = openovFeedCache.get(cacheKey);
+  const cached = readOpenovFeedCache(cacheKey);
 
   // 1. Hergebruik een recent resultaat. Alerts do not need a full refresh
   // every 10 seconds; trip and vehicle feeds keep their shorter live cache.
@@ -1189,7 +1226,7 @@ async function getOpenovFeed(
   if (rateLimitUntil > now) {
     const retryAfterSeconds = Math.ceil((rateLimitUntil - now) / 1000);
 
-    const fallbackCache = cached ?? (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
+    const fallbackCache = cached ?? (kind === "vehiclePositions" && cacheKey !== url ? readOpenovFeedCache(url) : undefined);
     if (fallbackCache) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
         kind,
@@ -1250,7 +1287,9 @@ async function getOpenovFeed(
         fetchedAtMs: Date.now()
       };
 
+      openovFeedCache.delete(cacheKey);
       openovFeedCache.set(cacheKey, entry);
+      pruneOpenovFeedCache(Date.now(), cacheKey);
       openovRateLimitedUntil.delete(url);
 
       console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
@@ -1270,8 +1309,8 @@ async function getOpenovFeed(
       );
     }
 
-    const lastGood = openovFeedCache.get(cacheKey) ??
-      (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
+    const lastGood = readOpenovFeedCache(cacheKey) ??
+      (kind === "vehiclePositions" && cacheKey !== url ? readOpenovFeedCache(url) : undefined);
 
     if (lastGood) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
@@ -1588,8 +1627,8 @@ async function safeOpenovFeed(
   const timeoutPromise = new Promise<any>((resolve) => {
     timeoutHandle = setTimeout(() => {
       const cacheKey = openovFeedCacheKey(url, kind, filters);
-      const cached = openovFeedCache.get(cacheKey) ??
-        (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
+      const cached = readOpenovFeedCache(cacheKey) ??
+        (kind === "vehiclePositions" && cacheKey !== url ? readOpenovFeedCache(url) : undefined);
       console.warn("[OVLIVE_OPENOV_FEED_WAIT_TIMEOUT]", JSON.stringify({
         kind,
         timeoutMs: OPENOV_FEED_WAIT_TIMEOUT_MS,
