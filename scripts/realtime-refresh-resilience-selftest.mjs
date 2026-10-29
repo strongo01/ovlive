@@ -143,8 +143,8 @@ assert.match(
 );
 assert.match(
   worker,
-  /const maxScannedEntities = heavyKind && !hasRouteOrTripFilter[\s\S]{0,150}\? 1600/,
-  "Openbare realtime-inspecties met filters moeten een begrensde protobuf-scan gebruiken"
+  /const maxScannedEntities = heavyKind && !hasRouteOrTripFilter\s*\? Math\.min\(1200, Math\.max\(350, decodeLimit \* 2\)\)\s*:\s*undefined/,
+  "Alleen ongefilterde realtime-inspecties moeten een begrensde protobuf-scan gebruiken; exacte rit-/lijnverzoeken moeten de doelrit kunnen vinden"
 );
 assert.match(
   worker,
