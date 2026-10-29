@@ -2236,6 +2236,37 @@ function buildOpenovTripUpdateFilters(openovLegs: any[]): OpenovFeedFilters | un
   };
 }
 
+function buildOpenovVehiclePositionFilters(openovLegs: any[]): OpenovFeedFilters {
+  const tripIds = new Set<string>();
+  const routeIds = new Set<string>();
+
+  for (const leg of openovLegs) {
+    const routeId = normalizeOpenovId(leg?.routeId ?? leg?.route?.id ?? "");
+    const rawTripId = String(leg?.tripId ?? "").trim();
+    const tripId = rawTripId ? normalizeOpenovId(parseOpenovTripId(rawTripId).tripId) : "";
+    if (tripId) tripIds.add(tripId);
+    else if (routeId) routeIds.add(routeId);
+  }
+
+  // Exact trip IDs avoid materializing nationwide positions. The matcher later
+  // still verifies both route and trip before attaching a position to a leg.
+  if (tripIds.size > 0) {
+    return {
+      tripIds: [...tripIds].sort(),
+      maxResults: Math.min(300, Math.max(30, tripIds.size * 3)),
+      maxScannedEntities: 5000
+    };
+  }
+  if (routeIds.size > 0) {
+    return {
+      routeIds: [...routeIds].sort(),
+      maxResults: 300,
+      maxScannedEntities: 5000
+    };
+  }
+  return { maxResults: 200, maxScannedEntities: 500 };
+}
+
 async function enrichTransitousPlan(
   plan: any,
   options: { includeVehiclePositions?: boolean } = {}
@@ -2272,6 +2303,12 @@ async function enrichTransitousPlan(
       return family === "train" || family === "unknown";
     })
   );
+  const vehiclePositionFilters = buildOpenovVehiclePositionFilters(
+    openovLegs.filter((leg: any) => {
+      const family = openovRealtimeLegFeedFamily(leg);
+      return family !== "train" || family === "unknown";
+    })
+  );
   const [tripFeed, trainFeed, alertFeed, vehicleFeed] = await Promise.all([
     needsTripUpdates
       ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates", tripUpdateFilters)
@@ -2281,7 +2318,7 @@ async function enrichTransitousPlan(
       : Promise.resolve(skippedOpenovFeedResult()),
     safeOpenovFeed(OPENOV.alerts, "alerts"),
     needsTripUpdates && includeVehiclePositions
-      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")
+      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions", vehiclePositionFilters)
       : Promise.resolve(skippedOpenovFeedResult())
   ]);
 
