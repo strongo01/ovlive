@@ -13,6 +13,14 @@ const rateLimiter = await readFile(
   new URL("../src/api-rate-limit.ts", import.meta.url),
   "utf8"
 );
+const ndovPlan = await readFile(
+  new URL("../src/ndov-plan-cancellation.js", import.meta.url),
+  "utf8"
+);
+const ndovHub = await readFile(
+  new URL("../src/ndov-stream-hub.js", import.meta.url),
+  "utf8"
+);
 
 const refreshStart = worker.indexOf(
   'if (isRealtimeRefresh && request.method === "POST")'
@@ -137,6 +145,26 @@ assert.match(
   worker,
   /const maxScannedEntities = heavyKind && !hasRouteOrTripFilter[\s\S]{0,150}\? 1600/,
   "Openbare realtime-inspecties met filters moeten een begrensde protobuf-scan gebruiken"
+);
+assert.match(
+  worker,
+  /resolveNdovKv78StopNames\(selectedRows, env, \{ allowAssetReads: false \}\)/,
+  "Directe NDOV-ritdetails mogen niet per verzoek grote statische stopnaamshards parsen"
+);
+assert.match(
+  ndovPlan,
+  /if \(unresolvedAssetKeys\.size && allowAssetReads\)/,
+  "Statische PSA/CHB-stopnaamshards moeten optioneel uitgeschakeld kunnen worden"
+);
+assert.match(
+  ndovHub,
+  /state\.rowsByIdentity\.get\(identityKey\(wantedIdentity\)\)/,
+  "Exacte KV78-ritzoekingen moeten de index gebruiken in plaats van alle 30.000 rijen te scannen"
+);
+assert.match(
+  ndovHub,
+  /state\.rowsByOwnerDateLine\.get\(lookupKey\)/,
+  "KV78-lijn-/tijdzoekingen moeten eerst de exacte eigenaar, datum en lijn indexeren"
 );
 assert.match(
   worker,
