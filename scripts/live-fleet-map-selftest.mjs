@@ -76,6 +76,12 @@ assert.ok(worker.includes("Array.isArray(leg.legGeometry?.coordinates)") &&
   worker.includes("leg.legGeometry.coordinates.length > 1"),
   "the trip-shape endpoint must preserve GeoJSON LineString geometry for native map clients");
 
+assert.ok(worker.includes("const extractTransitStops = (itinerary: any)") &&
+  worker.includes("leg?.intermediateStops") &&
+  worker.includes("stops: exactStops") &&
+  worker.includes("stops: transitStopsForExactTrip"),
+  "the exact trip-shape endpoint must expose named scheduled intermediate stops even when live KV78 rows are incomplete");
+
 assert.ok(worker.includes("sawSuccessfulReplyWithoutGeometry = true") &&
   worker.includes("if (shapes.length > 0)") &&
   worker.includes("if (candidateResponse?.ok)") &&
