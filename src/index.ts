@@ -4353,7 +4353,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
     const feedEntries: Array<[string, any]> = await Promise.all(
       entries.map(async ([key, feedUrl]): Promise<[string, any]> => {
-        const result = await safeOpenovFeed(feedUrl, key);
+        const healthFilters: OpenovFeedFilters | undefined =
+          key === "vehiclePositions"
+            ? { maxResults: 200, maxScannedEntities: 350 }
+            : key === "tripUpdates" || key === "trainUpdates"
+              ? { maxResults: 200, maxScannedEntities: 350 }
+              : undefined;
+        const result = await safeOpenovFeed(feedUrl, key, healthFilters);
 
         return [
           String(key),
@@ -4374,6 +4380,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 ? result.entities.length
                 : null
             ),
+            entityCountIsPartial: result.entityCountIsPartial === true,
+            truncated: result.truncated === true,
             fetchDurationMs: result.fetchDurationMs ?? null,
             error: result.ok
               ? null
@@ -4388,8 +4396,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       status: "diagnostic",
       checkedAt: new Date().toISOString(),
       notes: [
-        "De feeds worden opgehaald en als GTFS-Realtime-protobuf gedecodeerd.",
-        "De itemaantallen zijn gedecodeerde items, niet noodzakelijk unieke ritten.",
+        "De realtimefeeds worden gecontroleerd met een begrensde decodeersample om CPU-limieten te respecteren.",
+        "Bij grote feeds kan entityCount een gedeeltelijke sample zijn; controleer truncated en entityCountIsPartial.",
         "Een beschikbare feed garandeert niet dat iedere rit een realtime-update heeft.",
         "Geen update voor een rit betekent NIET dat die rit op tijd rijdt."
       ],
@@ -4418,22 +4426,46 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       .map((value: string) => normalizeOpenovId(value))
       .filter(Boolean);
 
-    const vehiclePositionFilters = kind === "vehiclePositions" &&
-      (routeFilters.length > 0 || tripFilters.length > 0)
-      ? { routeIds: routeFilters, tripIds: tripFilters }
-      : undefined;
+    const parsedLimit = Number(url.searchParams.get("limit") ?? 500);
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(2000, Math.max(1, Math.floor(parsedLimit)))
+      : 500;
+    const heavyKind = kind === "vehiclePositions" || kind === "tripUpdates" || kind === "trainUpdates";
+    const hasRouteOrTripFilter = routeFilters.length > 0 || tripFilters.length > 0;
+    // The public feed-inspection endpoint is not the place to decode tens of
+    // thousands of national records in one Free-Workers invocation. It returns
+    // an explicitly marked sample if no exact route/trip filter was supplied.
+    const decodeLimit = heavyKind && !hasRouteOrTripFilter
+      ? Math.min(limit, 300)
+      : limit;
+    const maxScannedEntities = heavyKind && !hasRouteOrTripFilter
+      ? Math.min(1200, Math.max(350, decodeLimit * 2))
+      : heavyKind
+        ? 5000
+        : undefined;
+
+    const requestFilters: OpenovFeedFilters | undefined =
+      kind === "vehiclePositions" || kind === "tripUpdates" || kind === "trainUpdates"
+        ? {
+            ...(routeFilters.length ? { routeIds: routeFilters } : {}),
+            ...(tripFilters.length ? { tripIds: tripFilters } : {}),
+            ...(heavyKind ? {
+              maxResults: decodeLimit,
+              maxScannedEntities
+            } : {})
+          }
+        : undefined;
 
     try {
       const data = await getOpenovFeed(
         feedUrl,
         kind as keyof typeof OPENOV,
-        vehiclePositionFilters
+        requestFilters
       );
       const { entities = [], ...meta } = data as any;
 
-      // Vehicle-position requests with exact trip/route filters were filtered
-      // during protobuf decoding. This final guard keeps the public API contract
-      // and handles the compatibility fallback / unfiltered diagnostics too.
+      // Route/trip filters are applied during protobuf decoding. This final
+      // guard also handles stop filters and compatibility-decoder results.
       const filteredEntities = (entities as any[]).filter((entity: any) => {
         if (
           routeFilters.length > 0 &&
@@ -4462,11 +4494,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         return true;
       });
 
-      const limit = Math.min(
-        2000,
-        Math.max(1, Number(url.searchParams.get("limit") ?? 500))
-      );
-
+      const partial = data.truncated === true;
       return json({
         ...meta,
         appliedFilters: {
@@ -4474,7 +4502,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           tripIds: tripFilters,
           stopIds: stopFilters
         },
-        matchingCount: filteredEntities.length,
+        matchingCount: partial ? null : filteredEntities.length,
+        scannedMatchCount: filteredEntities.length,
+        matchingCountIsExact: !partial,
+        truncated: partial,
         entities: filteredEntities.slice(0, limit),
         returnedCount: Math.min(filteredEntities.length, limit)
       }, data.ok ? 200 : 502, headers);
@@ -4487,7 +4518,6 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       }, 502, headers);
     }
   }
-
 
   if (url.pathname === "/api/geocode") {
     const query = (url.searchParams.get("q") ?? "").trim();
