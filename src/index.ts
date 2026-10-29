@@ -4980,7 +4980,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               key.toLocaleUpperCase("en-US").startsWith(requestedAgencyPrefix + "_")
             )
           : allRouteKeys;
-        const MAX_OVAPI_LINE_SEARCH_ROUTES = requestedAgencyPrefix ? 80 : 40;
+        const MAX_OVAPI_LINE_SEARCH_ROUTES = 40;
         const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;
         const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;
         const routeKeys = candidateRouteKeys.slice(0, MAX_OVAPI_LINE_SEARCH_ROUTES);
