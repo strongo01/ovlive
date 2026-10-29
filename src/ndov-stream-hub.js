@@ -755,13 +755,13 @@ export class NdovFeedHub extends DurableObject {
     if (!CONFIG[stream]) throw new Error('Unknown NDOV stream: ' + stream);
     let pending = this.streamReadyPromises.get(stream);
     if (!pending) {
-      pending = this.ctx.blockConcurrencyWhile(async () => {
+      pending = (async () => {
         // Migratie en opslagherstel gebeuren alleen voor de benodigde stream.
         if (this.ctx.id?.name === NDOV_SHARED_OBJECT_NAME) {
           await this.migrateLegacyStorage(stream);
         }
         await this.loadStreamState(stream);
-      });
+      })();
       this.streamReadyPromises.set(stream, pending);
       pending.catch(() => {
         if (this.streamReadyPromises.get(stream) === pending) {
