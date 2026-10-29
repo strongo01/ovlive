@@ -309,6 +309,7 @@ function decodeVehiclePosition(
   filters?: OpenovVehiclePositionFilters
 ): Omit<DecodedOpenovVehiclePosition, "entityId"> | null {
   let tripField: Field | undefined;
+  let positionField: Field | undefined;
   let position: { latitude?: number; longitude?: number } | undefined;
   let stopIdField: Field | undefined;
   let vehicleField: Field | undefined;
@@ -332,16 +333,22 @@ function decodeVehiclePosition(
         )) return null;
         tripField = field;
       } else if (field.number === 2) {
-        position = decodePosition(bytes, field.contentStart, field.contentEnd);
+        positionField = field;
         const bounds = filters?.bounds;
-        if (bounds && (
-          !Number.isFinite(position.latitude) ||
-          !Number.isFinite(position.longitude) ||
-          Number(position.latitude) < bounds.minLatitude ||
-          Number(position.latitude) > bounds.maxLatitude ||
-          Number(position.longitude) < bounds.minLongitude ||
-          Number(position.longitude) > bounds.maxLongitude
-        )) return null;
+        // Decode only four coordinate bytes before rejecting an out-of-window
+        // vehicle. In ordinary exact-trip lookups defer position decoding until
+        // after the trip descriptor has passed its filters.
+        if (bounds) {
+          position = decodePosition(bytes, field.contentStart, field.contentEnd);
+          if (
+            !Number.isFinite(position.latitude) ||
+            !Number.isFinite(position.longitude) ||
+            Number(position.latitude) < bounds.minLatitude ||
+            Number(position.latitude) > bounds.maxLatitude ||
+            Number(position.longitude) < bounds.minLongitude ||
+            Number(position.longitude) > bounds.maxLongitude
+          ) return null;
+        }
       } else if (field.number === 7) stopIdField = field;
       else if (field.number === 8) vehicleField = field;
     } else if (field.number === 5 && field.wireType === 0) {
@@ -351,12 +358,15 @@ function decodeVehiclePosition(
     offset = field.nextOffset;
   }
 
+  if (filters?.bounds && !position) return null;
   const trip = tripField
     ? decodeTripDescriptor(bytes, tripField.contentStart, tripField.contentEnd)
     : undefined;
   if (!matchesVehiclePositionFilters(trip, filters)) return null;
-  if (filters?.bounds && !position) return null;
 
+  if (!position && positionField) {
+    position = decodePosition(bytes, positionField.contentStart, positionField.contentEnd);
+  }
   const vehicle = vehicleField
     ? decodeVehicleDescriptor(bytes, vehicleField.contentStart, vehicleField.contentEnd)
     : undefined;
