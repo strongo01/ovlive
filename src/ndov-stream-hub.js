@@ -315,6 +315,9 @@ export class NdovFeedHub extends DurableObject {
     super(ctx, env);
     this.ctx = ctx;
     this.env = env;
+    // Grote KV78- en BISON-snapshots mogen niet tegelijk worden gecomprimeerd:
+    // beide streamcollectors delen dezelfde Durable Object-geheugenlimiet.
+    this.fullPersistQueue = Promise.resolve();
     // Eén fysieke DO-instantie beheert beide feeds; de streamtoestand blijft gescheiden.
     this.streamStates = new Map(Object.keys(CONFIG).map((stream) => [stream, {
       snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
@@ -1669,14 +1672,42 @@ export class NdovFeedHub extends DurableObject {
     state.snapshot.storedMutationIdentityCount = state.mutations.size;
     state.snapshot.continuousEnabled = state.continuousEnabled;
     const now = Date.now();
-    const hasCollectedData = stream === 'kv78' ? state.rows.size > 0 : state.events.size > 0 || state.mutations.size > 0;
-    const checkpointDue = state.continuousMode && hasCollectedData && now - state.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
-    const finalCheckpointDue = bulk && hasCollectedData && (!state.continuousMode || now - state.lastFullPersistAt >= 5000);
+    const hasCollectedData = stream === 'kv78'
+      ? state.rows.size > 0
+      : state.events.size > 0 || state.mutations.size > 0;
+    const checkpointDue = state.continuousMode && hasCollectedData &&
+      now - state.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
+    const finalCheckpointDue = bulk && hasCollectedData &&
+      (!state.continuousMode || now - state.lastFullPersistAt >= 5000);
     if (checkpointDue || finalCheckpointDue) {
-      await this.persistFullKv78Rows(stream, true);
-      await this.persistFullBisonEvents(stream, true);
-      await this.persistFullMutations(stream, true);
-      state.lastFullPersistAt = Date.now();
+      const persistFullSnapshot = async () => {
+        // Een eerdere stream kan tijdens het wachten al een checkpoint hebben
+        // geschreven. Controleer opnieuw, zodat we geen dubbele grote snapshot
+        // maken en de piekbelasting van KV78 + BISON niet optellen.
+        const checkpointNow = Date.now();
+        const hasCurrentData = stream === 'kv78'
+          ? state.rows.size > 0
+          : state.events.size > 0 || state.mutations.size > 0;
+        const checkpointStillDue = state.continuousMode && hasCurrentData &&
+          checkpointNow - state.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
+        const finalCheckpointStillDue = bulk && hasCurrentData &&
+          (!state.continuousMode || checkpointNow - state.lastFullPersistAt >= 5000);
+        if (!checkpointStillDue && !finalCheckpointStillDue) return;
+
+        await this.persistFullKv78Rows(stream, true);
+        await this.persistFullBisonEvents(stream, true);
+        await this.persistFullMutations(stream, true);
+        state.lastFullPersistAt = Date.now();
+      };
+
+      const queuedPersist = this.fullPersistQueue.then(
+        persistFullSnapshot,
+        persistFullSnapshot
+      );
+      // Keep the queue usable after a failure; the current caller still receives
+      // the original rejection and can log/retry the failed snapshot.
+      this.fullPersistQueue = queuedPersist.catch(() => {});
+      await queuedPersist;
     }
     await this.ctx.storage.put({
       [stream + ':snapshot']: state.snapshot,
