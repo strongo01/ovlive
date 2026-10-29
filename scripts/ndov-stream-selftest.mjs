@@ -174,7 +174,10 @@ assert.match(hubSource, /KV6_EVENT_LIMIT = 30000/);
 assert.match(hubSource, /persistFullBisonEvents/);
 assert.doesNotMatch(hubSource, /TARGET_LINES/);
 assert.match(hubSource, /eventsForIdentities\(state\.mutations, identities\)/);
-assert.match(hubSource, /rowMatchesIdentity\(row, identity\)/);
+assert.match(hubSource, /rowsByIdentity\.get\(identityKey\(wantedIdentity\)\)/,
+  'exact KV78 identity requests must use the identity index instead of scanning all rows');
+assert.match(hubSource, /rowMatchesIdentity\(row, wantedIdentity\)/,
+  'indexed KV78 matches must still be checked against the complete exact trip identity');
 assert.match(hubSource, /Date\.now\(\) - state\.lastPersistAt < minInterval/);
 assert.match(hubSource, /if \(stream === 'kv78' && !state\.continuousEnabled\) state\.rows\.clear\(\)/);
 assert.doesNotMatch(hubSource, /if \(!TARGET_LINES\.has\(row\.linePlanningNumber\)\) continue;/);
