@@ -5207,9 +5207,23 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         // journey when OVAPI cannot confirm the requested journey.
         openovAvailable = false;
       } else {
-      const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions");
+      const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions", {
+        // Line search is a fallback after OVAPI. Inspect a bounded Dutch sample
+        // instead of decoding the full nationwide positions feed on every query.
+        maxResults: 1800,
+        maxScannedEntities: 2500,
+        bounds: {
+          minLatitude: 49,
+          maxLatitude: 56,
+          minLongitude: 2,
+          maxLongitude: 9.5
+        }
+      });
       if (!feed || feed.ok !== true || !Array.isArray(feed.entities)) {
         throw new Error("De OpenOV-voertuigposities zijn momenteel niet beschikbaar.");
+      }
+      if (feed.truncated === true) {
+        warnings.push("OpenOV-voertuigzoeking gebruikte een begrensde sample om CPU-limieten te vermijden; deze fallback kan voertuigen missen.");
       }
       openovAvailable = true;
       const matchedVehicles = (feed.entities as any[])
