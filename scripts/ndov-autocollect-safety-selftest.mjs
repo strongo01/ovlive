@@ -72,4 +72,23 @@ console.log("PASS: legacy-opslagmigratie is aanwezig en begrensd");
 assert.match(hub, /existingRelevantKeys/);
 assert.match(hub, /Refusing to migrate/);
 console.log("PASS: migratie weigert onverwacht bestaande gegevens te overschrijven");
+
+// Cold-start regressie: een KV78-aanvraag mag niet ook de volledige BISON-cache
+// herstellen. Beide streams blijven volledig persistent; alleen herstel is lui.
+const constructorStart = hub.indexOf("constructor(ctx, env)");
+const constructorEnd = hub.indexOf("\n  async loadStreamState", constructorStart);
+assert.ok(constructorStart >= 0 && constructorEnd > constructorStart);
+const constructorBody = hub.slice(constructorStart, constructorEnd);
+assert.doesNotMatch(constructorBody, /loadStreamState|migrateLegacyStorage/);
+assert.match(hub, /async ensureStreamReady\(stream\)/);
+assert.doesNotMatch(hub, /await this\.ready/);
+assert.match(
+  hub,
+  /async fetch\(request\) \{\s*const url = new URL\(request\.url\);\s*const stream = url\.searchParams\.get\('stream'\) \|\| 'kv78';[\s\S]*?await this\.ensureStreamReady\(stream\);/
+);
+assert.match(
+  hub,
+  /kv78RowScheduleInfo\([\s\S]*?KV78_STOP_TIME_FUTURE_RETENTION_SECONDS\s*\)\.relevant/
+);
+console.log("PASS: cold-start herstelt alleen de gevraagde stream en behoudt KV78-tijdvensterfilters");
 console.log("Alle NDOV-autocollect-safety-tests geslaagd.");
