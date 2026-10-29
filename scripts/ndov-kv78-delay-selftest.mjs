@@ -2,6 +2,17 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const ndovHubSource = await readFile(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
+const ndovCancellationSource = await readFile(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
+assert.match(
+  ndovCancellationSource,
+  /MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST\s*=\s*4/,
+  'the selected-trip name resolver needs a bounded larger budget than the normal plan endpoint',
+);
+assert.match(
+  ndovCancellationSource,
+  /maxNewShards:\s*MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST/,
+  'the exact-trip name resolver must use its dedicated budget',
+);
 assert.match(
   ndovHubSource,
   /staleCount:\s*candidateRows\.length\s*-\s*fresh\.length/,
