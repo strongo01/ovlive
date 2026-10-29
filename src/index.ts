@@ -3121,6 +3121,9 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
 const LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000;
 const LIVE_MAP_OPENOV_CACHE_TTL_SECONDS = 15;
 const LIVE_MAP_OPENOV_MAX_POSITIONS = 2000;
+// The Workers Free plan allows only 10 ms CPU per request. Bound the scan of
+// the national vehicle feed when the requested in-country sample is not found.
+const LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES = 2500;
 
 type LiveMapOpenovCachedBody = {
   body: string;
@@ -3256,21 +3259,21 @@ async function handleLiveMapOpenovApi(
       // Gebruik hier bewust uitsluitend de selectieve decoder. Bij een wijziging
       // in het bronschema falen we veilig in plaats van een zware volledige
       // GTFS-RT-objectboom op te bouwen en opnieuw een CPU-limit te riskeren.
-      const decoded = decodeOpenovVehiclePositions(bytes);
+      const decoded = decodeOpenovVehiclePositions(bytes, {
+        maxResults: LIVE_MAP_OPENOV_MAX_POSITIONS,
+        maxScannedEntities: LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES,
+        bounds: {
+          minLatitude: 49,
+          maxLatitude: 56,
+          minLongitude: 2,
+          maxLongitude: 9.5
+        }
+      });
       const decodeDurationMs = Number((performance.now() - decodeStartedAt).toFixed(2));
-      // Avoid sorting the entire national feed on the CPU-limited Worker.
-      // Every returned point is independently age-checked by the UI; a stable
-      // capped source-order sample is preferable to an expensive global sort.
-      const entities = decoded.entities
-        .filter((entity: any) =>
-          Number.isFinite(entity.latitude) &&
-          Number.isFinite(entity.longitude) &&
-          entity.latitude >= 49 &&
-          entity.latitude <= 56 &&
-          entity.longitude >= 2 &&
-          entity.longitude <= 9.5
-        )
-        .slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS);
+      // Coordinates are filtered inside the protobuf decoder before expensive
+      // trip/vehicle strings are materialized. Both result count and scan work
+      // have hard limits so a nationwide refresh cannot consume unlimited CPU.
+      const entities = decoded.entities;
 
       const feedTimestamp = decoded.feedTimestamp;
       const rawAgeSeconds = typeof feedTimestamp === "number"
@@ -3304,9 +3307,14 @@ async function handleLiveMapOpenovApi(
           : null,
         ageSeconds,
         freshness,
+        // When the CPU guard stops early, this is the count of entities
+        // inspected so far, not a claim about the full nationwide feed.
         entityCount: decoded.sourceEntityCount,
+        entityCountIsPartial: decoded.truncated === true,
+        scannedEntityCount: decoded.scannedEntityCount ?? decoded.sourceEntityCount,
+        truncated: decoded.truncated === true,
         returnedCount: entities.length,
-        decoder: "selective-protobuf",
+        decoder: "selective-protobuf-bounded",
         entities
       });
 
