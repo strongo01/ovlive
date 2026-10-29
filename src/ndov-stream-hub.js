@@ -318,6 +318,10 @@ export class NdovFeedHub extends DurableObject {
     // Eén fysieke DO-instantie beheert beide feeds; de streamtoestand blijft gescheiden.
     this.streamStates = new Map(Object.keys(CONFIG).map((stream) => [stream, {
       snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
+      // Ephemeral indexes keep exact trip and owner/date/line lookups from
+      // scanning all 30,000 rolling KV78 stop rows on every API request.
+      rowsByIdentity: new Map(), rowsByOwnerDateLine: new Map(),
+      rowIdentityByCacheKey: new Map(), rowOwnerDateLineByCacheKey: new Map(),
       running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
       rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
@@ -372,6 +376,7 @@ export class NdovFeedHub extends DurableObject {
         canonicalRows.set(cacheKey, row);
       }
       state.rows = canonicalRows;
+      this.rebuildKv78RowIndexes(state);
     }
 
     state.events = new Map();
@@ -660,6 +665,72 @@ export class NdovFeedHub extends DurableObject {
       '[OVLIVE_NDOV_LEGACY_MIGRATION]',
       JSON.stringify({ stream, copiedKeys, complete: true })
     );
+  }
+
+  kv78RowIdentityKey(row) {
+    const parsed = normalizeTripLookupIdentity([
+      row?.dataOwnerCode,
+      row?.operationDate,
+      row?.linePlanningNumber,
+      row?.journeyNumber,
+      row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? '0',
+    ].join('|'));
+    return parsed
+      ? [parsed.owner, parsed.date, parsed.line, parsed.journey, parsed.reinforcement].join('|')
+      : null;
+  }
+
+  kv78OwnerDateLineKey(row) {
+    const owner = String(row?.dataOwnerCode ?? '').trim().toUpperCase();
+    const date = normalizeOperatingDate(row?.operationDate);
+    const line = String(row?.linePlanningNumber ?? '').trim().toUpperCase();
+    return owner && /^\\d{8}$/.test(date) && line ? [owner, date, line].join('|') : null;
+  }
+
+  addKv78RowToIndexes(state, cacheKey, row) {
+    const identity = this.kv78RowIdentityKey(row);
+    if (identity) {
+      let keys = state.rowsByIdentity.get(identity);
+      if (!keys) state.rowsByIdentity.set(identity, keys = new Set());
+      keys.add(cacheKey);
+      state.rowIdentityByCacheKey.set(cacheKey, identity);
+    }
+
+    const ownerDateLine = this.kv78OwnerDateLineKey(row);
+    if (ownerDateLine) {
+      let keys = state.rowsByOwnerDateLine.get(ownerDateLine);
+      if (!keys) state.rowsByOwnerDateLine.set(ownerDateLine, keys = new Set());
+      keys.add(cacheKey);
+      state.rowOwnerDateLineByCacheKey.set(cacheKey, ownerDateLine);
+    }
+  }
+
+  removeKv78RowFromIndexes(state, cacheKey) {
+    const identity = state.rowIdentityByCacheKey.get(cacheKey);
+    if (identity) {
+      const keys = state.rowsByIdentity.get(identity);
+      keys?.delete(cacheKey);
+      if (keys?.size === 0) state.rowsByIdentity.delete(identity);
+      state.rowIdentityByCacheKey.delete(cacheKey);
+    }
+
+    const ownerDateLine = state.rowOwnerDateLineByCacheKey.get(cacheKey);
+    if (ownerDateLine) {
+      const keys = state.rowsByOwnerDateLine.get(ownerDateLine);
+      keys?.delete(cacheKey);
+      if (keys?.size === 0) state.rowsByOwnerDateLine.delete(ownerDateLine);
+      state.rowOwnerDateLineByCacheKey.delete(cacheKey);
+    }
+  }
+
+  rebuildKv78RowIndexes(state) {
+    state.rowsByIdentity.clear();
+    state.rowsByOwnerDateLine.clear();
+    state.rowIdentityByCacheKey.clear();
+    state.rowOwnerDateLineByCacheKey.clear();
+    for (const [cacheKey, row] of state.rows.entries()) {
+      this.addKv78RowToIndexes(state, cacheKey, row);
+    }
   }
 
   stateFor(stream) {
@@ -1313,23 +1384,39 @@ export class NdovFeedHub extends DurableObject {
         return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement-parameters, vehicleNumber=...&owner=...&date=YYYYMMDD, of lineLookup=1&owner=...&date=YYYYMMDD&line=...&scheduledTime=...' }, { status: 400 });
       }
       const now = Date.now();
-      const rows = [...state.rows.values()].filter((row) => {
-        if (identities.length) return identities.some(identity => rowMatchesIdentity(row, identity));
-        if (lineLookupValid) {
-          if (
-            String(row?.dataOwnerCode ?? '').trim().toUpperCase() !== vehicleOwner ||
-            normalizeOperatingDate(row?.operationDate) !== vehicleDate ||
-            String(row?.linePlanningNumber ?? '').trim().toUpperCase() !== vehicleLine
-          ) return false;
-          const distance = kv78LineLookupDistance(row, scheduledTimes);
-          return distance !== null && distance <= KV78_LINE_LOOKUP_TOLERANCE_SECONDS;
+      let candidateRows;
+      if (identities.length) {
+        // Direct index lookup: do not scan every retained KV78 row for one trip.
+        candidateRows = [];
+        for (const wantedIdentity of identities) {
+          const indexedKeys = state.rowsByIdentity.get(identityKey(wantedIdentity)) ?? [];
+          for (const cacheKey of indexedKeys) {
+            const row = state.rows.get(cacheKey);
+            if (row && rowMatchesIdentity(row, wantedIdentity)) candidateRows.push(row);
+          }
         }
-        return String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
+      } else if (lineLookupValid) {
+        // Restrict schedule/time comparison to this exact owner/date/line first.
+        const lookupKey = [vehicleOwner, vehicleDate, vehicleLine].join('|');
+        candidateRows = [...(state.rowsByOwnerDateLine.get(lookupKey) ?? [])]
+          .map((cacheKey) => state.rows.get(cacheKey))
+          .filter((row) => Boolean(row))
+          .filter((row) => {
+            const distance = kv78LineLookupDistance(row, scheduledTimes);
+            return distance !== null && distance <= KV78_LINE_LOOKUP_TOLERANCE_SECONDS;
+          });
+      } else {
+        candidateRows = [...state.rows.values()].filter((row) =>
+          String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
           String(row?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
           normalizeOperatingDate(row?.operationDate) === vehicleDate &&
-          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine);
+          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
+        );
+      }
+      const fresh = candidateRows.filter((row) => {
+        const at = Date.parse(row.receivedAt ?? '');
+        return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS;
       });
-      const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
       fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
 
       // Exact identities retain their historical per-trip cap. The metro fallback
@@ -1529,6 +1616,7 @@ export class NdovFeedHub extends DurableObject {
     for (const [key, row] of state.rows.entries()) {
       const captured = Date.parse(row?.receivedAt ?? '');
       if (!Number.isFinite(captured) || captured < cutoff) {
+        this.removeKv78RowFromIndexes(state, key);
         state.rows.delete(key);
         if (stream === 'kv78') state.rowCacheStats.stalePrunedRows += 1;
         continue;
@@ -1554,11 +1642,14 @@ export class NdovFeedHub extends DurableObject {
         KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
       );
       for (const key of evictions) {
+        this.removeKv78RowFromIndexes(state, key);
         if (state.rows.delete(key)) state.rowCacheStats.limitEvictedRows += 1;
       }
     }
     while (state.rows.size > KV78_ROW_LIMIT) {
-      state.rows.delete(state.rows.keys().next().value);
+      const oldestKey = state.rows.keys().next().value;
+      this.removeKv78RowFromIndexes(state, oldestKey);
+      state.rows.delete(oldestKey);
       if (stream === 'kv78') state.rowCacheStats.limitEvictedRows += 1;
     }
   }
@@ -1884,8 +1975,10 @@ export class NdovFeedHub extends DurableObject {
               // U005/U011/U073/24 hid mutations such as CXX L014 and ARR 26010.
               row.receivedAt = passtimeReceivedAt;
               const key = kv78RowCacheKey(row) ?? `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+              this.removeKv78RowFromIndexes(state, key);
               state.rows.delete(key);
               state.rows.set(key, row);
+              this.addKv78RowToIndexes(state, key, row);
             }
             // Prune after processing a complete feed message so expired/past
             // stop rows are removed before capacity eviction can discard fresh rows.
