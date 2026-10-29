@@ -80,6 +80,31 @@ assert.match(
 );
 assert.match(
   worker,
+  /const OPENOV_FEED_CACHE_MAX_ENTRIES = 8;/,
+  "De decoded OpenOV-feedcache moet een harde bovengrens hebben"
+);
+assert.match(
+  worker,
+  /const OPENOV_FEED_CACHE_MAX_AGE_MS = 180_000;/,
+  "Oude feedvarianten mogen niet onbeperkt in het Worker-geheugen blijven"
+);
+assert.match(
+  worker,
+  /function pruneOpenovFeedCache\(/,
+  "De Worker moet oude en overtollige feedcache-items opruimen"
+);
+assert.match(
+  worker,
+  /while \(openovFeedCache\.size > OPENOV_FEED_CACHE_MAX_ENTRIES\)/,
+  "De cache-opruiming moet de ingestelde maximumgrootte afdwingen"
+);
+assert.match(
+  worker,
+  /pruneOpenovFeedCache\(Date\.now\(\), cacheKey\);/,
+  "Na het toevoegen van een feed moet de cache direct begrensd worden"
+);
+assert.match(
+  worker,
   /const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 12_000;/,
   "De voertuigposities voor de live kaart moeten kort gecachet blijven"
 );
