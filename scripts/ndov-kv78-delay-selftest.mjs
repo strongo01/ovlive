@@ -1,4 +1,18 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const ndovHubSource = await readFile(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
+assert.match(
+  ndovHubSource,
+  /staleCount:\s*candidateRows\.length\s*-\s*fresh\.length/,
+  'KV78 /rows must calculate stale rows from the declared candidateRows collection',
+);
+assert.doesNotMatch(
+  ndovHubSource,
+  /staleCount:\s*rows\.length\s*-\s*fresh\.length/,
+  'KV78 /rows must not reference an undefined rows variable',
+);
+console.log('PASS: KV78 /rows stale count uses candidateRows, not an undefined variable');
 import { applyNdovCancellationsToPlan, matchKv78RowByScheduleTime } from '../src/ndov-plan-cancellation.js';
 import { kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
 
