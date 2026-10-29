@@ -1038,6 +1038,17 @@ type OpenovFeedFilters = {
   tripIds?: string[];
   routeIds?: string[];
   routeDateKeys?: string[];
+  /** Limit decoded records for sample/diagnostic requests (separate cache key). */
+  maxResults?: number;
+  /** Hard bound on the number of feed entities scanned by one invocation. */
+  maxScannedEntities?: number;
+  /** Optional geographic bounds for map previews. */
+  bounds?: {
+    minLatitude: number;
+    maxLatitude: number;
+    minLongitude: number;
+    maxLongitude: number;
+  };
 };
 
 function openovFeedCacheKey(
@@ -1045,6 +1056,22 @@ function openovFeedCacheKey(
   kind: OpenovFeedKind,
   filters?: OpenovFeedFilters
 ): string {
+  // Never let a bounded sample poison the full-feed cache used by trip matching.
+  if (filters && (
+    filters.maxResults != null ||
+    filters.maxScannedEntities != null ||
+    filters.bounds != null
+  )) {
+    return url + "#bounded-sample:" + JSON.stringify({
+      tripIds: [...new Set(filters.tripIds ?? [])].sort(),
+      routeIds: [...new Set(filters.routeIds ?? [])].sort(),
+      routeDateKeys: [...new Set(filters.routeDateKeys ?? [])].sort(),
+      maxResults: filters.maxResults ?? null,
+      maxScannedEntities: filters.maxScannedEntities ?? null,
+      bounds: filters.bounds ?? null
+    });
+  }
+
   if (kind === "vehiclePositions" &&
       (filters?.tripIds?.length || filters?.routeIds?.length)) {
     const tripIds = [...new Set(filters.tripIds ?? [])].sort();
@@ -1393,6 +1420,8 @@ async function fetchOpenovFeedUncached(
   let sourceEntityCount: number | undefined;
   let entities: any[];
   let decoder = "gtfs-realtime-bindings";
+  let decodeTruncated: boolean | undefined;
+  let decodeScannedEntityCount: number | undefined;
   console.log("[OVLIVE_OPENOV_RESPONSE]", JSON.stringify({
     kind,
     httpStatus: response.status,
@@ -1430,46 +1459,86 @@ async function fetchOpenovFeedUncached(
     : undefined;
 
   if (kind === "vehiclePositions") {
+    const boundedDecoderOptions = filters && (
+      filters.maxResults != null ||
+      filters.maxScannedEntities != null ||
+      filters.bounds != null
+    ) ? {
+      ...(normalizedVehicleFilters ?? {}),
+      maxResults: filters.maxResults,
+      maxScannedEntities: filters.maxScannedEntities,
+      bounds: filters.bounds
+    } : normalizedVehicleFilters;
+
     try {
-      // Decode only the protobuf nested position/vehicle fields for the exact
-      // requested trip+route set; unrelated entity position objects are skipped.
-      const decoded = decodeOpenovVehiclePositions(bytes, normalizedVehicleFilters);
+      // Selective decoding avoids constructing unrelated vehicle-position objects.
+      // Bounded samples also stop scanning the national feed after a hard limit.
+      const decoded = decodeOpenovVehiclePositions(bytes, boundedDecoderOptions);
       feedTimestamp = decoded.feedTimestamp;
       sourceEntityCount = decoded.sourceEntityCount;
       entities = decoded.entities;
-      decoder = normalizedVehicleFilters ? "selective-protobuf-targeted" : "selective-protobuf";
+      decodeTruncated = decoded.truncated;
+      decodeScannedEntityCount = decoded.scannedEntityCount;
+      decoder = filters?.maxResults != null || filters?.maxScannedEntities != null || filters?.bounds
+        ? "selective-protobuf-bounded"
+        : normalizedVehicleFilters ? "selective-protobuf-targeted" : "selective-protobuf";
     } catch (error) {
-      // Keep the existing generated decoder as a compatibility fallback if an
-      // upstream schema/encoding changes. The fallback is logged so it cannot
-      // silently hide a regression in the selective decoder.
-      console.warn("[OVLIVE_VEHICLE_POSITION_FAST_DECODE_FALLBACK]", JSON.stringify({
+      console.error("[OVLIVE_VEHICLE_POSITION_FAST_DECODE_ERROR]", JSON.stringify({
         byteCount: bytes.byteLength,
+        bounded: Boolean(boundedDecoderOptions && (
+          "maxResults" in boundedDecoderOptions ||
+          "maxScannedEntities" in boundedDecoderOptions ||
+          "bounds" in boundedDecoderOptions
+        )),
         error: error instanceof Error ? error.message : String(error)
       }));
+      // Do not fall back to the full generated decoder on a bounded or targeted
+      // request: that fallback builds the large object graph which caused CPU 1102.
+      if (boundedDecoderOptions) {
+        return {
+          ok: false,
+          status: 502,
+          source: "OpenOV / OVapi GTFS-Realtime",
+          sourceUrl: url,
+          checkedAt: new Date().toISOString(),
+          freshness: "unavailable",
+          ageSeconds: null,
+          entityCount: 0,
+          entities: [],
+          error: "De snelle voertuigdecoder kon deze feed niet veilig verwerken."
+        };
+      }
       const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
       feedTimestamp = toNumber(feed.header?.timestamp);
       const allEntities = normalizeVehiclePositions(feed);
       sourceEntityCount = allEntities.length;
-      entities = normalizedVehicleFilters
-        ? allEntities.filter((entity: any) =>
-            (!normalizedVehicleFilters.tripIds.size ||
-              normalizedVehicleFilters.tripIds.has(normalizeOpenovId(parseOpenovTripId(entity.tripId).tripId))) &&
-            (!normalizedVehicleFilters.routeIds.size ||
-              normalizedVehicleFilters.routeIds.has(normalizeOpenovId(entity.routeId)))
-          )
-        : allEntities;
+      entities = allEntities;
       decoder = "gtfs-realtime-bindings-fallback";
     }
   } else if (kind === "tripUpdates" || kind === "trainUpdates") {
-    if (normalizedTripUpdateFilters) {
+    if (normalizedTripUpdateFilters || filters?.maxResults != null || filters?.maxScannedEntities != null) {
       try {
         // The planner only needs matching trip IDs and same-route/service-date
         // candidates. Skip normalizing thousands of unrelated stop updates.
-        const decoded = decodeOpenovTripUpdates(bytes, normalizedTripUpdateFilters);
+        const boundedTripOptions = filters && (
+          filters.maxResults != null || filters.maxScannedEntities != null
+        ) ? {
+          maxResults: filters.maxResults,
+          maxScannedEntities: filters.maxScannedEntities
+        } : undefined;
+        const decoded = decodeOpenovTripUpdates(
+          bytes,
+          normalizedTripUpdateFilters,
+          boundedTripOptions
+        );
         feedTimestamp = decoded.feedTimestamp;
         sourceEntityCount = decoded.sourceEntityCount;
         entities = decoded.entities;
-        decoder = "selective-protobuf-targeted";
+        decodeTruncated = decoded.truncated;
+        decodeScannedEntityCount = decoded.scannedEntityCount;
+        decoder = boundedTripOptions && !normalizedTripUpdateFilters
+          ? "selective-protobuf-bounded"
+          : "selective-protobuf-targeted";
       } catch (error) {
         console.error("[OVLIVE_TRIP_UPDATE_FAST_DECODE_ERROR]", JSON.stringify({
           kind,
@@ -1536,10 +1605,15 @@ async function fetchOpenovFeedUncached(
     feedTimestamp: feedTimestamp == null ? null : new Date(feedTimestamp * 1000).toISOString(),
     ageSeconds: ageSeconds ?? null,
     freshness: isStale ? "stale_or_unknown" : "fresh",
-    entityCount: normalizedTripUpdateFilters
+    entityCount: normalizedTripUpdateFilters || decodeTruncated !== undefined
       ? entities.length
       : sourceEntityCount ?? entities.length,
     ...(sourceEntityCount != null ? { sourceEntityCount } : {}),
+    ...(decodeTruncated !== undefined ? {
+      truncated: decodeTruncated,
+      scannedEntityCount: decodeScannedEntityCount ?? null,
+      entityCountIsPartial: decodeTruncated
+    } : {}),
     entities
   };
 }
