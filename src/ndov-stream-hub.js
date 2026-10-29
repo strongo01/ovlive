@@ -329,18 +329,9 @@ export class NdovFeedHub extends DurableObject {
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
       rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
     }]));
-    this.ready = ctx.blockConcurrencyWhile(async () => {
-      // Eerst de oude opslag veiligstellen, pas daarna state laden.
-      if (ctx.id?.name === NDOV_SHARED_OBJECT_NAME) {
-        for (const stream of Object.keys(CONFIG)) {
-          await this.migrateLegacyStorage(stream);
-        }
-      }
-
-      for (const stream of Object.keys(CONFIG)) {
-        await this.loadStreamState(stream);
-      }
-    });
+    // Lazy per stream: een halte-aanvraag voor KV78 hoeft de volledige
+    // BISON/KV6-cache niet ook te decomprimeren en indexeren.
+    this.streamReadyPromises = new Map();
   }
 
   async loadStreamState(stream) {
@@ -446,9 +437,14 @@ export class NdovFeedHub extends DurableObject {
       while (state.mutations.size > KV17_STATE_LIMIT) state.mutations.delete(state.mutations.keys().next().value);
     }
 
-    this.pruneRows(stream);
-    this.pruneEvents(stream);
-    await this.pruneMutationDates(stream);
+    // Grote caches niet nogmaals volledig scannen bij het herstellen.
+    // KV78-rijen worden vóór collectorverwerking periodiek opgeschoond; de
+    // /rows-respons controleert versheid en tijdvenster rechtstreeks.
+    // BISON-pruning blijft bij de status-/collectorpaden behouden.
+    if (stream === 'bison') {
+      this.pruneEvents(stream);
+      await this.pruneMutationDates(stream);
+    }
     state.lastFullPersistAt = Date.now();
   }
 
@@ -755,11 +751,32 @@ export class NdovFeedHub extends DurableObject {
     for (let i = 0; i < expired.length; i += 500) await this.ctx.storage.delete(expired.slice(i, i + 500));
   }
 
+  async ensureStreamReady(stream) {
+    if (!CONFIG[stream]) throw new Error('Unknown NDOV stream: ' + stream);
+    let pending = this.streamReadyPromises.get(stream);
+    if (!pending) {
+      pending = this.ctx.blockConcurrencyWhile(async () => {
+        // Migratie en opslagherstel gebeuren alleen voor de benodigde stream.
+        if (this.ctx.id?.name === NDOV_SHARED_OBJECT_NAME) {
+          await this.migrateLegacyStorage(stream);
+        }
+        await this.loadStreamState(stream);
+      });
+      this.streamReadyPromises.set(stream, pending);
+      pending.catch(() => {
+        if (this.streamReadyPromises.get(stream) === pending) {
+          this.streamReadyPromises.delete(stream);
+        }
+      });
+    }
+    await pending;
+  }
+
   async fetch(request) {
-    await this.ready;
     const url = new URL(request.url);
     const stream = url.searchParams.get('stream') || 'kv78';
     if (!CONFIG[stream]) return Response.json({ ok: false, error: 'unknown stream' }, { status: 400 });
+    await this.ensureStreamReady(stream);
     const state = this.stateFor(stream);
 
     if (url.pathname === '/stop-name-cache') {
@@ -907,7 +924,11 @@ export class NdovFeedHub extends DurableObject {
     }
 
     if (url.pathname === '/status') {
-      if (stream === 'bison') this.pruneEvents(stream);
+      if (stream === 'kv78') this.pruneRows(stream);
+      if (stream === 'bison') {
+        this.pruneEvents(stream);
+        await this.pruneMutationDates(stream);
+      }
       const base = state.snapshot.state === 'idle' ? initialSnapshot(stream) : state.snapshot;
       const kv78IdentityDiagnostics =
         stream === "kv78" && url.searchParams.get("identityDiagnostics") === "1"
@@ -1413,9 +1434,16 @@ export class NdovFeedHub extends DurableObject {
           (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
         );
       }
+      const nowSeconds = amsterdamClockSeconds(now);
       const fresh = candidateRows.filter((row) => {
         const at = Date.parse(row.receivedAt ?? '');
-        return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS;
+        return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS &&
+          kv78RowScheduleInfo(
+            row,
+            nowSeconds,
+            KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+            KV78_STOP_TIME_FUTURE_RETENTION_SECONDS
+          ).relevant;
       });
       fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
 
@@ -1721,7 +1749,7 @@ export class NdovFeedHub extends DurableObject {
   }
 
   async alarm() {
-    await this.ready;
+    // State wordt in de alarm-handler alleen hersteld voor feeds die actief zijn.
 
     // Harde fencing: na de migratie verzamelt uitsluitend het gedeelde object.
     // Oude object-ID's mogen niet opnieuw starten, zelfs niet als hun
@@ -1752,10 +1780,14 @@ export class NdovFeedHub extends DurableObject {
 
     const streams = [];
     for (const stream of Object.keys(CONFIG)) {
+      const enabled = (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       const state = this.stateFor(stream);
-      state.continuousEnabled =
-        (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
-      if (state.continuousEnabled) streams.push(stream);
+      state.continuousEnabled = enabled;
+      if (enabled) {
+        await this.ensureStreamReady(stream);
+        state.continuousEnabled = true;
+        streams.push(stream);
+      }
     }
 
     if (streams.length === 0) {
