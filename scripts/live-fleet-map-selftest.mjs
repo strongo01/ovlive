@@ -178,8 +178,9 @@ assert.equal(helperContext.tripIdMatchesForShape(
 
 assert.ok(worker.includes('url.pathname === "/api/live-map/openov"') &&
   worker.includes("handleLiveMapOpenovApi") &&
-  worker.includes("decodeOpenovVehiclePositions(bytes)") &&
-  worker.includes("Avoid sorting the entire national feed") &&
+  worker.includes("decodeOpenovVehiclePositions(bytes, {") &&
+  worker.includes("maxScannedEntities: LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES") &&
+  worker.includes("bounds: {") &&
   worker.includes("LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000") &&
   worker.includes("liveMapOpenovInFlight") &&
   worker.includes("OVLIVE_LIVE_MAP_OPENOV_STALE_INFLIGHT"),
