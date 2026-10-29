@@ -3788,8 +3788,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const updateAgeSeconds = newestReceivedAtMs === null
         ? null
         : Math.max(0, Math.round((Date.now() - newestReceivedAtMs) / 1000));
+      // The normal 10-second ETA poll reuses the shared stop-name cache only.
+      // The iOS client opts into bounded asset reads when names are missing, and
+      // throttles that opt-in so a timeline refresh never repeatedly parses shards.
+      const resolveStopNamesRequested = url.searchParams.get("resolveStopNames") === "1";
       const settled = await Promise.allSettled([
-        resolveNdovKv78StopNames(selectedRows, env, { allowAssetReads: false }),
+        resolveNdovKv78StopNames(selectedRows, env, {
+          allowAssetReads: resolveStopNamesRequested
+        }),
         readHub("bison", "events", [["identity", identity]]),
         readHub("bison", "mutations", [["identity", identity]]),
       ]);
