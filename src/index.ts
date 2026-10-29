@@ -3786,7 +3786,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         ? null
         : Math.max(0, Math.round((Date.now() - newestReceivedAtMs) / 1000));
       const settled = await Promise.allSettled([
-        resolveNdovKv78StopNames(selectedRows, env),
+        resolveNdovKv78StopNames(selectedRows, env, { allowAssetReads: false }),
         readHub("bison", "events", [["identity", identity]]),
         readHub("bison", "mutations", [["identity", identity]]),
       ]);
