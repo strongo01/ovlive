@@ -776,7 +776,14 @@ export class NdovFeedHub extends DurableObject {
     const url = new URL(request.url);
     const stream = url.searchParams.get('stream') || 'kv78';
     if (!CONFIG[stream]) return Response.json({ ok: false, error: 'unknown stream' }, { status: 400 });
-    await this.ensureStreamReady(stream);
+    // Een noodstop moet ook werken wanneer het herstellen van de grote cache faalt.
+    if (url.pathname === '/continuous/disable') {
+      if (this.ctx.id?.name === NDOV_SHARED_OBJECT_NAME) {
+        await this.migrateLegacyStorage(stream);
+      }
+    } else {
+      await this.ensureStreamReady(stream);
+    }
     const state = this.stateFor(stream);
 
     if (url.pathname === '/stop-name-cache') {
@@ -925,10 +932,7 @@ export class NdovFeedHub extends DurableObject {
 
     if (url.pathname === '/status') {
       if (stream === 'kv78') this.pruneRows(stream);
-      if (stream === 'bison') {
-        this.pruneEvents(stream);
-        await this.pruneMutationDates(stream);
-      }
+      if (stream === 'bison') this.pruneEvents(stream);
       const base = state.snapshot.state === 'idle' ? initialSnapshot(stream) : state.snapshot;
       const kv78IdentityDiagnostics =
         stream === "kv78" && url.searchParams.get("identityDiagnostics") === "1"
@@ -1239,10 +1243,17 @@ export class NdovFeedHub extends DurableObject {
       const persistedEnabled =
         (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       const existingAlarm = await this.ctx.storage.getAlarm();
-      const anotherCollectorEnabled = [...this.streamStates.entries()]
-        .some(([otherStream, otherState]) =>
-          otherStream !== stream && otherState.continuousEnabled
-        );
+      let anotherCollectorEnabled = false;
+      for (const otherStream of Object.keys(CONFIG)) {
+        if (otherStream === stream) continue;
+        const otherState = this.stateFor(otherStream);
+        const persistedOtherEnabled =
+          (await this.ctx.storage.get(otherStream + ':continuousEnabled')) === true;
+        if (otherState.continuousEnabled || persistedOtherEnabled) {
+          anotherCollectorEnabled = true;
+          break;
+        }
+      }
       const alreadyDisabled = !persistedEnabled &&
         existingAlarm === null && !state.running && !state.socket;
 
