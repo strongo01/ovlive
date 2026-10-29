@@ -3304,10 +3304,10 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
 
 const LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000;
 const LIVE_MAP_OPENOV_CACHE_TTL_SECONDS = 15;
-// Keep this response deliberately smaller: JSON serialization and protobuf
-// traversal both count against the Free Workers CPU budget.
-const LIVE_MAP_OPENOV_MAX_POSITIONS = 400;
-const LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES = 900;
+// The map must receive the complete Dutch OpenOV fleet, not a sample.
+// The selective protobuf decoder avoids building the heavyweight generated GTFS-RT
+// object graph. Keep the geographic window, but never cap the number of positions
+// or feed entities: that silently hides most vehicles from the live map.
 
 type LiveMapOpenovCachedBody = {
   body: string;
@@ -3444,8 +3444,8 @@ async function handleLiveMapOpenovApi(
       // in het bronschema falen we veilig in plaats van een zware volledige
       // GTFS-RT-objectboom op te bouwen en opnieuw een CPU-limit te riskeren.
       const decoded = decodeOpenovVehiclePositions(bytes, {
-        maxResults: LIVE_MAP_OPENOV_MAX_POSITIONS,
-        maxScannedEntities: LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES,
+        // Geographic scope only; do not set maxResults/maxScannedEntities.
+        // The map must show every matching vehicle from the full feed.
         bounds: {
           minLatitude: 49,
           maxLatitude: 56,
@@ -3477,6 +3477,8 @@ async function handleLiveMapOpenovApi(
         byteCount: bytes.byteLength,
         sourceEntityCount: decoded.sourceEntityCount,
         validPositionCount: entities.length,
+        scannedEntityCount: decoded.scannedEntityCount,
+        truncated: decoded.truncated === true,
         decodeDurationMs,
         totalDurationMs: Date.now() - startedAt,
         freshness
@@ -3498,7 +3500,7 @@ async function handleLiveMapOpenovApi(
         scannedEntityCount: decoded.scannedEntityCount ?? decoded.sourceEntityCount,
         truncated: decoded.truncated === true,
         returnedCount: entities.length,
-        decoder: "selective-protobuf-bounded",
+        decoder: "selective-protobuf-full-fleet",
         entities
       });
 
