@@ -154,8 +154,13 @@ assert.match(
 );
 assert.match(
   worker,
-  /resolveNdovKv78StopNames\(selectedRows, env, \{ allowAssetReads: false \}\)/,
-  "Directe NDOV-ritdetails mogen niet per verzoek grote statische stopnaamshards parsen"
+  /const resolveStopNamesRequested = url\.searchParams\.get\("resolveStopNames"\) === "1";/,
+  "Alleen een expliciet verzoek mag statische PSA/CHB-stopnaamshards activeren"
+);
+assert.match(
+  worker,
+  /resolveNdovKv78StopNames\(selectedRows, env, \{\s*allowAssetReads: resolveStopNamesRequested\s*\}\)/,
+  "Normale realtime-refresh gebruikt alleen de gedeelde stopnaamcache; expliciete opt-in blijft begrensd"
 );
 assert.match(
   ndovPlan,
