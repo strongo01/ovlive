@@ -284,10 +284,35 @@ export function parseKv78Payload(text, envelope = '') {
   return Array.from(iterateKv78Payload(text, envelope));
 }
 
+const XML_REGEX_CACHE_LIMIT = 64;
+const TAG_REGEX_CACHE = new Map();
+const BLOCK_REGEX_CACHE = new Map();
+const TAG_PRESENCE_REGEX_CACHE = new Map();
+
+function cachedXmlRegex(cache, name, flags, sourceForName) {
+  let regex = cache.get(name);
+  if (regex) return regex;
+
+  const escaped = String(name).replace(/[.*+?^$()|[\]\\]/g, '\\$&');
+  regex = new RegExp(sourceForName(escaped), flags);
+  if (cache.size >= XML_REGEX_CACHE_LIMIT) {
+    cache.delete(cache.keys().next().value);
+  }
+  cache.set(name, regex);
+  return regex;
+}
+
 function tag(xml, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`<(?:(?:[A-Za-z_][\\w.-]*):)?${escaped}\\b[^>]*>([\\s\\S]*?)<\\/(?:(?:[A-Za-z_][\\w.-]*):)?${escaped}\\s*>`, 'i');
-  const match = xml.match(re);
+  const re = cachedXmlRegex(
+    TAG_REGEX_CACHE,
+    name,
+    'i',
+    (escaped) =>
+      '<(?:(?:[A-Za-z_][\\w.-]*):)?' + escaped +
+      '\\b[^>]*>([\\s\\S]*?)<\\/(?:(?:[A-Za-z_][\\w.-]*):)?' +
+      escaped + '\\s*>',
+  );
+  const match = re.exec(xml);
   return match ? clean(match[1].replace(/<!\[CDATA\[|\]\]>/g, '')) : null;
 }
 
@@ -352,8 +377,17 @@ const KV17_ACTIONS = [
 ];
 
 function blocks(xml, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`<(?:(?:[A-Za-z_][\\w.-]*):)?${escaped}\\b([^>]*?)(?:\\/\\s*>|>([\\s\\S]*?)<\\/(?:(?:[A-Za-z_][\\w.-]*):)?${escaped}\\s*>)`, 'gi');
+  const re = cachedXmlRegex(
+    BLOCK_REGEX_CACHE,
+    name,
+    'gi',
+    (escaped) =>
+      '<(?:(?:[A-Za-z_][\\w.-]*):)?' + escaped +
+      '\\b([^>]*?)(?:\\/\\s*>|>([\\s\\S]*?)<\\/(?:(?:[A-Za-z_][\\w.-]*):)?' +
+      escaped + '\\s*>)',
+  );
+  // A global RegExp retains lastIndex between calls.
+  re.lastIndex = 0;
   const out = [];
   let match;
   while ((match = re.exec(xml))) out.push(match[2] ?? '');
@@ -361,8 +395,16 @@ function blocks(xml, name) {
 }
 
 function hasEmptyOrPairedTag(xml, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`<(?:(?:[A-Za-z_][\\w.-]*):)?${escaped}\\b(?:[^>]*\\/\\s*>|[^>]*>[\\s\\S]*?<\\/(?:(?:[A-Za-z_][\\w.-]*):)?${escaped}\\s*>)`, 'i').test(xml);
+  const re = cachedXmlRegex(
+    TAG_PRESENCE_REGEX_CACHE,
+    name,
+    'i',
+    (escaped) =>
+      '<(?:(?:[A-Za-z_][\\w.-]*):)?' + escaped +
+      '\\b(?:[^>]*\\/\\s*>|[^>]*>[\\s\\S]*?<\\/(?:(?:[A-Za-z_][\\w.-]*):)?' +
+      escaped + '\\s*>)',
+  );
+  return re.test(xml);
 }
 
 /**
