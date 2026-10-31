@@ -461,14 +461,14 @@ export class NdovFeedHub extends DurableObject {
         for (const [savedKey, event] of entries) {
           const identity = canonicalBisonTripIdentity(event) ?? savedKey;
           state.events.delete(identity);
-          state.events.delete(identity);
-        state.events.set(identity, { ...event, identity });
+          state.events.set(identity, { ...event, identity });
         }
       }
     } else {
       const savedEvents = await ctx.storage.get(key('events'));
       for (const [savedKey, event] of (savedEvents ?? [])) {
         const identity = canonicalBisonTripIdentity(event) ?? savedKey;
+        state.events.delete(identity);
         state.events.set(identity, { ...event, identity });
       }
     }
