@@ -245,20 +245,110 @@ export function isKv78RowScheduleRelevant(
 export function selectKv78RowEvictionKeys(
   entries, limit, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
 ) {
-  const allEntries = entries instanceof Map ? [...entries.entries()] : Array.from(entries ?? []);
-  const excess = Math.max(0, allEntries.length - Math.max(0, limit));
+  // De productiecache is een Map. Gebruik daarvan rechtstreeks de iterator:
+  // maak geen tijdelijke array met alle 30.000 entries.
+  // Andere iterables blijven compatibel met de bestaande functie.
+  const sourceEntries = entries instanceof Map || Array.isArray(entries)
+    ? entries
+    : Array.from(entries ?? []);
+  const entryCount = sourceEntries instanceof Map
+    ? sourceEntries.size
+    : sourceEntries.length;
+
+  const requestedExcess = Math.max(0, entryCount - Math.max(0, limit));
+  const excess = Number.isFinite(requestedExcess)
+    ? Math.floor(requestedExcess)
+    : 0;
+
   if (!excess) return [];
-  const ranked = allEntries.map(([key, row], index) => {
-    const info = kv78RowScheduleInfo(row, nowSeconds, maxPastSeconds, maxFutureSeconds);
-    return {
+
+  // Sorteervolgorde van de oude implementatie:
+  // 1. grootste tijdsafstand eerst;
+  // 2. bij gelijke afstand de oudste Map-entry eerst.
+  // De heap bewaart alleen de 'excess' hoogst gerangschikte entries.
+  const comparePriority = (a, b) => {
+    if (a.distanceSeconds > b.distanceSeconds) return -1;
+    if (a.distanceSeconds < b.distanceSeconds) return 1;
+    return a.index - b.index;
+  };
+
+  // Max-heap volgens comparePriority: het minst urgente geselecteerde
+  // verwijderitem staat bovenaan en kan efficiënt worden vervangen.
+  const heap = [];
+
+  const siftUp = (childIndex) => {
+    let child = childIndex;
+    while (child > 0) {
+      const parent = Math.floor((child - 1) / 2);
+      if (comparePriority(heap[child], heap[parent]) <= 0) break;
+
+      const temporary = heap[parent];
+      heap[parent] = heap[child];
+      heap[child] = temporary;
+      child = parent;
+    }
+  };
+
+  const siftDown = (parentIndex) => {
+    let parent = parentIndex;
+
+    while (true) {
+      const left = parent * 2 + 1;
+      const right = left + 1;
+      let worst = parent;
+
+      if (
+        left < heap.length &&
+        comparePriority(heap[left], heap[worst]) > 0
+      ) {
+        worst = left;
+      }
+
+      if (
+        right < heap.length &&
+        comparePriority(heap[right], heap[worst]) > 0
+      ) {
+        worst = right;
+      }
+
+      if (worst === parent) break;
+
+      const temporary = heap[parent];
+      heap[parent] = heap[worst];
+      heap[worst] = temporary;
+      parent = worst;
+    }
+  };
+
+  let index = 0;
+
+  for (const [key, row] of sourceEntries) {
+    const info = kv78RowScheduleInfo(
+      row, nowSeconds, maxPastSeconds, maxFutureSeconds,
+    );
+
+    const candidate = {
       key,
       index,
-      // Unknown scheduled times are least useful for stop-time predictions.
-      distanceSeconds: info.hasScheduleTime ? info.distanceSeconds : Number.POSITIVE_INFINITY,
+      distanceSeconds: info.hasScheduleTime
+        ? info.distanceSeconds
+        : Number.POSITIVE_INFINITY,
     };
-  });
-  ranked.sort((a, b) => b.distanceSeconds - a.distanceSeconds || a.index - b.index);
-  return ranked.slice(0, excess).map((item) => item.key);
+
+    if (heap.length < excess) {
+      heap.push(candidate);
+      siftUp(heap.length - 1);
+    } else if (comparePriority(candidate, heap[0]) < 0) {
+      heap[0] = candidate;
+      siftDown(0);
+    }
+
+    index += 1;
+  }
+
+  // Herstel exact de oude verwijdervolgorde.
+  heap.sort(comparePriority);
+  return heap.map((item) => item.key);
 }
 
 export function isRecentIsoTime(value, now = Date.now(), maxAgeMs = 180_000) {

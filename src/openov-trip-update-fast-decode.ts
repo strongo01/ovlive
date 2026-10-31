@@ -43,6 +43,17 @@ export interface DecodedOpenovTripUpdateFeed {
   feedTimestamp?: number;
   sourceEntityCount: number;
   entities: DecodedOpenovTripUpdate[];
+  /** Present for bounded samples; true means later source entities were skipped. */
+  truncated?: boolean;
+  /** Present for bounded samples; includes all FeedMessage.entity variants inspected. */
+  scannedEntityCount?: number;
+}
+
+export interface OpenovTripUpdateDecodeOptions {
+  /** Stop once this many matching trip updates have been materialized. */
+  maxResults?: number;
+  /** Hard CPU guard limiting the number of FeedMessage.entity records inspected. */
+  maxScannedEntities?: number;
 }
 
 interface Field {
@@ -441,17 +452,32 @@ function normalizeStops(stops: DecodedOpenovTripUpdateStop[], tripDelay: number)
 
 export function decodeOpenovTripUpdates(
   bytes: Uint8Array,
-  filters?: OpenovTripUpdateFilters
+  filters?: OpenovTripUpdateFilters,
+  options?: OpenovTripUpdateDecodeOptions
 ): DecodedOpenovTripUpdateFeed {
   let feedTimestamp: number | undefined;
   let sourceEntityCount = 0;
+  let scannedEntityCount = 0;
+  let truncated = false;
   const entities: DecodedOpenovTripUpdate[] = [];
+  const maxResults = Number.isInteger(options?.maxResults) && Number(options?.maxResults) > 0
+    ? Number(options?.maxResults)
+    : undefined;
+  const maxScannedEntities = Number.isInteger(options?.maxScannedEntities) &&
+      Number(options?.maxScannedEntities) > 0
+    ? Number(options?.maxScannedEntities)
+    : undefined;
 
   for (let offset = 0; offset < bytes.byteLength;) {
     const field = readField(bytes, offset, bytes.byteLength);
     if (field.number === 1 && field.wireType === 2) {
       feedTimestamp = decodeHeaderTimestamp(bytes, field.contentStart, field.contentEnd);
     } else if (field.number === 2 && field.wireType === 2) {
+      if (maxScannedEntities !== undefined && scannedEntityCount >= maxScannedEntities) {
+        truncated = true;
+        break;
+      }
+      scannedEntityCount += 1;
       let entityIdField: Field | undefined;
       let tripUpdateField: Field | undefined;
       for (let entityOffset = field.contentStart; entityOffset < field.contentEnd;) {
@@ -481,11 +507,18 @@ export function decodeOpenovTripUpdates(
             timestamp: raw.timestamp > 0 ? raw.timestamp : undefined,
             stopUpdates: normalizeStops(stops, raw.delay)
           });
+          if (maxResults !== undefined && entities.length >= maxResults) {
+            truncated = field.nextOffset < bytes.byteLength;
+            break;
+          }
         }
       }
     }
     offset = field.nextOffset;
   }
 
+  if (maxResults !== undefined || maxScannedEntities !== undefined) {
+    return { feedTimestamp, sourceEntityCount, entities, truncated, scannedEntityCount };
+  }
   return { feedTimestamp, sourceEntityCount, entities };
 }

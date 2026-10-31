@@ -13,6 +13,14 @@ const rateLimiter = await readFile(
   new URL("../src/api-rate-limit.ts", import.meta.url),
   "utf8"
 );
+const ndovPlan = await readFile(
+  new URL("../src/ndov-plan-cancellation.js", import.meta.url),
+  "utf8"
+);
+const ndovHub = await readFile(
+  new URL("../src/ndov-stream-hub.js", import.meta.url),
+  "utf8"
+);
 
 const refreshStart = worker.indexOf(
   'if (isRealtimeRefresh && request.method === "POST")'
@@ -80,8 +88,89 @@ assert.match(
 );
 assert.match(
   worker,
+  /const OPENOV_FEED_CACHE_MAX_ENTRIES = 8;/,
+  "De decoded OpenOV-feedcache moet een harde bovengrens hebben"
+);
+assert.match(
+  worker,
+  /const OPENOV_FEED_CACHE_MAX_AGE_MS = 180_000;/,
+  "Oude feedvarianten mogen niet onbeperkt in het Worker-geheugen blijven"
+);
+assert.match(
+  worker,
+  /function pruneOpenovFeedCache\(/,
+  "De Worker moet oude en overtollige feedcache-items opruimen"
+);
+assert.match(
+  worker,
+  /while \(openovFeedCache\.size > OPENOV_FEED_CACHE_MAX_ENTRIES\)/,
+  "De cache-opruiming moet de ingestelde maximumgrootte afdwingen"
+);
+assert.match(
+  worker,
+  /pruneOpenovFeedCache\(Date\.now\(\), cacheKey\);/,
+  "Na het toevoegen van een feed moet de cache direct begrensd worden"
+);
+assert.match(
+  worker,
   /const OPENOV_VEHICLE_POSITION_CACHE_TTL_MS = 12_000;/,
   "De voertuigposities voor de live kaart moeten kort gecachet blijven"
+);
+const liveMapHandlerStart = worker.indexOf("async function handleLiveMapOpenovApi");
+const liveMapDecodeStart = worker.indexOf(
+  "const decoded = decodeOpenovVehiclePositions(bytes, {",
+  liveMapHandlerStart
+);
+const liveMapDecodeEnd = worker.indexOf("});", liveMapDecodeStart);
+const liveMapDecodeOptions = liveMapDecodeStart >= 0 && liveMapDecodeEnd > liveMapDecodeStart
+  ? worker.slice(liveMapDecodeStart, liveMapDecodeEnd)
+  : "";
+assert.ok(
+  liveMapDecodeOptions.includes("bounds: {") &&
+    !/maxResults\s*:|maxScannedEntities\s*:/.test(liveMapDecodeOptions) &&
+    !worker.includes("LIVE_MAP_OPENOV_MAX_POSITIONS") &&
+    !worker.includes("LIVE_MAP_OPENOV_MAX_SCANNED_ENTITIES"),
+  "De live kaart moet alle voertuigen binnen Nederland uitlezen; de nationale feed mag niet worden afgekapt tot een sample"
+);
+assert.match(
+  worker,
+  /const OVAPI_LINE_DIRECTORY_CACHE_TTL_MS = 60_000;/,
+  "OVAPI's landelijke lijnenlijst mag niet voor elke zoekactie opnieuw worden geparsed"
+);
+assert.match(
+  worker,
+  /const MAX_OVAPI_LINE_SEARCH_ROUTES = 40;/,
+  "Lijnzoeken moet het aantal zware OVAPI-lijnresponses begrenzen"
+);
+assert.match(
+  worker,
+  /planData = await enrichTransitousPlan\(planData, \{ includeVehiclePositions: false \}\);/,
+  "De planner mag niet ook de volledige voertuigposities-feed decoderen als de livekaart die apart ophaalt"
+);
+assert.match(
+  worker,
+  /const maxScannedEntities = heavyKind && !hasRouteOrTripFilter\s*\? Math\.min\(1200, Math\.max\(350, decodeLimit \* 2\)\)\s*:\s*undefined/,
+  "Alleen ongefilterde realtime-inspecties moeten een begrensde protobuf-scan gebruiken; exacte rit-/lijnverzoeken moeten de doelrit kunnen vinden"
+);
+assert.match(
+  worker,
+  /resolveNdovKv78StopNames\(selectedRows, env, \{ allowAssetReads: false \}\)/,
+  "Directe NDOV-ritdetails mogen niet per verzoek grote statische stopnaamshards parsen"
+);
+assert.match(
+  ndovPlan,
+  /if \(unresolvedAssetKeys\.size && allowAssetReads\)/,
+  "Statische PSA/CHB-stopnaamshards moeten optioneel uitgeschakeld kunnen worden"
+);
+assert.match(
+  ndovHub,
+  /state\.rowsByIdentity\.get\(identityKey\(wantedIdentity\)\)/,
+  "Exacte KV78-ritzoekingen moeten de index gebruiken in plaats van alle 30.000 rijen te scannen"
+);
+assert.match(
+  ndovHub,
+  /state\.rowsByOwnerDateLine\.get\(lookupKey\)/,
+  "KV78-lijn-/tijdzoekingen moeten eerst de exacte eigenaar, datum en lijn indexeren"
 );
 assert.match(
   worker,
@@ -98,7 +187,7 @@ assert.match(
 );
 assert.match(
   worker,
-  /decodeOpenovTripUpdates\(bytes, normalizedTripUpdateFilters\)/,
+  /decodeOpenovTripUpdates\(\s*bytes,\s*normalizedTripUpdateFilters,\s*boundedTripOptions\s*\)/,
   "De planner moet de selectieve protobuf-decoder gebruiken voor ritupdates"
 );
 assert.match(

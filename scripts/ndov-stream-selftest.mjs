@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, parseKv17Payload, parseKv78Payload } from '../src/ndov-feed-parser.mjs';
+import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, iterateBisonPayload, parseKv17Payload, parseKv78Payload, iterateKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
 import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
 import { handleNdovStopNameCacheRequest } from '../src/ndov-stop-name-cache.mjs';
@@ -41,6 +41,49 @@ assert.equal(kv[0].linePlanningNumber, 'U011');
 assert.equal(kv[0].departureDelaySeconds, -8);
 assert.equal(kv[0].identity, 'CXX|2026-10-11|2947354|U011|7004|0');
 
+// De streaming-parser moet dezelfde resultaten opleveren voor LF, CRLF en BOM.
+assert.deepEqual(
+  [...iterateKv78Payload(header, '/GOVI/KV8passtimes/CXX')],
+  kv,
+);
+assert.deepEqual(
+  [...iterateKv78Payload('\uFEFF' + header.replace(/\n/g, '\r\n'), '/GOVI/KV8passtimes/CXX')],
+  kv,
+);
+
+// Controleer behoud van voertuig-, annulering-, bestemming- en haltevelden.
+const richKv78Payload = String.raw`\LDataOwnerCode|OperationDate|LinePlanningNumber|JourneyNumber|FortifyOrderNumber|TargetDepartureTime|ExpectedDepartureTime|VejoJourneyNumber|VehicleJourneyType|VejoTripStatusType|CancelledJourney|ShowCancelledJourney|ShowCancelledTrip|CancelledCall|Monitored|DestinationName50|LinePublicNumber|LineName|TransportType|OperatorCode|OperatorName|BlockCode|NumberOfCoaches|TimingPointName|TimingPointTown|TimingPointCode|StopAreaCode|MessageType|MessageContent
+CXX|2026-10-11|U073|7008|0|09:03:00|09:06:00|991|BUS|CANCEL|true|false|true|false|true|Utrecht|73|Sprinter|BUS|UOV|U-OV|80659|2|Centraal|Utrecht|50003360|AREA-1|INFO|Test`;
+const richKv78 = [...iterateKv78Payload(richKv78Payload, '/GOVI/KV8passtimes/CXX')];
+assert.equal(Object.hasOwn(richKv78[0], 'userStopCode'), true);
+assert.equal(richKv78[0].userStopCode, undefined);
+assert.equal(richKv78[0].showCancelledStop, null);
+
+assert.equal(richKv78.length, 1);
+assert.equal(richKv78[0].departureDelaySeconds, 180);
+assert.equal(richKv78[0].vehicleJourneyNumber, '991');
+assert.equal(richKv78[0].vehicleJourneyType, 'BUS');
+assert.equal(richKv78[0].vejoTripStatusType, 'CANCEL');
+assert.equal(richKv78[0].cancelledJourney, 'true');
+assert.equal(richKv78[0].showCancelledJourney, 'false');
+assert.equal(richKv78[0].showCancelledTrip, 'true');
+assert.equal(richKv78[0].cancelledCall, 'false');
+assert.equal(richKv78[0].monitored, 'true');
+assert.equal(richKv78[0].destinationName, 'Utrecht');
+assert.equal(richKv78[0].linePublicNumber, '73');
+assert.equal(richKv78[0].lineName, 'Sprinter');
+assert.equal(richKv78[0].transportType, 'BUS');
+assert.equal(richKv78[0].operatorCode, 'UOV');
+assert.equal(richKv78[0].operatorName, 'U-OV');
+assert.equal(richKv78[0].blockCode, '80659');
+assert.equal(richKv78[0].numberOfCoaches, '2');
+assert.equal(richKv78[0].timingPointName, 'Centraal');
+assert.equal(richKv78[0].timingPointTown, 'Utrecht');
+assert.equal(richKv78[0].timingPointCode, '50003360');
+assert.equal(richKv78[0].stopAreaCode, 'AREA-1');
+assert.equal(richKv78[0].messageContent, 'Test');
+
+
 // Canonical cache keys must collapse LocalServiceLevelCode-only duplicates.
 const sameStopOtherServiceLevel = { ...kv[0], localServiceLevelCode: 'another-service-level' };
 assert.equal(kv78RowCacheKey(kv[0]), kv78RowCacheKey(sameStopOtherServiceLevel));
@@ -71,6 +114,85 @@ assert.deepEqual(
   ]), 1, 14 * 3600),
   ['untimed'],
 );
+
+// Vergelijk de heap exact met de oorspronkelijke sorteerimplementatie.
+function referenceKv78Evictions(entries, limit, nowSeconds) {
+  const allEntries = [...entries.entries()];
+  const excess = Math.max(0, allEntries.length - Math.max(0, limit));
+  if (!excess) return [];
+
+  const ranked = allEntries.map(([key, row], index) => {
+    const info = kv78RowScheduleInfo(row, nowSeconds);
+    return {
+      key,
+      index,
+      distanceSeconds: info.hasScheduleTime
+        ? info.distanceSeconds
+        : Number.POSITIVE_INFINITY,
+    };
+  });
+
+  ranked.sort((a, b) =>
+    b.distanceSeconds - a.distanceSeconds || a.index - b.index
+  );
+
+  return ranked.slice(0, excess).map((item) => item.key);
+}
+
+const evictionClock = 14 * 3600;
+for (const size of [2, 3, 32, 257]) {
+  const entries = new Map();
+
+  for (let i = 0; i < size; i += 1) {
+    const seconds = (i * 7919) % 86400;
+    const clock = [
+      String(Math.floor(seconds / 3600)).padStart(2, '0'),
+      String(Math.floor((seconds % 3600) / 60)).padStart(2, '0'),
+      String(seconds % 60).padStart(2, '0'),
+    ].join(':');
+
+    entries.set(`row-${i}`, i % 7 === 0
+      ? {}
+      : {
+          targetDepartureTime: clock,
+          ...(i % 3 === 0 ? { targetArrivalTime: clock } : {}),
+        });
+  }
+
+  for (const limit of [0, 1, Math.floor(size / 2), size - 1, size, size + 1]) {
+    assert.deepEqual(
+      selectKv78RowEvictionKeys(entries, limit, evictionClock),
+      referenceKv78Evictions(entries, limit, evictionClock),
+      `heap eviction moet identiek zijn bij size=${size}, limit=${limit}`,
+    );
+  }
+}
+
+// Realistische cache-overloop: 30.452 rijen, 452 te verwijderen.
+const largeEvictionRows = new Map();
+for (let i = 0; i < 30452; i += 1) {
+  const seconds = (i * 37) % 86400;
+  const clock = [
+    String(Math.floor(seconds / 3600)).padStart(2, '0'),
+    String(Math.floor((seconds % 3600) / 60)).padStart(2, '0'),
+    String(seconds % 60).padStart(2, '0'),
+  ].join(':');
+
+  largeEvictionRows.set(`large-${i}`, i % 19 === 0
+    ? {}
+    : { targetDepartureTime: clock });
+}
+
+const largeExpected = referenceKv78Evictions(
+  largeEvictionRows, 30000, evictionClock,
+);
+const largeActual = selectKv78RowEvictionKeys(
+  largeEvictionRows, 30000, evictionClock,
+);
+
+assert.deepEqual(largeActual, largeExpected);
+assert.equal(largeActual.length, 452);
+console.log('PASS: begrensde eviction-heap is identiek aan de oude sortering, ook bij 30.452 rijen');
 
 // Midnight must be interpreted conservatively as wall-clock schedule time.
 const midnightNow = Date.parse('2026-10-17T21:55:00.000Z'); // 23:55 Amsterdam
@@ -144,15 +266,6 @@ assert.match(hubSource, /const AUTO_SESSION_SECONDS = 600/);
 assert.match(hubSource, /const AUTO_REST_MS = 5 \* 1000/);
 assert.match(hubSource, /async alarm\(\)/);
 assert.match(hubSource, /return AUTO_REST_MS/);
-// Large durable feed snapshots must not be inflated for both streams inside the
-// constructor's 30-second blockConcurrencyWhile initialization window.
-assert.match(hubSource, /this\.loadedStreams = new Set\(\)/);
-assert.match(hubSource, /this\.loadingStreams = new Map\(\)/);
-assert.match(hubSource, /async ensureStreamLoaded\(stream\)/);
-assert.doesNotMatch(hubSource, /for \(const stream of Object\.keys\(CONFIG\)\) \{\s*await this\.loadStreamState\(stream\);\s*\}/);
-assert.match(hubSource, /if \(!url\.pathname\.startsWith\('\/migration\/'\)\) \{\s*await this\.ensureStreamLoaded\(stream\);\s*\}/);
-assert.match(hubSource, /const nextUnloaded = streams\.find\(\(stream\) => !this\.loadedStreams\.has\(stream\)\)/);
-assert.match(hubSource, /await this\.ctx\.storage\.setAlarm\(Date\.now\(\) \+ 1000\)/);
 assert.match(hubSource, /async persistFullKv78Rows\(stream, force = false\)/);
 assert.match(hubSource, /async persistFullMutations\(stream, force = false\)/);
 assert.match(hubSource, /new CompressionStream\('gzip'\)/);
@@ -183,19 +296,50 @@ assert.match(hubSource, /KV6_EVENT_LIMIT = 30000/);
 assert.match(hubSource, /persistFullBisonEvents/);
 assert.doesNotMatch(hubSource, /TARGET_LINES/);
 assert.match(hubSource, /eventsForIdentities\(state\.mutations, identities\)/);
-assert.match(hubSource, /rowMatchesIdentity\(row, identity\)/);
+assert.match(hubSource, /rowsByIdentity\.get\(identityKey\(wantedIdentity\)\)/,
+  'exact KV78 identity requests must use the identity index instead of scanning all rows');
+assert.match(hubSource, /rowMatchesIdentity\(row, wantedIdentity\)/,
+  'indexed KV78 matches must still be checked against the complete exact trip identity');
+assert.ok(
+  hubSource.includes('tailMapValues(state.rows, KV78_STATUS_SAMPLE_LIMIT)'),
+  'KV78 status samples must not copy the entire cache',
+);
+assert.ok(
+  hubSource.includes('latestEvents: tailMapValues(state.events, 100)'),
+  'BISON status samples must not copy the entire event cache',
+);
+assert.doesNotMatch(
+  hubSource,
+  /\[\.\.\.state\.events\.values\(\)\]\.filter/,
+  'BISON vehicle lookup must filter without copying the full event cache',
+);
 assert.match(hubSource, /Date\.now\(\) - state\.lastPersistAt < minInterval/);
-assert.match(hubSource, /if \(stream === 'kv78' && !state\.continuousEnabled\) state\.rows\.clear\(\)/);
+assert.match(hubSource, /if \(stream === 'kv78' && !state\.continuousEnabled\) \{\s*state\.rows\.clear\(\);\s*state\.rowsByIdentity\.clear\(\);\s*state\.rowsByOwnerDate\.clear\(\);\s*\}/,
+  'KV78 cache reset must clear the row map and both remaining indexes');
+assert.doesNotMatch(hubSource, /rowsByOwnerDateLine/,
+  'KV78 must not retain a third owner/date/line index');
+assert.match(hubSource, /state\.rowsByOwnerDate\.get\(lookupKey\)/,
+  'line and vehicle lookups must reuse the owner/date index');
 assert.doesNotMatch(hubSource, /if \(!TARGET_LINES\.has\(row\.linePlanningNumber\)\) continue;/);
 
 const xml = `<tmi8:VV_TM_PUSH xmlns:tmi8="urn:test"><tmi8:KV6posinfo><tmi8:ONROUTE><tmi8:dataownercode>CXX</tmi8:dataownercode><tmi8:lineplanningnumber>U005</tmi8:lineplanningnumber><tmi8:operatingday>2026-10-11</tmi8:operatingday><tmi8:journeynumber>7008</tmi8:journeynumber><tmi8:reinforcementnumber>0</tmi8:reinforcementnumber><tmi8:userstopcode>51112302</tmi8:userstopcode><tmi8:timestamp>2026-10-11T09:53:00+02:00</tmi8:timestamp><tmi8:punctuality>531</tmi8:punctuality><tmi8:rd-x>134172</tmi8:rd-x><tmi8:rd-y>455878</tmi8:rd-y></tmi8:ONROUTE></tmi8:KV6posinfo></tmi8:VV_TM_PUSH>`;
 const bison = parseBisonPayload(xml, '/CXX/KV6posinfo');
+assert.deepEqual(
+  [...iterateBisonPayload(xml, '/CXX/KV6posinfo')],
+  bison,
+  'BISON-generator moet exact dezelfde events en velden opleveren',
+);
 assert.equal(bison.length, 1);
 assert.equal(bison[0].linePlanningNumber, 'U005');
 assert.equal(bison[0].punctualitySeconds, 531);
 assert.equal(bison[0].rdX, '134172');
 const initXml = `<tmi8:VV_TM_PUSH xmlns:tmi8="urn:test"><tmi8:KV6posinfo><tmi8:INIT><tmi8:dataownercode>CXX</tmi8:dataownercode><tmi8:lineplanningnumber>U073</tmi8:lineplanningnumber><tmi8:operatingday>2026-10-11</tmi8:operatingday><tmi8:journeynumber>7042</tmi8:journeynumber><tmi8:reinforcementnumber>0</tmi8:reinforcementnumber><tmi8:vehiclenumber>9625</tmi8:vehiclenumber><tmi8:blockcode>80659</tmi8:blockcode></tmi8:INIT></tmi8:KV6posinfo></tmi8:VV_TM_PUSH>`;
 const initEvent = parseBisonPayload(initXml, '/CXX/KV6posinfo');
+assert.deepEqual(
+  [...iterateBisonPayload(initXml, '/CXX/KV6posinfo')],
+  initEvent,
+  'BISON INIT-generator moet dezelfde voertuiggegevens opleveren',
+);
 assert.equal(initEvent.length, 1);
 assert.equal(initEvent[0].vehicleNumber, '9625');
 assert.equal(initEvent[0].blockCode, '80659');

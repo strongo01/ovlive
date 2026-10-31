@@ -11,6 +11,8 @@ const NDOV_SHARED_OBJECT_NAME = "ndov-shared-collector-v1";
 // Share the Free Worker subrequest budget with Transitous, realtime feeds, route
 // shards, service calendars and Durable Object calls. Partial maps stay unconfirmed.
 const MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST = 2;
+// The dedicated selected-trip details endpoint can spend a slightly larger, throttled budget for stop names.
+const MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST = 4;
 const MAX_OPENOV_STOP_PLACE_SHARDS_PER_REQUEST = 2;
 const AMSTERDAM_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Amsterdam",
@@ -1276,7 +1278,7 @@ function stopAssignmentShardNumber(key, shardCount) {
   return hash % shardCount;
 }
 
-async function getStopAssignmentIndex(env, keys = []) {
+async function getStopAssignmentIndex(env, keys = [], options = {}) {
   const validKeys = [...new Set((Array.isArray(keys) ? keys : [])
     .filter((key) => typeof key === "string" && key.includes("|")))];
   if (!validKeys.length) {
@@ -1304,10 +1306,14 @@ async function getStopAssignmentIndex(env, keys = []) {
   const shardNumbers = [...new Set(validKeys.map((key) => stopAssignmentShardNumber(key, shardCount)))];
   // The public plan endpoint shares its subrequest budget with route shards and live feeds.
   // Unloaded assignment records remain explicitly unverified instead of exhausting the Worker.
+  const requestedBudget = Number(options?.maxNewShards);
+  const maxNewShards = Number.isInteger(requestedBudget)
+    ? Math.max(0, Math.min(MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST, requestedBudget))
+    : MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST;
   const selectedShardNumbers = selectCachedCrosswalkShardNumbers(
     shardNumbers,
     stopAssignmentShardCache,
-    MAX_STOP_ASSIGNMENT_SHARDS_PER_REQUEST
+    maxNewShards
   );
   const assignments = Object.create(null);
   await Promise.all(selectedShardNumbers.map(async (shardNumber) => {
@@ -1641,8 +1647,12 @@ async function writePersistentNdovKv78StopNames(env, entries) {
   }
 }
 
-export async function resolveNdovKv78StopNames(rows, env) {
+export async function resolveNdovKv78StopNames(rows, env, options = {}) {
   const sourceRows = Array.isArray(rows) ? rows : [];
+  // The direct trip-detail endpoint prioritizes timely KV78 predictions. It may
+  // reuse memory/DO-cached official names, but must not parse large static PSA/CHB
+  // crosswalk shards during every cold Worker invocation (10 ms Free CPU budget).
+  const allowAssetReads = options?.allowAssetReads !== false;
   const cacheKeyForRow = (row) => {
     const owner = String(row?.dataOwnerCode ?? "").trim().toUpperCase();
     const stopCode = String(row?.userStopCode ?? "").trim();
@@ -1698,8 +1708,10 @@ export async function resolveNdovKv78StopNames(rows, env) {
     shardCount: 0,
   };
   const persistentUpdates = [];
-  if (unresolvedAssetKeys.size) {
-    index = await getStopAssignmentIndex(env, [...unresolvedAssetKeys]);
+  if (unresolvedAssetKeys.size && allowAssetReads) {
+    index = await getStopAssignmentIndex(env, [...unresolvedAssetKeys], {
+      maxNewShards: MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST,
+    });
     const loadedShards = new Set(index.loadedShardNumbers ?? []);
 
     for (const assetKey of unresolvedAssetKeys) {
@@ -1757,6 +1769,10 @@ export async function resolveNdovKv78StopNames(rows, env) {
         });
       }
     }
+  } else if (unresolvedAssetKeys.size) {
+    // Leave these names unknown for this response; do not guess from an unrelated
+    // route. A subsequent background/plan enrichment may fill the official cache.
+    index.partial = true;
   }
 
   const persistentWrite = await writePersistentNdovKv78StopNames(env, persistentUpdates);

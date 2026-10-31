@@ -21,9 +21,14 @@ export declare function prepareNsTrainIdentities<T extends Record<string, any>>(
   plan: T,
   env: NdovPlanCancellationEnv,
 ): Promise<T>;
+export interface NdovKv78StopNameOptions {
+  /** Allow parsing static PSA/CHB assignment shards during this call. */
+  allowAssetReads?: boolean;
+}
 export declare function resolveNdovKv78StopNames(
   rows: Array<Record<string, any>>,
   env: NdovPlanCancellationEnv,
+  options?: NdovKv78StopNameOptions,
 ): Promise<{
   rows: Array<Record<string, any>>;
   crosswalk: {

@@ -1,4 +1,29 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const ndovHubSource = await readFile(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
+const ndovCancellationSource = await readFile(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
+assert.match(
+  ndovCancellationSource,
+  /MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST\s*=\s*4/,
+  'the selected-trip name resolver needs a bounded larger budget than the normal plan endpoint',
+);
+assert.match(
+  ndovCancellationSource,
+  /maxNewShards:\s*MAX_TRIP_STOP_NAME_SHARDS_PER_REQUEST/,
+  'the exact-trip name resolver must use its dedicated budget',
+);
+assert.match(
+  ndovHubSource,
+  /staleCount:\s*candidateRows\.length\s*-\s*fresh\.length/,
+  'KV78 /rows must calculate stale rows from the declared candidateRows collection',
+);
+assert.doesNotMatch(
+  ndovHubSource,
+  /staleCount:\s*rows\.length\s*-\s*fresh\.length/,
+  'KV78 /rows must not reference an undefined rows variable',
+);
+console.log('PASS: KV78 /rows stale count uses candidateRows, not an undefined variable');
 import { applyNdovCancellationsToPlan, matchKv78RowByScheduleTime } from '../src/ndov-plan-cancellation.js';
 import { kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
 

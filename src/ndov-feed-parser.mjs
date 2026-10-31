@@ -55,85 +55,233 @@ function timeDifference(expected, target) {
   return delta;
 }
 
-export function parseKv78Payload(text, envelope = '') {
-  const lines = String(text).replace(/^\uFEFF/, '').split(/\r?\n/);
-  const headerLine = lines.find((line) => /^\\LDataOwnerCode\|/.test(line) || /^\\L\|DataOwnerCode\|/.test(line));
-  if (!headerLine) return [];
-  const header = headerLine.replace(/^\\L/, '').split('|');
-  const rows = [];
-  for (const line of lines) {
-    if (!line || line.startsWith('\\') || line.startsWith('\uFEFF')) continue;
-    const values = line.split('|');
-    if (values.length < header.length) continue;
-    const record = {};
-    for (let i = 0; i < header.length; i++) record[header[i]] = clean(values[i]);
-    // JourneyNumber is the KV17 correlation key.
-    // VejoJourneyNumber remains separate vehicle-side metadata.
-    const journeyNumber = record.JourneyNumber;
-    if (!record.DataOwnerCode || !record.OperationDate || !record.LinePlanningNumber || !journeyNumber) continue;
-    const identity = [
-      record.DataOwnerCode,
-      record.OperationDate,
-      record.LocalServiceLevelCode,
-      record.LinePlanningNumber,
-      journeyNumber,
-      record.FortifyOrderNumber ?? '0',
-    ].join('|');
-    const targetDeparture = record.TargetDepartureTime;
-    const expectedDeparture = record.ExpectedDepartureTime;
-    const targetArrival = record.TargetArrivalTime;
-    const expectedArrival = record.ExpectedArrivalTime;
-    rows.push({
-      source: 'KV78Turbo',
-      envelope,
-      identity,
-      dataOwnerCode: record.DataOwnerCode,
-      operationDate: record.OperationDate,
-      localServiceLevelCode: record.LocalServiceLevelCode,
-      linePlanningNumber: record.LinePlanningNumber,
-      journeyNumber,
-      fortifyOrderNumber: record.FortifyOrderNumber ?? '0',
-      userStopOrderNumber: record.UserStopOrderNumber,
-      userStopCode: record.UserStopCode,
-      tripStopStatus: record.TripStopStatus,
-      // Bewaar expliciete rit- en halteannuleringen uit KV78Turbo.
-      vehicleJourneyNumber: record.VejoJourneyNumber ?? null,
-      vehicleJourneyType: record.VehicleJourneyType ?? null,
-      vejoTripStatusType: record.VejoTripStatusType ?? null,
-      cancelledJourney: record.CancelledJourney ?? null,
-      showCancelledJourney: record.ShowCancelledJourney ?? null,
-      showCancelledTrip: record.ShowCancelledTrip ?? null,
-      cancelledCall: record.CancelledCall ?? null,
-      monitored: record.Monitored ?? null,
-      targetDepartureTime: targetDeparture,
-      expectedDepartureTime: expectedDeparture,
-      targetArrivalTime: targetArrival,
-      expectedArrivalTime: expectedArrival,
-      departureDelaySeconds: timeDifference(expectedDeparture, targetDeparture),
-      arrivalDelaySeconds: timeDifference(expectedArrival, targetArrival),
-      lastUpdateTimeStamp: record.LastUpdateTimeStamp,
-      vehicleNumber: record.VehicleNumber,
-      showCancelledStop: record.ShowCancelledStop ?? null,
-      messageType: record.MessageType,
-      messageContent: record.MessageContent,
-      // Preserve optional source-provided display/vehicle fields when present.
-      // Names are later resolved only through the official PSA/CHB crosswalk.
-      destinationCode: record.DestinationCode ?? null,
-      destinationName: record.DestinationName ?? record.DestinationName50 ?? null,
-      linePublicNumber: record.LinePublicNumber ?? null,
-      lineName: record.LineName ?? null,
-      transportType: record.TransportType ?? null,
-      operatorCode: record.OperatorCode ?? record.DataOwnerCode ?? null,
-      operatorName: record.OperatorName ?? null,
-      blockCode: record.BlockCode ?? null,
-      numberOfCoaches: record.NumberOfCoaches ?? null,
-      timingPointName: record.TimingPointName ?? null,
-      timingPointTown: record.TimingPointTown ?? null,
-      timingPointCode: record.TimingPointCode ?? null,
-      stopAreaCode: record.StopAreaCode ?? null,
-    });
+const KV78_COLUMN_PROPERTIES = new Map([
+  ["DataOwnerCode", "dataOwnerCode"],
+  ["OperationDate", "operationDate"],
+  ["LocalServiceLevelCode", "localServiceLevelCode"],
+  ["LinePlanningNumber", "linePlanningNumber"],
+  ["JourneyNumber", "journeyNumber"],
+  ["FortifyOrderNumber", "fortifyOrderNumber"],
+  ["UserStopOrderNumber", "userStopOrderNumber"],
+  ["UserStopCode", "userStopCode"],
+  ["TripStopStatus", "tripStopStatus"],
+  ["VejoJourneyNumber", "vehicleJourneyNumber"],
+  ["VehicleJourneyType", "vehicleJourneyType"],
+  ["VejoTripStatusType", "vejoTripStatusType"],
+  ["CancelledJourney", "cancelledJourney"],
+  ["ShowCancelledJourney", "showCancelledJourney"],
+  ["ShowCancelledTrip", "showCancelledTrip"],
+  ["CancelledCall", "cancelledCall"],
+  ["Monitored", "monitored"],
+  ["TargetDepartureTime", "targetDepartureTime"],
+  ["ExpectedDepartureTime", "expectedDepartureTime"],
+  ["TargetArrivalTime", "targetArrivalTime"],
+  ["ExpectedArrivalTime", "expectedArrivalTime"],
+  ["LastUpdateTimeStamp", "lastUpdateTimeStamp"],
+  ["VehicleNumber", "vehicleNumber"],
+  ["ShowCancelledStop", "showCancelledStop"],
+  ["MessageType", "messageType"],
+  ["MessageContent", "messageContent"],
+  ["DestinationCode", "destinationCode"],
+  ["DestinationName", "destinationName"],
+  ["DestinationName50", "destinationName50"],
+  ["LinePublicNumber", "linePublicNumber"],
+  ["LineName", "lineName"],
+  ["TransportType", "transportType"],
+  ["OperatorCode", "operatorCode"],
+  ["OperatorName", "operatorName"],
+  ["BlockCode", "blockCode"],
+  ["NumberOfCoaches", "numberOfCoaches"],
+  ["TimingPointName", "timingPointName"],
+  ["TimingPointTown", "timingPointTown"],
+  ["TimingPointCode", "timingPointCode"],
+  ["StopAreaCode", "stopAreaCode"],
+]);
+
+export function* iterateKv78Payload(text, envelope = '') {
+  const source = String(text).replace(/^\uFEFF/, '');
+
+  // Zoek de kopregel zonder eerst alle regels van het bericht te splitsen.
+  let scan = 0;
+  let headerStart = -1;
+  let headerEnd = -1;
+  let dataStart = 0;
+
+  while (scan <= source.length) {
+    const newline = source.indexOf('\n', scan);
+    const rawEnd = newline < 0 ? source.length : newline;
+    const lineEnd =
+      rawEnd > scan && source.charCodeAt(rawEnd - 1) === 13
+        ? rawEnd - 1
+        : rawEnd;
+
+    if (
+      source.startsWith('\\LDataOwnerCode|', scan) ||
+      source.startsWith('\\L|DataOwnerCode|', scan)
+    ) {
+      headerStart = scan;
+      headerEnd = lineEnd;
+      dataStart = newline < 0 ? source.length : newline + 1;
+      break;
+    }
+
+    if (newline < 0) break;
+    scan = newline + 1;
   }
-  return rows;
+
+  if (headerStart < 0) return;
+
+  const header = source.slice(headerStart + 2, headerEnd).split('|');
+
+  // Bewaar de kolomvolgorde. Bij dubbele kolomnamen moet de laatste
+  // waarde winnen, net als bij het oorspronkelijke record-object.
+  const selectedColumns = new Map();
+
+  for (let i = 0; i < header.length; i += 1) {
+    const property = KV78_COLUMN_PROPERTIES.get(header[i]);
+    if (property) selectedColumns.set(i, property);
+  }
+
+  let lineStart = dataStart;
+
+  while (lineStart < source.length) {
+    const newline = source.indexOf('\n', lineStart);
+    const rawEnd = newline < 0 ? source.length : newline;
+    const lineEnd =
+      rawEnd > lineStart && source.charCodeAt(rawEnd - 1) === 13
+        ? rawEnd - 1
+        : rawEnd;
+
+    const firstCharacter = source.charCodeAt(lineStart);
+
+    if (
+      lineEnd > lineStart &&
+      firstCharacter !== 92 &&
+      firstCharacter !== 0xfeff
+    ) {
+      const row = {
+        source: 'KV78Turbo',
+        envelope,
+        identity: undefined,
+        dataOwnerCode: undefined,
+        operationDate: undefined,
+        localServiceLevelCode: undefined,
+        linePlanningNumber: undefined,
+        journeyNumber: undefined,
+        fortifyOrderNumber: undefined,
+        userStopOrderNumber: undefined,
+        userStopCode: undefined,
+        tripStopStatus: undefined,
+        vehicleJourneyNumber: null,
+        vehicleJourneyType: null,
+        vejoTripStatusType: null,
+        cancelledJourney: null,
+        showCancelledJourney: null,
+        showCancelledTrip: null,
+        cancelledCall: null,
+        monitored: null,
+        targetDepartureTime: undefined,
+        expectedDepartureTime: undefined,
+        targetArrivalTime: undefined,
+        expectedArrivalTime: undefined,
+        departureDelaySeconds: null,
+        arrivalDelaySeconds: null,
+        lastUpdateTimeStamp: undefined,
+        vehicleNumber: undefined,
+        showCancelledStop: null,
+        messageType: undefined,
+        messageContent: undefined,
+        destinationCode: null,
+        destinationName: null,
+        linePublicNumber: null,
+        lineName: null,
+        transportType: null,
+        operatorCode: null,
+        operatorName: null,
+        blockCode: null,
+        numberOfCoaches: null,
+        timingPointName: null,
+        timingPointTown: null,
+        timingPointCode: null,
+        stopAreaCode: null,
+      };
+
+      let destinationName50 = null;
+      let valueStart = lineStart;
+      let valid = true;
+
+      for (let index = 0; index < header.length; index += 1) {
+        const separator = source.indexOf('|', valueStart);
+        const hasSeparator = separator >= 0 && separator < lineEnd;
+
+        // Een onvolledige regel werd ook door de oude parser geweigerd.
+        if (!hasSeparator && index < header.length - 1) {
+          valid = false;
+          break;
+        }
+
+        const valueEnd = hasSeparator ? separator : lineEnd;
+        const property = selectedColumns.get(index);
+
+        if (property) {
+          const value = clean(source.slice(valueStart, valueEnd));
+
+          if (property === 'destinationName50') {
+            destinationName50 = value;
+          } else {
+            row[property] = value;
+          }
+        }
+
+        if (!hasSeparator) break;
+        valueStart = separator + 1;
+      }
+
+      if (
+        valid &&
+        row.dataOwnerCode &&
+        row.operationDate &&
+        row.linePlanningNumber &&
+        row.journeyNumber
+      ) {
+        row.identity = [
+          row.dataOwnerCode,
+          row.operationDate,
+          row.localServiceLevelCode,
+          row.linePlanningNumber,
+          row.journeyNumber,
+          row.fortifyOrderNumber ?? '0',
+        ].join('|');
+
+        row.departureDelaySeconds = timeDifference(
+          row.expectedDepartureTime,
+          row.targetDepartureTime
+        );
+
+        row.arrivalDelaySeconds = timeDifference(
+          row.expectedArrivalTime,
+          row.targetArrivalTime
+        );
+
+        row.destinationName =
+          row.destinationName ?? destinationName50 ?? null;
+
+        row.operatorCode =
+          row.operatorCode ?? row.dataOwnerCode ?? null;
+
+        yield row;
+      }
+    }
+
+    if (newline < 0) break;
+    lineStart = newline + 1;
+  }
+}
+
+// Bestaande API behouden voor tests en eventuele andere gebruikers.
+// De realtimecollector gebruikt rechtstreeks de generator hierboven.
+export function parseKv78Payload(text, envelope = '') {
+  return Array.from(iterateKv78Payload(text, envelope));
 }
 
 function tag(xml, name) {
@@ -143,9 +291,8 @@ function tag(xml, name) {
   return match ? clean(match[1].replace(/<!\[CDATA\[|\]\]>/g, '')) : null;
 }
 
-export function parseBisonPayload(text, envelope = '') {
+export function* iterateBisonPayload(text, envelope = '') {
   const xml = String(text);
-  const events = [];
   const eventRe = /<(?:(?:[A-Za-z_][\w.-]*):)?(ONROUTE|ONSTOP|DEPARTURE|ARRIVAL|OFFROUTE|CANCEL|SHORTENED|INSERT|ADDED|DELAY|CHANGEDESTINATION|INIT|END)\b[^>]*>([\s\S]*?)<\/(?:(?:[A-Za-z_][\w.-]*):)?\1\s*>/gi;
   let match;
   while ((match = eventRe.exec(xml))) {
@@ -176,10 +323,13 @@ export function parseBisonPayload(text, envelope = '') {
     };
     if (event.dataOwnerCode && event.operationDate && event.linePlanningNumber && event.journeyNumber) {
       event.identity = [event.dataOwnerCode, event.operationDate, event.linePlanningNumber, event.journeyNumber, event.reinforcementNumber].join('|');
-      events.push(event);
+      yield event;
     }
   }
-  return events;
+}
+
+export function parseBisonPayload(text, envelope = '') {
+  return Array.from(iterateBisonPayload(text, envelope));
 }
 
 export function upsertBounded(map, key, value, limit = 500) {

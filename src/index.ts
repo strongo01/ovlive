@@ -217,6 +217,80 @@ interface OpenovRouteMetadataEntry {
 
 let openovLineSearchRouteMetadataPromise: Promise<Record<string, OpenovRouteMetadataEntry>> | null = null;
 
+let openovLineSearchRouteMetadataIndexSource: Record<string, OpenovRouteMetadataEntry> | null = null;
+let openovLineSearchRouteMetadataIndex = new Map<string, OpenovRouteMetadataEntry[]>();
+
+function openovRoutesForPublicLine(
+  routeMetadata: Record<string, OpenovRouteMetadataEntry>,
+  line: unknown
+): OpenovRouteMetadataEntry[] {
+  const wantedLine = String(line ?? "").trim().toLocaleLowerCase("nl-NL");
+  if (!wantedLine) return [];
+
+  // Build this once per loaded metadata object. The previous implementation
+  // called Object.values(...).filter(...) for every live Actual row, multiplying
+  // thousands of route scans by hundreds of vehicles on one line search.
+  if (openovLineSearchRouteMetadataIndexSource !== routeMetadata) {
+    const index = new Map<string, OpenovRouteMetadataEntry[]>();
+    for (const route of Object.values(routeMetadata)) {
+      const key = String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL");
+      if (!key) continue;
+      const bucket = index.get(key);
+      if (bucket) bucket.push(route);
+      else index.set(key, [route]);
+    }
+    openovLineSearchRouteMetadataIndexSource = routeMetadata;
+    openovLineSearchRouteMetadataIndex = index;
+  }
+
+  return openovLineSearchRouteMetadataIndex.get(wantedLine) ?? [];
+}
+
+const OVAPI_LINE_DIRECTORY_CACHE_TTL_MS = 60_000;
+let ovapiLineDirectoryCache: {
+  expiresAtMs: number;
+  data: Record<string, any>;
+} | null = null;
+let ovapiLineDirectoryInflight: Promise<Record<string, any>> | null = null;
+
+async function getOvapiLineDirectory(env: Env): Promise<Record<string, any>> {
+  const now = Date.now();
+  if (ovapiLineDirectoryCache && ovapiLineDirectoryCache.expiresAtMs > now) {
+    return ovapiLineDirectoryCache.data;
+  }
+  if (ovapiLineDirectoryInflight) return ovapiLineDirectoryInflight;
+
+  const task = (async () => {
+    const response = await fetch("http://v0.ovapi.nl/line/", {
+      headers: {
+        "accept": "application/json",
+        "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
+      },
+      signal: AbortSignal.timeout(9000),
+      cf: { cacheEverything: true, cacheTtl: 60 }
+    });
+    if (!response.ok) {
+      throw new Error("OVAPI gaf HTTP " + response.status + " terug voor de lijnenlijst.");
+    }
+    const data = await response.json() as Record<string, any>;
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("OVAPI gaf geen geldige lijnenlijst terug.");
+    }
+    ovapiLineDirectoryCache = {
+      expiresAtMs: Date.now() + OVAPI_LINE_DIRECTORY_CACHE_TTL_MS,
+      data
+    };
+    return data;
+  })();
+
+  ovapiLineDirectoryInflight = task;
+  try {
+    return await task;
+  } finally {
+    if (ovapiLineDirectoryInflight === task) ovapiLineDirectoryInflight = null;
+  }
+}
+
 async function getOpenovLineSearchRouteMetadata(
   env: Env
 ): Promise<Record<string, OpenovRouteMetadataEntry>> {
@@ -275,9 +349,7 @@ function openovAgencyNameForLine(
   const wantedLine = String(line ?? "").trim().toLocaleLowerCase("nl-NL");
   if (!wantedLine) return "";
   const wantedOperator = String(operatorCode ?? "").trim().toLocaleLowerCase("nl-NL");
-  const matches = Object.values(routeMetadata).filter((route) =>
-    String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL") === wantedLine
-  );
+  const matches = openovRoutesForPublicLine(routeMetadata, wantedLine);
   const operatorMatches = wantedOperator
     ? matches.filter((route) =>
         String(route?.agencyId ?? "").trim().toLocaleLowerCase("nl-NL") === wantedOperator
@@ -1038,6 +1110,17 @@ type OpenovFeedFilters = {
   tripIds?: string[];
   routeIds?: string[];
   routeDateKeys?: string[];
+  /** Limit decoded records for sample/diagnostic requests (separate cache key). */
+  maxResults?: number;
+  /** Hard bound on the number of feed entities scanned by one invocation. */
+  maxScannedEntities?: number;
+  /** Optional geographic bounds for map previews. */
+  bounds?: {
+    minLatitude: number;
+    maxLatitude: number;
+    minLongitude: number;
+    maxLongitude: number;
+  };
 };
 
 function openovFeedCacheKey(
@@ -1045,6 +1128,22 @@ function openovFeedCacheKey(
   kind: OpenovFeedKind,
   filters?: OpenovFeedFilters
 ): string {
+  // Never let a bounded sample poison the full-feed cache used by trip matching.
+  if (filters && (
+    filters.maxResults != null ||
+    filters.maxScannedEntities != null ||
+    filters.bounds != null
+  )) {
+    return url + "#bounded-sample:" + JSON.stringify({
+      tripIds: [...new Set(filters.tripIds ?? [])].sort(),
+      routeIds: [...new Set(filters.routeIds ?? [])].sort(),
+      routeDateKeys: [...new Set(filters.routeDateKeys ?? [])].sort(),
+      maxResults: filters.maxResults ?? null,
+      maxScannedEntities: filters.maxScannedEntities ?? null,
+      bounds: filters.bounds ?? null
+    });
+  }
+
   if (kind === "vehiclePositions" &&
       (filters?.tripIds?.length || filters?.routeIds?.length)) {
     const tripIds = [...new Set(filters.tripIds ?? [])].sort();
@@ -1080,6 +1179,42 @@ const OPENOV_FEED_WAIT_TIMEOUT_MS = 10_000;
 const OPENOV_RATE_LIMIT_COOLDOWN_MS = 30_000;
 
 const openovFeedCache = new Map<string, OpenovFeedCacheEntry>();
+// Route/trip filters create distinct cache keys. Bound retained decoded object
+// graphs because the Worker isolate has a hard 128 MB memory ceiling.
+const OPENOV_FEED_CACHE_MAX_ENTRIES = 8;
+// Keep a short stale fallback for upstream errors, but never retain old feed
+// variants indefinitely in the isolate.
+const OPENOV_FEED_CACHE_MAX_AGE_MS = 180_000;
+
+function readOpenovFeedCache(key: string): OpenovFeedCacheEntry | undefined {
+  const entry = openovFeedCache.get(key);
+  if (!entry) return undefined;
+  // Map insertion order doubles as a tiny LRU: frequently reused feeds stay put.
+  openovFeedCache.delete(key);
+  openovFeedCache.set(key, entry);
+  return entry;
+}
+
+function pruneOpenovFeedCache(nowMs = Date.now(), preserveKey?: string): void {
+  for (const [key, entry] of openovFeedCache) {
+    if (nowMs - entry.fetchedAtMs > OPENOV_FEED_CACHE_MAX_AGE_MS) {
+      openovFeedCache.delete(key);
+    }
+  }
+
+  while (openovFeedCache.size > OPENOV_FEED_CACHE_MAX_ENTRIES) {
+    let oldestKey: string | undefined;
+    for (const key of openovFeedCache.keys()) {
+      if (key !== preserveKey) {
+        oldestKey = key;
+        break;
+      }
+    }
+    if (oldestKey === undefined) break;
+    openovFeedCache.delete(oldestKey);
+  }
+}
+
 const openovFeedInflight = new Map<string, Promise<any>>();
 const openovFeedInflightStartedAt = new Map<string, number>();
 const OPENOV_FEED_INFLIGHT_MAX_AGE_MS = 18_000;
@@ -1129,8 +1264,9 @@ async function getOpenovFeed(
   filters?: OpenovFeedFilters
 ): Promise<any> {
   const now = Date.now();
+  pruneOpenovFeedCache(now);
   const cacheKey = openovFeedCacheKey(url, kind, filters);
-  const cached = openovFeedCache.get(cacheKey);
+  const cached = readOpenovFeedCache(cacheKey);
 
   // 1. Hergebruik een recent resultaat. Alerts do not need a full refresh
   // every 10 seconds; trip and vehicle feeds keep their shorter live cache.
@@ -1189,7 +1325,7 @@ async function getOpenovFeed(
   if (rateLimitUntil > now) {
     const retryAfterSeconds = Math.ceil((rateLimitUntil - now) / 1000);
 
-    const fallbackCache = cached ?? (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
+    const fallbackCache = cached ?? (kind === "vehiclePositions" && cacheKey !== url ? readOpenovFeedCache(url) : undefined);
     if (fallbackCache) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
         kind,
@@ -1250,7 +1386,9 @@ async function getOpenovFeed(
         fetchedAtMs: Date.now()
       };
 
+      openovFeedCache.delete(cacheKey);
       openovFeedCache.set(cacheKey, entry);
+      pruneOpenovFeedCache(Date.now(), cacheKey);
       openovRateLimitedUntil.delete(url);
 
       console.log("[OVLIVE_FEED_CACHE]", JSON.stringify({
@@ -1270,8 +1408,8 @@ async function getOpenovFeed(
       );
     }
 
-    const lastGood = openovFeedCache.get(cacheKey) ??
-      (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
+    const lastGood = readOpenovFeedCache(cacheKey) ??
+      (kind === "vehiclePositions" && cacheKey !== url ? readOpenovFeedCache(url) : undefined);
 
     if (lastGood) {
       console.warn("[OVLIVE_FEED_CACHE]", JSON.stringify({
@@ -1354,6 +1492,8 @@ async function fetchOpenovFeedUncached(
   let sourceEntityCount: number | undefined;
   let entities: any[];
   let decoder = "gtfs-realtime-bindings";
+  let decodeTruncated: boolean | undefined;
+  let decodeScannedEntityCount: number | undefined;
   console.log("[OVLIVE_OPENOV_RESPONSE]", JSON.stringify({
     kind,
     httpStatus: response.status,
@@ -1391,46 +1531,86 @@ async function fetchOpenovFeedUncached(
     : undefined;
 
   if (kind === "vehiclePositions") {
+    const boundedDecoderOptions = filters && (
+      filters.maxResults != null ||
+      filters.maxScannedEntities != null ||
+      filters.bounds != null
+    ) ? {
+      ...(normalizedVehicleFilters ?? {}),
+      maxResults: filters.maxResults,
+      maxScannedEntities: filters.maxScannedEntities,
+      bounds: filters.bounds
+    } : normalizedVehicleFilters;
+
     try {
-      // Decode only the protobuf nested position/vehicle fields for the exact
-      // requested trip+route set; unrelated entity position objects are skipped.
-      const decoded = decodeOpenovVehiclePositions(bytes, normalizedVehicleFilters);
+      // Selective decoding avoids constructing unrelated vehicle-position objects.
+      // Bounded samples also stop scanning the national feed after a hard limit.
+      const decoded = decodeOpenovVehiclePositions(bytes, boundedDecoderOptions);
       feedTimestamp = decoded.feedTimestamp;
       sourceEntityCount = decoded.sourceEntityCount;
       entities = decoded.entities;
-      decoder = normalizedVehicleFilters ? "selective-protobuf-targeted" : "selective-protobuf";
+      decodeTruncated = decoded.truncated;
+      decodeScannedEntityCount = decoded.scannedEntityCount;
+      decoder = filters?.maxResults != null || filters?.maxScannedEntities != null || filters?.bounds
+        ? "selective-protobuf-bounded"
+        : normalizedVehicleFilters ? "selective-protobuf-targeted" : "selective-protobuf";
     } catch (error) {
-      // Keep the existing generated decoder as a compatibility fallback if an
-      // upstream schema/encoding changes. The fallback is logged so it cannot
-      // silently hide a regression in the selective decoder.
-      console.warn("[OVLIVE_VEHICLE_POSITION_FAST_DECODE_FALLBACK]", JSON.stringify({
+      console.error("[OVLIVE_VEHICLE_POSITION_FAST_DECODE_ERROR]", JSON.stringify({
         byteCount: bytes.byteLength,
+        bounded: Boolean(boundedDecoderOptions && (
+          "maxResults" in boundedDecoderOptions ||
+          "maxScannedEntities" in boundedDecoderOptions ||
+          "bounds" in boundedDecoderOptions
+        )),
         error: error instanceof Error ? error.message : String(error)
       }));
+      // Do not fall back to the full generated decoder on a bounded or targeted
+      // request: that fallback builds the large object graph which caused CPU 1102.
+      if (boundedDecoderOptions) {
+        return {
+          ok: false,
+          status: 502,
+          source: "OpenOV / OVapi GTFS-Realtime",
+          sourceUrl: url,
+          checkedAt: new Date().toISOString(),
+          freshness: "unavailable",
+          ageSeconds: null,
+          entityCount: 0,
+          entities: [],
+          error: "De snelle voertuigdecoder kon deze feed niet veilig verwerken."
+        };
+      }
       const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
       feedTimestamp = toNumber(feed.header?.timestamp);
       const allEntities = normalizeVehiclePositions(feed);
       sourceEntityCount = allEntities.length;
-      entities = normalizedVehicleFilters
-        ? allEntities.filter((entity: any) =>
-            (!normalizedVehicleFilters.tripIds.size ||
-              normalizedVehicleFilters.tripIds.has(normalizeOpenovId(parseOpenovTripId(entity.tripId).tripId))) &&
-            (!normalizedVehicleFilters.routeIds.size ||
-              normalizedVehicleFilters.routeIds.has(normalizeOpenovId(entity.routeId)))
-          )
-        : allEntities;
+      entities = allEntities;
       decoder = "gtfs-realtime-bindings-fallback";
     }
   } else if (kind === "tripUpdates" || kind === "trainUpdates") {
-    if (normalizedTripUpdateFilters) {
+    if (normalizedTripUpdateFilters || filters?.maxResults != null || filters?.maxScannedEntities != null) {
       try {
         // The planner only needs matching trip IDs and same-route/service-date
         // candidates. Skip normalizing thousands of unrelated stop updates.
-        const decoded = decodeOpenovTripUpdates(bytes, normalizedTripUpdateFilters);
+        const boundedTripOptions = filters && (
+          filters.maxResults != null || filters.maxScannedEntities != null
+        ) ? {
+          maxResults: filters.maxResults,
+          maxScannedEntities: filters.maxScannedEntities
+        } : undefined;
+        const decoded = decodeOpenovTripUpdates(
+          bytes,
+          normalizedTripUpdateFilters,
+          boundedTripOptions
+        );
         feedTimestamp = decoded.feedTimestamp;
         sourceEntityCount = decoded.sourceEntityCount;
         entities = decoded.entities;
-        decoder = "selective-protobuf-targeted";
+        decodeTruncated = decoded.truncated;
+        decodeScannedEntityCount = decoded.scannedEntityCount;
+        decoder = boundedTripOptions && !normalizedTripUpdateFilters
+          ? "selective-protobuf-bounded"
+          : "selective-protobuf-targeted";
       } catch (error) {
         console.error("[OVLIVE_TRIP_UPDATE_FAST_DECODE_ERROR]", JSON.stringify({
           kind,
@@ -1497,10 +1677,15 @@ async function fetchOpenovFeedUncached(
     feedTimestamp: feedTimestamp == null ? null : new Date(feedTimestamp * 1000).toISOString(),
     ageSeconds: ageSeconds ?? null,
     freshness: isStale ? "stale_or_unknown" : "fresh",
-    entityCount: normalizedTripUpdateFilters
+    entityCount: normalizedTripUpdateFilters || decodeTruncated !== undefined
       ? entities.length
       : sourceEntityCount ?? entities.length,
     ...(sourceEntityCount != null ? { sourceEntityCount } : {}),
+    ...(decodeTruncated !== undefined ? {
+      truncated: decodeTruncated,
+      scannedEntityCount: decodeScannedEntityCount ?? null,
+      entityCountIsPartial: decodeTruncated
+    } : {}),
     entities
   };
 }
@@ -1588,8 +1773,8 @@ async function safeOpenovFeed(
   const timeoutPromise = new Promise<any>((resolve) => {
     timeoutHandle = setTimeout(() => {
       const cacheKey = openovFeedCacheKey(url, kind, filters);
-      const cached = openovFeedCache.get(cacheKey) ??
-        (kind === "vehiclePositions" && cacheKey !== url ? openovFeedCache.get(url) : undefined);
+      const cached = readOpenovFeedCache(cacheKey) ??
+        (kind === "vehiclePositions" && cacheKey !== url ? readOpenovFeedCache(url) : undefined);
       console.warn("[OVLIVE_OPENOV_FEED_WAIT_TIMEOUT]", JSON.stringify({
         kind,
         timeoutMs: OPENOV_FEED_WAIT_TIMEOUT_MS,
@@ -2123,6 +2308,37 @@ function buildOpenovTripUpdateFilters(openovLegs: any[]): OpenovFeedFilters | un
   };
 }
 
+function buildOpenovVehiclePositionFilters(openovLegs: any[]): OpenovFeedFilters {
+  const tripIds = new Set<string>();
+  const routeIds = new Set<string>();
+
+  for (const leg of openovLegs) {
+    const routeId = normalizeOpenovId(leg?.routeId ?? leg?.route?.id ?? "");
+    const rawTripId = String(leg?.tripId ?? "").trim();
+    const tripId = rawTripId ? normalizeOpenovId(parseOpenovTripId(rawTripId).tripId) : "";
+    if (tripId) tripIds.add(tripId);
+    else if (routeId) routeIds.add(routeId);
+  }
+
+  // Exact trip IDs avoid materializing nationwide positions. The matcher later
+  // still verifies both route and trip before attaching a position to a leg.
+  if (tripIds.size > 0) {
+    return {
+      tripIds: [...tripIds].sort(),
+      maxResults: Math.min(300, Math.max(30, tripIds.size * 3)),
+      maxScannedEntities: 5000
+    };
+  }
+  if (routeIds.size > 0) {
+    return {
+      routeIds: [...routeIds].sort(),
+      maxResults: 300,
+      maxScannedEntities: 5000
+    };
+  }
+  return { maxResults: 200, maxScannedEntities: 500 };
+}
+
 async function enrichTransitousPlan(
   plan: any,
   options: { includeVehiclePositions?: boolean } = {}
@@ -2159,6 +2375,13 @@ async function enrichTransitousPlan(
       return family === "train" || family === "unknown";
     })
   );
+  const vehiclePositionFilters = buildOpenovVehiclePositionFilters(
+    openovLegs.filter((leg: any) => {
+      const family = openovRealtimeLegFeedFamily(leg);
+      // Unknown modes are already included by the non-train branch.
+      return family !== "train";
+    })
+  );
   const [tripFeed, trainFeed, alertFeed, vehicleFeed] = await Promise.all([
     needsTripUpdates
       ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates", tripUpdateFilters)
@@ -2168,7 +2391,7 @@ async function enrichTransitousPlan(
       : Promise.resolve(skippedOpenovFeedResult()),
     safeOpenovFeed(OPENOV.alerts, "alerts"),
     needsTripUpdates && includeVehiclePositions
-      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")
+      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions", vehiclePositionFilters)
       : Promise.resolve(skippedOpenovFeedResult())
   ]);
 
@@ -3081,7 +3304,10 @@ async function handleLocalNdovApi(request: Request, env: Env): Promise<Response 
 
 const LIVE_MAP_OPENOV_CACHE_TTL_MS = 15_000;
 const LIVE_MAP_OPENOV_CACHE_TTL_SECONDS = 15;
-const LIVE_MAP_OPENOV_MAX_POSITIONS = 2000;
+// The map must receive the complete Dutch OpenOV fleet, not a sample.
+// The selective protobuf decoder avoids building the heavyweight generated GTFS-RT
+// object graph. Keep the geographic window, but never cap the number of positions
+// or feed entities: that silently hides most vehicles from the live map.
 
 type LiveMapOpenovCachedBody = {
   body: string;
@@ -3217,21 +3443,21 @@ async function handleLiveMapOpenovApi(
       // Gebruik hier bewust uitsluitend de selectieve decoder. Bij een wijziging
       // in het bronschema falen we veilig in plaats van een zware volledige
       // GTFS-RT-objectboom op te bouwen en opnieuw een CPU-limit te riskeren.
-      const decoded = decodeOpenovVehiclePositions(bytes);
+      const decoded = decodeOpenovVehiclePositions(bytes, {
+        // Geographic scope only; do not set maxResults/maxScannedEntities.
+        // The map must show every matching vehicle from the full feed.
+        bounds: {
+          minLatitude: 49,
+          maxLatitude: 56,
+          minLongitude: 2,
+          maxLongitude: 9.5
+        }
+      });
       const decodeDurationMs = Number((performance.now() - decodeStartedAt).toFixed(2));
-      // Avoid sorting the entire national feed on the CPU-limited Worker.
-      // Every returned point is independently age-checked by the UI; a stable
-      // capped source-order sample is preferable to an expensive global sort.
-      const entities = decoded.entities
-        .filter((entity: any) =>
-          Number.isFinite(entity.latitude) &&
-          Number.isFinite(entity.longitude) &&
-          entity.latitude >= 49 &&
-          entity.latitude <= 56 &&
-          entity.longitude >= 2 &&
-          entity.longitude <= 9.5
-        )
-        .slice(0, LIVE_MAP_OPENOV_MAX_POSITIONS);
+      // Coordinates are filtered inside the protobuf decoder before expensive
+      // trip/vehicle strings are materialized. Both result count and scan work
+      // have hard limits so a nationwide refresh cannot consume unlimited CPU.
+      const entities = decoded.entities;
 
       const feedTimestamp = decoded.feedTimestamp;
       const rawAgeSeconds = typeof feedTimestamp === "number"
@@ -3251,6 +3477,8 @@ async function handleLiveMapOpenovApi(
         byteCount: bytes.byteLength,
         sourceEntityCount: decoded.sourceEntityCount,
         validPositionCount: entities.length,
+        scannedEntityCount: decoded.scannedEntityCount,
+        truncated: decoded.truncated === true,
         decodeDurationMs,
         totalDurationMs: Date.now() - startedAt,
         freshness
@@ -3265,9 +3493,14 @@ async function handleLiveMapOpenovApi(
           : null,
         ageSeconds,
         freshness,
+        // When the CPU guard stops early, this is the count of entities
+        // inspected so far, not a claim about the full nationwide feed.
         entityCount: decoded.sourceEntityCount,
+        entityCountIsPartial: decoded.truncated === true,
+        scannedEntityCount: decoded.scannedEntityCount ?? decoded.sourceEntityCount,
+        truncated: decoded.truncated === true,
         returnedCount: entities.length,
-        decoder: "selective-protobuf",
+        decoder: "selective-protobuf-full-fleet",
         entities
       });
 
@@ -3403,12 +3636,50 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const target = new URL("https://ndov-hub.local/" + action);
       target.searchParams.set("stream", stream);
       for (const [name, value] of params) target.searchParams.append(name, value);
-      const response = await stub.fetch(target.toString());
-      const data = await response.json().catch(() => ({})) as Record<string, any>;
-      if (!response.ok) {
-        throw new Error(String(data.error ?? (stream + "/" + action + " gaf HTTP " + response.status + ".")));
+
+      // The NDOV Durable Object may briefly return a 5xx during a busy write/read
+      // cycle. Retry only one server failure, never a 4xx, to absorb a transient
+      // blip without creating an unbounded retry storm.
+      let lastError: Error | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let response: Response;
+        try {
+          response = await stub.fetch(target.toString());
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          if (attempt === 0) {
+            console.warn("[NDOV_TRIP_HUB_RETRY]", JSON.stringify({
+              stream, action, attempt: 1, reason: lastError.message.slice(0, 160)
+            }));
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            continue;
+          }
+          throw lastError;
+        }
+
+        const data = await response.json().catch(() => ({})) as Record<string, any>;
+        if (response.ok) return data;
+
+        const message = String(
+          data.error ?? (stream + "/" + action + " gaf HTTP " + response.status + ".")
+        );
+        lastError = new Error(message);
+
+        if (response.status < 500 || attempt === 1) {
+          throw lastError;
+        }
+
+        console.warn("[NDOV_TRIP_HUB_RETRY]", JSON.stringify({
+          stream,
+          action,
+          attempt: 1,
+          status: response.status,
+          reason: message.slice(0, 160)
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 120));
       }
-      return data;
+
+      throw lastError ?? new Error(stream + "/" + action + " is tijdelijk niet beschikbaar.");
     };
 
     const rowIdentity = (row: Record<string, any>) => {
@@ -3517,8 +3788,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const updateAgeSeconds = newestReceivedAtMs === null
         ? null
         : Math.max(0, Math.round((Date.now() - newestReceivedAtMs) / 1000));
+      // The normal 10-second ETA poll reuses the shared stop-name cache only.
+      // The iOS client opts into bounded asset reads when names are missing, and
+      // throttles that opt-in so a timeline refresh never repeatedly parses shards.
+      const resolveStopNamesRequested = url.searchParams.get("resolveStopNames") === "1";
       const settled = await Promise.allSettled([
-        resolveNdovKv78StopNames(selectedRows, env),
+        resolveNdovKv78StopNames(selectedRows, env, {
+          allowAssetReads: resolveStopNamesRequested
+        }),
         readHub("bison", "events", [["identity", identity]]),
         readHub("bison", "mutations", [["identity", identity]]),
       ]);
@@ -3701,7 +3978,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         checkedAt: new Date().toISOString(),
         error: "De NDOV-halterijen zijn tijdelijk niet beschikbaar.",
         detail: error instanceof Error ? error.message : "Onbekende fout"
-      }, 503, { ...headers, "cache-control": "no-store" });
+      }, 503, {
+        ...headers,
+        "cache-control": "no-store",
+        "retry-after": "2",
+        "x-ovlive-error-kind": "ndov-trip-lookup"
+      });
     }
   }
 
@@ -4189,7 +4471,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
     const feedEntries: Array<[string, any]> = await Promise.all(
       entries.map(async ([key, feedUrl]): Promise<[string, any]> => {
-        const result = await safeOpenovFeed(feedUrl, key);
+        const healthFilters: OpenovFeedFilters | undefined =
+          key === "vehiclePositions"
+            ? { maxResults: 200, maxScannedEntities: 350 }
+            : key === "tripUpdates" || key === "trainUpdates"
+              ? { maxResults: 200, maxScannedEntities: 350 }
+              : undefined;
+        const result = await safeOpenovFeed(feedUrl, key, healthFilters);
 
         return [
           String(key),
@@ -4210,6 +4498,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
                 ? result.entities.length
                 : null
             ),
+            entityCountIsPartial: result.entityCountIsPartial === true,
+            truncated: result.truncated === true,
             fetchDurationMs: result.fetchDurationMs ?? null,
             error: result.ok
               ? null
@@ -4224,8 +4514,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       status: "diagnostic",
       checkedAt: new Date().toISOString(),
       notes: [
-        "De feeds worden opgehaald en als GTFS-Realtime-protobuf gedecodeerd.",
-        "De itemaantallen zijn gedecodeerde items, niet noodzakelijk unieke ritten.",
+        "De realtimefeeds worden gecontroleerd met een begrensde decodeersample om CPU-limieten te respecteren.",
+        "Bij grote feeds kan entityCount een gedeeltelijke sample zijn; controleer truncated en entityCountIsPartial.",
         "Een beschikbare feed garandeert niet dat iedere rit een realtime-update heeft.",
         "Geen update voor een rit betekent NIET dat die rit op tijd rijdt."
       ],
@@ -4254,22 +4544,48 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       .map((value: string) => normalizeOpenovId(value))
       .filter(Boolean);
 
-    const vehiclePositionFilters = kind === "vehiclePositions" &&
-      (routeFilters.length > 0 || tripFilters.length > 0)
-      ? { routeIds: routeFilters, tripIds: tripFilters }
+    const parsedLimit = Number(url.searchParams.get("limit") ?? 500);
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(2000, Math.max(1, Math.floor(parsedLimit)))
+      : 500;
+    const heavyKind = kind === "vehiclePositions" || kind === "tripUpdates" || kind === "trainUpdates";
+    const hasRouteOrTripFilter = routeFilters.length > 0 || tripFilters.length > 0;
+    // The public feed-inspection endpoint is not the place to decode tens of
+    // thousands of national records in one Free-Workers invocation. It returns
+    // an explicitly marked sample if no exact route/trip filter was supplied.
+    const decodeLimit = heavyKind && !hasRouteOrTripFilter
+      ? Math.min(limit, 300)
+      : limit;
+    // Exact trip/route requests must search the whole compact protobuf stream.
+    // A 1,600-entity cap can silently miss a valid trip later in the national
+    // feed and leave its stop progression stale or empty. The selective decoder
+    // only materializes matches, so reserve scan caps for unfiltered samples.
+    const maxScannedEntities = heavyKind && !hasRouteOrTripFilter
+      ? Math.min(1200, Math.max(350, decodeLimit * 2))
       : undefined;
+
+    const requestFilters: OpenovFeedFilters | undefined =
+      kind === "vehiclePositions" || kind === "tripUpdates" || kind === "trainUpdates"
+        ? {
+            ...(routeFilters.length ? { routeIds: routeFilters } : {}),
+            ...(tripFilters.length ? { tripIds: tripFilters } : {}),
+            ...(heavyKind ? {
+              maxResults: decodeLimit,
+              maxScannedEntities
+            } : {})
+          }
+        : undefined;
 
     try {
       const data = await getOpenovFeed(
         feedUrl,
         kind as keyof typeof OPENOV,
-        vehiclePositionFilters
+        requestFilters
       );
       const { entities = [], ...meta } = data as any;
 
-      // Vehicle-position requests with exact trip/route filters were filtered
-      // during protobuf decoding. This final guard keeps the public API contract
-      // and handles the compatibility fallback / unfiltered diagnostics too.
+      // Route/trip filters are applied during protobuf decoding. This final
+      // guard also handles stop filters and compatibility-decoder results.
       const filteredEntities = (entities as any[]).filter((entity: any) => {
         if (
           routeFilters.length > 0 &&
@@ -4298,11 +4614,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         return true;
       });
 
-      const limit = Math.min(
-        2000,
-        Math.max(1, Number(url.searchParams.get("limit") ?? 500))
-      );
-
+      const partial = data.truncated === true;
       return json({
         ...meta,
         appliedFilters: {
@@ -4310,7 +4622,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           tripIds: tripFilters,
           stopIds: stopFilters
         },
-        matchingCount: filteredEntities.length,
+        matchingCount: partial ? null : filteredEntities.length,
+        scannedMatchCount: filteredEntities.length,
+        matchingCountIsExact: !partial,
+        truncated: partial,
         entities: filteredEntities.slice(0, limit),
         returnedCount: Math.min(filteredEntities.length, limit)
       }, data.ok ? 200 : 502, headers);
@@ -4323,7 +4638,6 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       }, 502, headers);
     }
   }
-
 
   if (url.pathname === "/api/geocode") {
     const query = (url.searchParams.get("q") ?? "").trim();
@@ -4634,16 +4948,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // OVAPI provides public line names/destinations and live journey passes.
     // Ask the API for details only for the exact public line number entered.
     try {
-      const directoryResponse = await fetch("http://v0.ovapi.nl/line/", {
-        headers: {
-          "accept": "application/json",
-          "user-agent": `${env.APP_NAME}/${env.APP_VERSION} (${env.APP_CONTACT})`
-        },
-        signal: AbortSignal.timeout(9000),
-        cf: { cacheEverything: true, cacheTtl: 60 }
-      });
-      if (!directoryResponse.ok) throw new Error("OVAPI gaf HTTP " + directoryResponse.status + " terug voor de lijnenlijst.");
-      const directory = await directoryResponse.json() as Record<string, any>;
+      const directory = await getOvapiLineDirectory(env);
       ovapiAvailable = true;
       const matchingLines = Object.entries(directory).filter(([, value]) => {
         const meta = value?.Line && typeof value.Line === "object" ? value.Line : value;
@@ -4659,10 +4964,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         // agencies, and try generic NL keys last.
         const matchingAgencyIds = [...new Set([
           requestedAgencyId,
-          ...Object.values(routeMetadata)
-            .filter((route) =>
-              String(route?.routeShortName ?? "").trim().toLocaleLowerCase("nl-NL") === needle
-            )
+          ...openovRoutesForPublicLine(routeMetadata, needle)
             .map((route) => String(route?.agencyId ?? "").trim())
         ]
           .map((value) => value.trim().toUpperCase())
@@ -4689,7 +4991,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
               key.toLocaleUpperCase("en-US").startsWith(requestedAgencyPrefix + "_")
             )
           : allRouteKeys;
-        const MAX_OVAPI_LINE_SEARCH_ROUTES = 160;
+        const MAX_OVAPI_LINE_SEARCH_ROUTES = 40;
         const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;
         const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;
         const routeKeys = candidateRouteKeys.slice(0, MAX_OVAPI_LINE_SEARCH_ROUTES);
@@ -5013,9 +5315,23 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         // journey when OVAPI cannot confirm the requested journey.
         openovAvailable = false;
       } else {
-      const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions");
+      const feed = await getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions", {
+        // Line search is a fallback after OVAPI. Inspect a bounded Dutch sample
+        // instead of decoding the full nationwide positions feed on every query.
+        maxResults: 450,
+        maxScannedEntities: 1000,
+        bounds: {
+          minLatitude: 49,
+          maxLatitude: 56,
+          minLongitude: 2,
+          maxLongitude: 9.5
+        }
+      });
       if (!feed || feed.ok !== true || !Array.isArray(feed.entities)) {
         throw new Error("De OpenOV-voertuigposities zijn momenteel niet beschikbaar.");
+      }
+      if (feed.truncated === true) {
+        warnings.push("OpenOV-voertuigzoeking gebruikte een begrensde sample om CPU-limieten te vermijden; deze fallback kan voertuigen missen.");
       }
       openovAvailable = true;
       const matchedVehicles = (feed.entities as any[])
@@ -5183,6 +5499,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     let lastUpstreamDetail = "";
     const candidateDiagnostics: Array<{ tripId: string; status: number; detail: string }> = [];
     let sawSuccessfulReplyWithoutGeometry = false;
+    let transitStopsForExactTrip: any[] = [];
 
     const extractTransitShapes = (itinerary: any) => {
       const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
@@ -5204,6 +5521,82 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           mode: String(leg?.mode ?? ""),
           legGeometry: leg.legGeometry
         }));
+    };
+
+    const extractTransitStops = (itinerary: any) => {
+      const legs = Array.isArray(itinerary?.legs) ? itinerary.legs : [];
+      const stops: any[] = [];
+
+      for (const leg of legs) {
+        const mode = String(leg?.mode ?? "").toUpperCase();
+        // This endpoint has already been requested for one exact service-instance ID.
+        // Some MOTIS responses omit tripId on a leg, so mode is the safe stop-list filter.
+        if (mode === "WALK" || mode === "FOOT") continue;
+
+        const places = [
+          leg?.from,
+          ...(Array.isArray(leg?.intermediateStops) ? leg.intermediateStops : []),
+          leg?.to,
+        ];
+        for (const place of places) {
+          if (!place || typeof place !== "object") continue;
+          const officialName = String(place.name ?? place.displayName ?? "").trim();
+          const stopId = String(place.stopId ?? "").trim() || null;
+          const stopCode = String(place.stopCode ?? "").trim() || null;
+          const scheduledArrival = String(place.scheduledArrival ?? "").trim() || null;
+          const scheduledDeparture = String(place.scheduledDeparture ?? "").trim() || null;
+          const numberValue = (value: unknown) => {
+            if (value === null || value === undefined || String(value).trim() === "") return null;
+            const number = Number(value);
+            return Number.isFinite(number) ? number : null;
+          };
+          const latitude = numberValue(place.lat);
+          const longitude = numberValue(place.lon);
+          // Never drop an intermediate stop just because this provider omitted
+          // its public name; keep it visible as explicitly unidentified instead.
+          if (!officialName && !stopId && !stopCode &&
+              !scheduledArrival && !scheduledDeparture &&
+              latitude === null && longitude === null) continue;
+          const name = officialName || (stopCode ? "Haltecode " + stopCode
+            : stopId ? "Halte " + stopId : "Halte onbekend");
+          const stop = {
+            stopId,
+            stopCode,
+            name,
+            latitude,
+            longitude,
+            scheduledArrival,
+            scheduledDeparture,
+            timetableOnly: true,
+            source: "Transitous exact-trip timetable",
+          };
+          const previous = stops[stops.length - 1];
+          const sameStop = Boolean(
+            previous && stopId && previous.stopId &&
+            String(previous.stopId).trim().toLowerCase() === stopId.toLowerCase()
+          );
+          if (sameStop) {
+            const previousName = String(previous.name ?? "").trim();
+            const previousHasPublicName = previousName !== "" &&
+              !previousName.toLowerCase().startsWith("haltecode ") &&
+              !previousName.toLowerCase().startsWith("halte ") &&
+              previousName.toLowerCase() !== "halte onbekend";
+            stops[stops.length - 1] = {
+              ...previous,
+              name: previousHasPublicName ? previous.name : stop.name,
+              stopCode: previous.stopCode ?? stopCode,
+              scheduledArrival: previous.scheduledArrival ?? stop.scheduledArrival,
+              scheduledDeparture: stop.scheduledDeparture ?? previous.scheduledDeparture,
+              latitude: previous.latitude ?? stop.latitude,
+              longitude: previous.longitude ?? stop.longitude,
+            };
+          } else {
+            stops.push(stop);
+          }
+          if (stops.length >= 200) return stops;
+        }
+      }
+      return stops;
     };
 
     try {
@@ -5257,12 +5650,18 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           if (candidateResponse.ok) {
             const itinerary: any = await candidateResponse.json().catch(() => null);
             const shapes = extractTransitShapes(itinerary);
+            const exactStops = extractTransitStops(itinerary);
+            if (exactStops.length > transitStopsForExactTrip.length) {
+              transitStopsForExactTrip = exactStops;
+            }
             if (shapes.length > 0) {
               // This is the first alias that actually yielded drawable geometry.
               return json({
                 ok: true,
                 requestedTripId: tripId,
                 resolvedTripId: candidateTripId,
+                routeSource: "Transitous MOTIS v6 /trip",
+                stops: exactStops,
                 legs: shapes
               }, 200, {
                 ...headers,
@@ -5324,6 +5723,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           requestedTripId: tripId,
           resolvedTripId: tripId,
           routeSource: "OpenOV GTFS-static (exact trip-ID + route-ID)",
+          stops: transitStopsForExactTrip,
           legs: [staticShape]
         }, 200, {
           ...headers,
@@ -5337,6 +5737,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           ok: true,
           requestedTripId: tripId,
           resolvedTripId: null,
+          stops: transitStopsForExactTrip,
           legs: [],
           routeWarning: "Transitous accepteerde de rit-ID, maar leverde voor geen van de exacte ID-schrijfwijzen routegeometrie terug. Er is ook geen exacte ritvorm gevonden in de lokale OpenOV-GTFS-index."
         }, 200, {
@@ -5479,7 +5880,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         // OpenOV/NDOV enrichment loads route shards for many bus/tram legs.
         await prepareNsTrainIdentities(planData, env);
         await enrichNsTrainPlan(planData, env);
-        planData = await enrichTransitousPlan(planData);
+        // Vehicle positions are served by the dedicated, cached live-map
+        // endpoint. Do not decode a second nationwide position feed in the same
+        // route-planning request; the separate realtime refresh also omits it.
+        planData = await enrichTransitousPlan(planData, { includeVehiclePositions: false });
         await applyNdovCancellationsToPlan(planData, env, {
           includeIdentityDiagnostics: url.searchParams.get("ndovIdentityDiagnostics") === "1",
         });

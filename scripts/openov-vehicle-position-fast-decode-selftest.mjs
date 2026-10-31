@@ -141,6 +141,29 @@ assert.equal(wrongRoute.sourceEntityCount, 4);
 assert.deepEqual(wrongRoute.entities, []);
 console.log("PASS: targeted decoder skips unrelated vehicle objects and keeps exact route/trip matching");
 
+// CPU-safety options deliberately return an explicitly marked partial feed.
+const bounded = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
+  maxResults: 1,
+  maxScannedEntities: 5,
+  bounds: {
+    minLatitude: 49,
+    maxLatitude: 56,
+    minLongitude: 2,
+    maxLongitude: 9.5
+  }
+});
+assert.equal(bounded.entities.length, 1);
+assert.equal(bounded.entities[0].vehicleId, "UOV-2801");
+assert.equal(bounded.scannedEntityCount, 1);
+assert.equal(bounded.truncated, true);
+assert.equal(
+  decodeOpenovVehiclePositions(new Uint8Array(bytes), { maxScannedEntities: 2, bounds: {
+    minLatitude: 49, maxLatitude: 56, minLongitude: 2, maxLongitude: 9.5
+  }}).truncated,
+  true
+);
+console.log("PASS: bounded map decoding stops early, applies geographic bounds, and marks partial results");
+
 // Malformed/truncated protobuf input must fail explicitly; the Worker can then
 // invoke its logged compatibility fallback rather than silently returning bad data.
 assert.throws(

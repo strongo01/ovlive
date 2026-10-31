@@ -200,4 +200,16 @@ assert.equal(filtered.entities.length, 2);
 assert.ok(filtered.entities.every((row) => row.routeId === "159450"));
 console.log("PASS: targeted decoding keeps exact trips and same-route/service-date fallback candidates");
 console.log("PASS: unrelated route/date updates do not allocate normalized stop-update arrays");
+
+// Bounded unfiltered samples stop after the requested result count and state
+// clearly that the returned count is not the complete national feed count.
+const bounded = decodeOpenovTripUpdates(new Uint8Array(bytes), undefined, {
+  maxResults: 1,
+  maxScannedEntities: 3
+});
+assert.equal(bounded.entities.length, 1);
+assert.equal(bounded.entities[0].tripId, "391215411");
+assert.equal(bounded.scannedEntityCount, 1);
+assert.equal(bounded.truncated, true);
+console.log("PASS: bounded trip-update decoding stops early and reports partial samples");
 console.log("All OpenOV trip-update fast-decode selftests passed.");

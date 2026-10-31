@@ -11,7 +11,7 @@ import {
   parseCommandBody,
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
-import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
+import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, iterateBisonPayload, parseKv17Payload, iterateKv78Payload } from './ndov-feed-parser.mjs';
 import { handleNdovStopNameCacheRequest } from './ndov-stop-name-cache.mjs';
 import { amsterdamClockSeconds, continuousCollectorHealth, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
@@ -25,7 +25,8 @@ const KV6_EVENT_LIMIT = 30000;
 const KV6_EVENT_RETENTION_MS = 10 * 60 * 1000;
 const KV6_EVENT_STATUS_FRESH_MS = 180 * 1000;
 const KV6_ACTIVE_EVENT_TYPES = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIVAL']);
-const KV78_ROW_LIMIT = 30000; // rolling, durable row cache; still bounded by design
+const KV78_ROW_LIMIT = 30000; // rolling, durable row cache
+const KV78_ROW_PRUNE_BATCH_HEADROOM = 1000; // opruimen in grotere batches
 const KV78_STATUS_SAMPLE_LIMIT = 5000;
 const KV17_STATE_LIMIT = 5000;
 // KV78 rows older than this are rejected by /rows and cannot enrich a live plan.
@@ -275,6 +276,40 @@ async function gunzipJson(value, limit = 8_000_000) {
   if (!(value instanceof Uint8Array)) value = new Uint8Array(value);
   return JSON.parse(decodeUtf8(await gunzip(value, limit)));
 }
+function tailMapValues(map, limit) {
+  const result = [];
+  const iterator = map.values();
+  const skip = Math.max(0, map.size - limit);
+
+  for (let i = 0; i < skip; i += 1) {
+    if (iterator.next().done) return result;
+  }
+
+  while (result.length < limit) {
+    const next = iterator.next();
+    if (next.done) break;
+    result.push(next.value);
+  }
+  return result;
+}
+
+function tailMapEntries(map, limit) {
+  const result = [];
+  const iterator = map.entries();
+  const skip = Math.max(0, map.size - limit);
+
+  for (let i = 0; i < skip; i += 1) {
+    if (iterator.next().done) return result;
+  }
+
+  while (result.length < limit) {
+    const next = iterator.next();
+    if (next.done) break;
+    result.push(next.value);
+  }
+  return result;
+}
+
 function parseTimestamp(value) {
   if (!value) return null;
   let text = String(value).trim().replace(/\.(\d{3})\d+(?=([+-]\d{2}:?\d{2}|Z)$)/, '.$1');
@@ -315,9 +350,16 @@ export class NdovFeedHub extends DurableObject {
     super(ctx, env);
     this.ctx = ctx;
     this.env = env;
+    // Grote KV78- en BISON-snapshots mogen niet tegelijk worden gecomprimeerd:
+    // beide streamcollectors delen dezelfde Durable Object-geheugenlimiet.
+    this.fullPersistQueue = Promise.resolve();
     // Eén fysieke DO-instantie beheert beide feeds; de streamtoestand blijft gescheiden.
     this.streamStates = new Map(Object.keys(CONFIG).map((stream) => [stream, {
       snapshot: initialSnapshot(stream), rows: new Map(), events: new Map(), mutations: new Map(),
+      // Ephemeral indexes keep exact trip and owner/date/line lookups from
+      // scanning all 30,000 rolling KV78 stop rows on every API request.
+      rowsByIdentity: new Map(),
+      rowsByOwnerDate: new Map(),
       running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
       rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
@@ -363,47 +405,65 @@ export class NdovFeedHub extends DurableObject {
     const saved = await ctx.storage.get(key('snapshot'));
     if (saved) state.snapshot = saved;
     state.continuousEnabled = (await ctx.storage.get(key('continuousEnabled'))) === true;
-    const savedRows = await ctx.storage.get(key('rows'));
     const compressedRowCount = Number(await ctx.storage.get(key('rowsGzipChunkCount'))) || 0;
     const savedRowChunkCount = Number(await ctx.storage.get(key('rowsChunkCount'))) || 0;
-    const savedEvents = await ctx.storage.get(key('events'));
     const compressedEventCount = Number(await ctx.storage.get(key('eventsGzipChunkCount'))) || 0;
-    const savedMutations = await ctx.storage.get(key('mutations'));
+
+    state.rows = new Map();
+
+    if (stream === 'kv78') {
+      state.rowsByIdentity.clear();
+      state.rowsByOwnerDate.clear();
+      state.rowCacheStats.duplicateRowsCollapsed = 0;
+    }
+
+    const restoreRows = (entries) => {
+      for (const [savedKey, row] of entries ?? []) {
+        if (stream !== 'kv78') {
+          state.rows.set(savedKey, row);
+          continue;
+        }
+
+        const cacheKey = kv78RowCacheKey(row) ?? String(savedKey);
+        if (state.rows.has(cacheKey)) {
+          state.rowCacheStats.duplicateRowsCollapsed += 1;
+          this.removeKv78RowFromIndexes(state, cacheKey);
+        }
+
+        state.rows.delete(cacheKey);
+        state.rows.set(cacheKey, row);
+        this.addKv78RowToIndexes(state, cacheKey, row);
+      }
+    };
 
     if (compressedRowCount > 0) {
-      const chunks = await Promise.all(Array.from({ length: compressedRowCount }, (_, i) => ctx.storage.get(key('rows:gzip:' + i))));
-      const entries = [];
-      for (const chunk of chunks) if (chunk) entries.push(...await gunzipJson(chunk));
-      state.rows = new Map(entries);
-    } else if (savedRowChunkCount > 0) {
-      const chunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(key('rows:' + i))));
-      state.rows = new Map(chunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
-    } else state.rows = new Map(savedRows ?? []);
-
-    // Re-key legacy snapshots by canonical trip + stop identity. This collapses
-    // duplicate rows that differed only by LocalServiceLevelCode without losing
-    // any fields needed for exact trip/stop/time matching.
-    if (stream === 'kv78') {
-      const canonicalRows = new Map();
-      for (const [savedKey, row] of state.rows.entries()) {
-        const cacheKey = kv78RowCacheKey(row) ?? String(savedKey);
-        if (canonicalRows.has(cacheKey)) state.rowCacheStats.duplicateRowsCollapsed += 1;
-        canonicalRows.delete(cacheKey);
-        canonicalRows.set(cacheKey, row);
+      for (let i = 0; i < compressedRowCount; i += 1) {
+        const chunk = await ctx.storage.get(key('rows:gzip:' + i));
+        if (chunk) restoreRows(await gunzipJson(chunk));
       }
-      state.rows = canonicalRows;
+    } else if (savedRowChunkCount > 0) {
+      for (let i = 0; i < savedRowChunkCount; i += 1) {
+        const chunk = await ctx.storage.get(key('rows:' + i));
+        if (Array.isArray(chunk)) restoreRows(chunk);
+      }
+    } else {
+      const savedRows = await ctx.storage.get(key('rows'));
+      restoreRows(savedRows ?? []);
     }
 
     state.events = new Map();
     if (compressedEventCount > 0) {
-      const chunks = await Promise.all(Array.from({ length: compressedEventCount }, (_, i) => ctx.storage.get(key('events:gzip:' + i))));
-      for (const chunk of chunks) if (chunk) {
-        for (const [savedKey, event] of await gunzipJson(chunk)) {
+      for (let i = 0; i < compressedEventCount; i += 1) {
+        const chunk = await ctx.storage.get(key('events:gzip:' + i));
+        if (!chunk) continue;
+        const entries = await gunzipJson(chunk);
+        for (const [savedKey, event] of entries) {
           const identity = canonicalBisonTripIdentity(event) ?? savedKey;
           state.events.set(identity, { ...event, identity });
         }
       }
     } else {
+      const savedEvents = await ctx.storage.get(key('events'));
       for (const [savedKey, event] of (savedEvents ?? [])) {
         const identity = canonicalBisonTripIdentity(event) ?? savedKey;
         state.events.set(identity, { ...event, identity });
@@ -413,17 +473,25 @@ export class NdovFeedHub extends DurableObject {
     const compressedMutationCount = Number(await ctx.storage.get(key('mutationsGzipChunkCount'))) || 0;
     const legacyMutationChunkCount = Number(await ctx.storage.get(key('mutationsChunkCount'))) || 0;
     if (compressedMutationCount > 0) {
-      const chunks = await Promise.all(Array.from({ length: compressedMutationCount }, (_, i) => ctx.storage.get(key('mutations:gzip:' + i))));
-      for (const chunk of chunks) if (chunk) {
-        for (const [identity, mutationState] of await gunzipJson(chunk)) state.mutations.set(identity, mutationState);
+      for (let i = 0; i < compressedMutationCount; i += 1) {
+        const chunk = await ctx.storage.get(key('mutations:gzip:' + i));
+        if (!chunk) continue;
+        const entries = await gunzipJson(chunk);
+        for (const [identity, mutationState] of entries) {
+          state.mutations.set(identity, mutationState);
+        }
       }
     } else if (legacyMutationChunkCount > 0) {
-      const chunks = await Promise.all(Array.from({ length: legacyMutationChunkCount }, (_, i) => ctx.storage.get(key('mutations:' + i))));
-      for (const chunk of chunks) for (const [identity, mutation] of (Array.isArray(chunk) ? chunk : [])) {
-        if (mutation?.events && mutation?.identity) state.mutations.set(identity, mutation);
-        else upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT);
+      for (let i = 0; i < legacyMutationChunkCount; i += 1) {
+        const chunk = await ctx.storage.get(key('mutations:' + i));
+        if (!Array.isArray(chunk)) continue;
+        for (const [identity, mutation] of chunk) {
+          if (mutation?.events && mutation?.identity) state.mutations.set(identity, mutation);
+          else upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT);
+        }
       }
     } else {
+      const savedMutations = await ctx.storage.get(key('mutations'));
       for (const item of new Map(savedMutations ?? []).values()) {
         if (item?.events && item?.identity) state.mutations.set(item.identity, item);
         else upsertCurrentMutationState(state.mutations, item, KV17_STATE_LIMIT);
@@ -682,6 +750,64 @@ export class NdovFeedHub extends DurableObject {
     );
   }
 
+  kv78RowIdentityKey(row) {
+    const parsed = normalizeTripLookupIdentity([
+      row?.dataOwnerCode,
+      row?.operationDate,
+      row?.linePlanningNumber,
+      row?.journeyNumber,
+      row?.fortifyOrderNumber ?? row?.reinforcementNumber ?? '0',
+    ].join('|'));
+    return parsed
+      ? [parsed.owner, parsed.date, parsed.line, parsed.journey, parsed.reinforcement].join('|')
+      : null;
+  }
+
+  kv78OwnerDateKey(row) {
+    const owner = String(row?.dataOwnerCode ?? '').trim().toUpperCase();
+    const date = normalizeOperatingDate(row?.operationDate);
+    return owner && /^\d{8}$/.test(date) ? `${owner}|${date}` : null;
+  }
+
+  addKv78RowToIndexes(state, cacheKey, row) {
+    const identity = this.kv78RowIdentityKey(row);
+    if (identity) {
+      let keys = state.rowsByIdentity.get(identity);
+      if (!keys) state.rowsByIdentity.set(identity, keys = new Set());
+      keys.add(cacheKey);
+    }
+
+    const ownerDate = this.kv78OwnerDateKey(row);
+    if (ownerDate) {
+      let keys = state.rowsByOwnerDate.get(ownerDate);
+      if (!keys) state.rowsByOwnerDate.set(ownerDate, keys = new Set());
+      keys.add(cacheKey);
+    }
+
+  }
+
+  removeKv78RowFromIndexes(state, cacheKey) {
+    // De rij staat nog in state.rows wanneer deze functie wordt aangeroepen.
+    // Leid de indexsleutels daaruit af in plaats van ze per rij dubbel op te slaan.
+    const row = state.rows.get(cacheKey);
+    if (!row) return;
+
+    const identity = this.kv78RowIdentityKey(row);
+    if (identity) {
+      const keys = state.rowsByIdentity.get(identity);
+      keys?.delete(cacheKey);
+      if (keys?.size === 0) state.rowsByIdentity.delete(identity);
+    }
+
+    const ownerDate = this.kv78OwnerDateKey(row);
+    if (ownerDate) {
+      const keys = state.rowsByOwnerDate.get(ownerDate);
+      keys?.delete(cacheKey);
+      if (keys?.size === 0) state.rowsByOwnerDate.delete(ownerDate);
+    }
+
+  }
+
   stateFor(stream) {
     const state = this.streamStates.get(stream);
     if (!state) throw new Error('Unknown NDOV stream: ' + stream);
@@ -862,7 +988,11 @@ export class NdovFeedHub extends DurableObject {
     }
 
     if (url.pathname === '/status') {
-      if (stream === 'bison') this.pruneEvents(stream);
+      if (stream === 'bison' &&
+          Date.now() - (state.lastEventPruneAt ?? 0) >= 10000) {
+        this.pruneEvents(stream);
+        state.lastEventPruneAt = Date.now();
+      }
       const base = state.snapshot.state === 'idle' ? initialSnapshot(stream) : state.snapshot;
       const kv78IdentityDiagnostics =
         stream === "kv78" && url.searchParams.get("identityDiagnostics") === "1"
@@ -1020,9 +1150,9 @@ export class NdovFeedHub extends DurableObject {
         ...(url.searchParams.get('includeRows') === '0' ? {} : {
           latestRows: url.searchParams.get('includeAllRows') === '1'
             ? [...state.rows.values()]
-            : [...state.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
+            : tailMapValues(state.rows, KV78_STATUS_SAMPLE_LIMIT),
         }),
-        latestEvents: [...state.events.values()].slice(-100),
+        latestEvents: tailMapValues(state.events, 100),
         bisonIdentityDiagnostics,
         storedKv6TripCount: state.events.size,
         latestMutations: currentMutations,
@@ -1242,15 +1372,24 @@ export class NdovFeedHub extends DurableObject {
       if (!identities.length && !vehicleLookupValid) {
         return Response.json({ ok: false, error: 'Geef identity=... of vehicleNumber=...&owner=...&date=YYYYMMDD op.' }, { status: 400 });
       }
-      this.pruneEvents(stream);
-      const selectedEvents = identities.length
-        ? identities.map((identity) => state.events.get(identity))
-        : [...state.events.values()].filter((event) =>
+      if (Date.now() - (state.lastEventPruneAt ?? 0) >= 10000) {
+        this.pruneEvents(stream);
+        state.lastEventPruneAt = Date.now();
+      }
+      let selectedEvents;
+      if (identities.length) {
+        selectedEvents = identities.map((identity) => state.events.get(identity));
+      } else {
+        selectedEvents = [];
+        for (const event of state.events.values()) {
+          if (
             String(event?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
             String(event?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
             normalizeOperatingDate(event?.operationDate) === vehicleDate &&
             (!vehicleLine || String(event?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
-          );
+          ) selectedEvents.push(event);
+        }
+      }
       const now = Date.now();
       const events = selectedEvents.filter((event) => {
         if (!event) return false;
@@ -1339,23 +1478,47 @@ export class NdovFeedHub extends DurableObject {
         return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement-parameters, vehicleNumber=...&owner=...&date=YYYYMMDD, of lineLookup=1&owner=...&date=YYYYMMDD&line=...&scheduledTime=...' }, { status: 400 });
       }
       const now = Date.now();
-      const rows = [...state.rows.values()].filter((row) => {
-        if (identities.length) return identities.some(identity => rowMatchesIdentity(row, identity));
-        if (lineLookupValid) {
-          if (
-            String(row?.dataOwnerCode ?? '').trim().toUpperCase() !== vehicleOwner ||
-            normalizeOperatingDate(row?.operationDate) !== vehicleDate ||
-            String(row?.linePlanningNumber ?? '').trim().toUpperCase() !== vehicleLine
-          ) return false;
-          const distance = kv78LineLookupDistance(row, scheduledTimes);
-          return distance !== null && distance <= KV78_LINE_LOOKUP_TOLERANCE_SECONDS;
+      let candidateRows;
+      if (identities.length) {
+        // Direct index lookup: do not scan every retained KV78 row for one trip.
+        candidateRows = [];
+        for (const wantedIdentity of identities) {
+          const indexedKeys = state.rowsByIdentity.get(identityKey(wantedIdentity)) ?? [];
+          for (const cacheKey of indexedKeys) {
+            const row = state.rows.get(cacheKey);
+            if (row && rowMatchesIdentity(row, wantedIdentity)) candidateRows.push(row);
+          }
         }
-        return String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
-          String(row?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
-          normalizeOperatingDate(row?.operationDate) === vehicleDate &&
-          (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine);
+      } else if (lineLookupValid) {
+        // Reuse the owner/date index and filter the requested line in-place.
+        const lookupKey = [vehicleOwner, vehicleDate].join('|');
+        candidateRows = [...(state.rowsByOwnerDate.get(lookupKey) ?? [])]
+          .map((cacheKey) => state.rows.get(cacheKey))
+          .filter((row) => Boolean(row))
+          .filter((row) =>
+            String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine
+          )
+          .filter((row) => {
+            const distance = kv78LineLookupDistance(row, scheduledTimes);
+            return distance !== null && distance <= KV78_LINE_LOOKUP_TOLERANCE_SECONDS;
+          });
+      } else {
+        const lookupKey = [vehicleOwner, vehicleDate].join('|');
+
+        candidateRows = [...(state.rowsByOwnerDate.get(lookupKey) ?? [])]
+          .map((cacheKey) => state.rows.get(cacheKey))
+          .filter(Boolean)
+          .filter((row) =>
+            String(row?.vehicleNumber ?? '').trim().split(':').pop() === vehicleNumber &&
+            String(row?.dataOwnerCode ?? '').trim().toUpperCase() === vehicleOwner &&
+            normalizeOperatingDate(row?.operationDate) === vehicleDate &&
+            (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
+          );
+      }
+      const fresh = candidateRows.filter((row) => {
+        const at = Date.parse(row.receivedAt ?? '');
+        return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS;
       });
-      const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
       fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
 
       // Exact identities retain their historical per-trip cap. The metro fallback
@@ -1401,7 +1564,7 @@ export class NdovFeedHub extends DurableObject {
           : { mode: 'vehicle', vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
         returnedCount: returnedRows.length,
         truncated,
-        staleCount: rows.length - fresh.length,
+        staleCount: candidateRows.length - fresh.length,
         rows: returnedRows,
       }, { headers: { 'cache-control': 'no-store' } });
     }
@@ -1415,7 +1578,11 @@ export class NdovFeedHub extends DurableObject {
     // KV17 state for the current Dutch operating date. KV17 is event-driven: a
     // CANCEL remains the latest known state until a newer RECOVER/change arrives.
     // Old operating dates are discarded so yesterday's mutations cannot fill the cache.
-    if (stream === 'kv78' && !state.continuousEnabled) state.rows.clear();
+    if (stream === 'kv78' && !state.continuousEnabled) {
+      state.rows.clear();
+      state.rowsByIdentity.clear();
+      state.rowsByOwnerDate.clear();
+    }
     if (stream === 'bison') {
       state.events.clear();
       await this.pruneMutationDates(stream);
@@ -1462,23 +1629,44 @@ export class NdovFeedHub extends DurableObject {
     const state = this.stateFor(stream);
     if (!force || state.snapshot.stream !== 'kv78') return;
     this.pruneRows(stream);
-    const entries = [...state.rows.entries()];
-    const chunkCount = Math.ceil(entries.length / ROW_CHUNK_SIZE);
+
+    // Sleutels zijn veel lichter dan een tweede array met alle [key, row]-paren.
+    const rowKeys = [...state.rows.keys()];
     const previousCount = Number(await this.ctx.storage.get(stream + ':rowsGzipChunkCount')) || 0;
     const legacyCount = Number(await this.ctx.storage.get(stream + ':rowsChunkCount')) || 0;
+    let writtenChunkCount = 0;
 
-    // Compress independently-sized chunks. This keeps each SQLite-backed DO
-    // value comfortably below Cloudflare's 2 MB per-value limit while using far
-    // fewer storage writes than one write per stop row.
-    for (let i = 0; i < chunkCount; i += 1) {
-      const bytes = await gzipJson(entries.slice(i * ROW_CHUNK_SIZE, (i + 1) * ROW_CHUNK_SIZE));
-      if (bytes.length > 1_500_000) throw new Error(`Compressed KV78 chunk ${i} exceeds safe storage value size`);
-      await this.ctx.storage.put(stream + ':rows:gzip:' + i, bytes);
+    // Comprimeer slechts ROW_CHUNK_SIZE rijen tegelijk.
+    for (let offset = 0; offset < rowKeys.length; offset += ROW_CHUNK_SIZE) {
+      const end = Math.min(offset + ROW_CHUNK_SIZE, rowKeys.length);
+      const entries = [];
+
+      for (let index = offset; index < end; index += 1) {
+        const cacheKey = rowKeys[index];
+        const row = state.rows.get(cacheKey);
+        if (row !== undefined) entries.push([cacheKey, row]);
+      }
+
+      if (!entries.length) continue;
+
+      const bytes = await gzipJson(entries);
+      if (bytes.length > 1_500_000) {
+        throw new Error(`Compressed KV78 chunk ${writtenChunkCount} exceeds safe storage value size`);
+      }
+
+      await this.ctx.storage.put(stream + ':rows:gzip:' + writtenChunkCount, bytes);
+      writtenChunkCount += 1;
     }
-    await this.ctx.storage.put(stream + ':rowsGzipChunkCount', chunkCount);
+
+    await this.ctx.storage.put(stream + ':rowsGzipChunkCount', writtenChunkCount);
+
     const obsolete = [];
-    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(stream + ':rows:gzip:' + i);
-    for (let i = 0; i < legacyCount; i += 1) obsolete.push(stream + ':rows:' + i);
+    for (let i = writtenChunkCount; i < previousCount; i += 1) {
+      obsolete.push(stream + ':rows:gzip:' + i);
+    }
+    for (let i = 0; i < legacyCount; i += 1) {
+      obsolete.push(stream + ':rows:' + i);
+    }
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
     if (legacyCount) await this.ctx.storage.delete(stream + ':rowsChunkCount');
   }
@@ -1487,36 +1675,72 @@ export class NdovFeedHub extends DurableObject {
     const state = this.stateFor(stream);
     if (!force || state.snapshot.stream !== 'bison') return;
     this.pruneEvents(stream);
-    const entries = [...state.events.entries()];
-    const chunkCount = Math.ceil(entries.length / MUTATION_CHUNK_SIZE);
+
+    const eventKeys = [...state.events.keys()];
     const previousCount = Number(await this.ctx.storage.get(stream + ':eventsGzipChunkCount')) || 0;
-    for (let i = 0; i < chunkCount; i += 1) {
-      const bytes = await gzipJson(entries.slice(i * MUTATION_CHUNK_SIZE, (i + 1) * MUTATION_CHUNK_SIZE));
-      if (bytes.length > 1_500_000) throw new Error(`Compressed KV6 event chunk ${i} exceeds safe storage value size`);
-      await this.ctx.storage.put(stream + ':events:gzip:' + i, bytes);
+    let writtenCount = 0;
+
+    for (let offset = 0; offset < eventKeys.length; offset += MUTATION_CHUNK_SIZE) {
+      const entries = [];
+      const end = Math.min(offset + MUTATION_CHUNK_SIZE, eventKeys.length);
+      for (let i = offset; i < end; i += 1) {
+        const key = eventKeys[i];
+        const event = state.events.get(key);
+        if (event !== undefined) entries.push([key, event]);
+      }
+      if (!entries.length) continue;
+
+      const bytes = await gzipJson(entries);
+      if (bytes.length > 1_500_000) {
+        throw new Error(`Compressed KV6 event chunk ${writtenCount} exceeds safe storage value size`);
+      }
+      await this.ctx.storage.put(stream + ':events:gzip:' + writtenCount, bytes);
+      writtenCount += 1;
     }
-    await this.ctx.storage.put(stream + ':eventsGzipChunkCount', chunkCount);
+
+    await this.ctx.storage.put(stream + ':eventsGzipChunkCount', writtenCount);
     const obsolete = [];
-    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(stream + ':events:gzip:' + i);
+    for (let i = writtenCount; i < previousCount; i += 1) {
+      obsolete.push(stream + ':events:gzip:' + i);
+    }
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
   }
 
   async persistFullMutations(stream, force = false) {
     const state = this.stateFor(stream);
     if (!force || state.snapshot.stream !== 'bison') return;
-    const entries = [...state.mutations.entries()];
-    const chunkCount = Math.ceil(entries.length / MUTATION_CHUNK_SIZE);
+
+    const mutationKeys = [...state.mutations.keys()];
     const previousCount = Number(await this.ctx.storage.get(stream + ':mutationsGzipChunkCount')) || 0;
     const legacyCount = Number(await this.ctx.storage.get(stream + ':mutationsChunkCount')) || 0;
-    for (let i = 0; i < chunkCount; i += 1) {
-      const bytes = await gzipJson(entries.slice(i * MUTATION_CHUNK_SIZE, (i + 1) * MUTATION_CHUNK_SIZE));
-      if (bytes.length > 1_500_000) throw new Error(`Compressed KV17 chunk ${i} exceeds safe storage value size`);
-      await this.ctx.storage.put(stream + ':mutations:gzip:' + i, bytes);
+    let writtenCount = 0;
+
+    for (let offset = 0; offset < mutationKeys.length; offset += MUTATION_CHUNK_SIZE) {
+      const entries = [];
+      const end = Math.min(offset + MUTATION_CHUNK_SIZE, mutationKeys.length);
+      for (let i = offset; i < end; i += 1) {
+        const key = mutationKeys[i];
+        const mutation = state.mutations.get(key);
+        if (mutation !== undefined) entries.push([key, mutation]);
+      }
+      if (!entries.length) continue;
+
+      const bytes = await gzipJson(entries);
+      if (bytes.length > 1_500_000) {
+        throw new Error(`Compressed KV17 chunk ${writtenCount} exceeds safe storage value size`);
+      }
+      await this.ctx.storage.put(stream + ':mutations:gzip:' + writtenCount, bytes);
+      writtenCount += 1;
     }
-    await this.ctx.storage.put(stream + ':mutationsGzipChunkCount', chunkCount);
+
+    await this.ctx.storage.put(stream + ':mutationsGzipChunkCount', writtenCount);
     const obsolete = [];
-    for (let i = chunkCount; i < previousCount; i += 1) obsolete.push(stream + ':mutations:gzip:' + i);
-    for (let i = 0; i < legacyCount; i += 1) obsolete.push(stream + ':mutations:' + i);
+    for (let i = writtenCount; i < previousCount; i += 1) {
+      obsolete.push(stream + ':mutations:gzip:' + i);
+    }
+    for (let i = 0; i < legacyCount; i += 1) {
+      obsolete.push(stream + ':mutations:' + i);
+    }
     if (obsolete.length) await this.ctx.storage.delete(obsolete);
     if (legacyCount) await this.ctx.storage.delete(stream + ':mutationsChunkCount');
   }
@@ -1555,6 +1779,7 @@ export class NdovFeedHub extends DurableObject {
     for (const [key, row] of state.rows.entries()) {
       const captured = Date.parse(row?.receivedAt ?? '');
       if (!Number.isFinite(captured) || captured < cutoff) {
+        this.removeKv78RowFromIndexes(state, key);
         state.rows.delete(key);
         if (stream === 'kv78') state.rowCacheStats.stalePrunedRows += 1;
         continue;
@@ -1566,6 +1791,7 @@ export class NdovFeedHub extends DurableObject {
           KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
         );
         if (!scheduleInfo.relevant) {
+          this.removeKv78RowFromIndexes(state, key);
           state.rows.delete(key);
           state.rowCacheStats.schedulePrunedRows += 1;
         }
@@ -1580,16 +1806,19 @@ export class NdovFeedHub extends DurableObject {
         KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
       );
       for (const key of evictions) {
+        this.removeKv78RowFromIndexes(state, key);
         if (state.rows.delete(key)) state.rowCacheStats.limitEvictedRows += 1;
       }
     }
     while (state.rows.size > KV78_ROW_LIMIT) {
-      state.rows.delete(state.rows.keys().next().value);
+      const oldestKey = state.rows.keys().next().value;
+      this.removeKv78RowFromIndexes(state, oldestKey);
+      state.rows.delete(oldestKey);
       if (stream === 'kv78') state.rowCacheStats.limitEvictedRows += 1;
     }
   }
 
-  async persist(stream, force = false, bulk = false) {
+  async persist(stream, force = false, bulk = false, skipFullCheckpoint = false) {
     const state = this.stateFor(stream);
     const minInterval = state.continuousMode ? CONTINUOUS_PERSIST_INTERVAL_MS : 5000;
     if (!force && Date.now() - state.lastPersistAt < minInterval) return;
@@ -1599,27 +1828,55 @@ export class NdovFeedHub extends DurableObject {
       events: state.events.size, mutations: state.mutations.size, messageCount: state.snapshot.messageCount,
     }));
     state.lastPersistAt = Date.now();
-    state.snapshot.latestRows = [...state.rows.values()].slice(-30);
-    state.snapshot.latestEvents = [...state.events.values()].slice(-20);
+    state.snapshot.latestRows = tailMapValues(state.rows, 30);
+    state.snapshot.latestEvents = tailMapValues(state.events, 20);
     state.snapshot.latestMutations = flattenCurrentMutations(state.mutations, 30);
     state.snapshot.storedKv78RowCount = state.rows.size;
     state.snapshot.storedMutationIdentityCount = state.mutations.size;
     state.snapshot.continuousEnabled = state.continuousEnabled;
     const now = Date.now();
-    const hasCollectedData = stream === 'kv78' ? state.rows.size > 0 : state.events.size > 0 || state.mutations.size > 0;
-    const checkpointDue = state.continuousMode && hasCollectedData && now - state.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
-    const finalCheckpointDue = bulk && hasCollectedData && (!state.continuousMode || now - state.lastFullPersistAt >= 5000);
-    if (checkpointDue || finalCheckpointDue) {
-      await this.persistFullKv78Rows(stream, true);
-      await this.persistFullBisonEvents(stream, true);
-      await this.persistFullMutations(stream, true);
-      state.lastFullPersistAt = Date.now();
+    const hasCollectedData = stream === 'kv78'
+      ? state.rows.size > 0
+      : state.events.size > 0 || state.mutations.size > 0;
+    const checkpointDue = state.continuousMode && hasCollectedData &&
+      now - state.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
+    const finalCheckpointDue = bulk && hasCollectedData &&
+      (!state.continuousMode || now - state.lastFullPersistAt >= 5000);
+    if (!skipFullCheckpoint && (checkpointDue || finalCheckpointDue)) {
+      const persistFullSnapshot = async () => {
+        // Een eerdere stream kan tijdens het wachten al een checkpoint hebben
+        // geschreven. Controleer opnieuw, zodat we geen dubbele grote snapshot
+        // maken en de piekbelasting van KV78 + BISON niet optellen.
+        const checkpointNow = Date.now();
+        const hasCurrentData = stream === 'kv78'
+          ? state.rows.size > 0
+          : state.events.size > 0 || state.mutations.size > 0;
+        const checkpointStillDue = state.continuousMode && hasCurrentData &&
+          checkpointNow - state.lastFullPersistAt >= CONTINUOUS_FULL_CHECKPOINT_MS;
+        const finalCheckpointStillDue = bulk && hasCurrentData &&
+          (!state.continuousMode || checkpointNow - state.lastFullPersistAt >= 5000);
+        if (!checkpointStillDue && !finalCheckpointStillDue) return;
+
+        await this.persistFullKv78Rows(stream, true);
+        await this.persistFullBisonEvents(stream, true);
+        await this.persistFullMutations(stream, true);
+        state.lastFullPersistAt = Date.now();
+      };
+
+      const queuedPersist = this.fullPersistQueue.then(
+        persistFullSnapshot,
+        persistFullSnapshot
+      );
+      // Keep the queue usable after a failure; the current caller still receives
+      // the original rejection and can log/retry the failed snapshot.
+      this.fullPersistQueue = queuedPersist.catch(() => {});
+      await queuedPersist;
     }
     await this.ctx.storage.put({
       [stream + ':snapshot']: state.snapshot,
-      [stream + ':rows']: [...state.rows.entries()].slice(-100),
-      [stream + ':events']: [...state.events.entries()].slice(-100),
-      [stream + ':mutations']: [...state.mutations.entries()].slice(-50),
+      [stream + ':rows']: tailMapEntries(state.rows, 100),
+      [stream + ':events']: tailMapEntries(state.events, 100),
+      [stream + ':mutations']: tailMapEntries(state.mutations, 50),
     });
     if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_DONE]", JSON.stringify({
       stream: state.snapshot.stream, elapsedMs: Date.now() - persistStartedAt, messageCount: state.snapshot.messageCount,
@@ -1659,8 +1916,6 @@ export class NdovFeedHub extends DurableObject {
     const streams = [];
     for (const stream of Object.keys(CONFIG)) {
       const state = this.stateFor(stream);
-      // Read only the enable flags first; a disabled stream's sizeable cache
-      // must not be inflated just because the shared object's alarm fired.
       state.continuousEnabled =
         (await this.ctx.storage.get(stream + ':continuousEnabled')) === true;
       if (state.continuousEnabled) streams.push(stream);
@@ -1723,7 +1978,7 @@ export class NdovFeedHub extends DurableObject {
           error: error instanceof Error ? error.message : String(error),
           finishedAt: new Date().toISOString(),
         };
-        try { await this.persist(stream, true, true); } catch (persistError) {
+        try { await this.persist(stream, true, false, true); } catch (persistError) {
           console.error('[NDOV_AUTOCOLLECT] Foutstatus kon niet worden opgeslagen.', persistError);
         }
       } finally {
@@ -1904,36 +2159,49 @@ export class NdovFeedHub extends DurableObject {
             state.lastRowPruneAt = Date.now();
           }
           if (stream === 'kv78' && /\/KV8passtimes\//.test(envelope)) {
+
             const passtimeReceivedAt = new Date().toISOString();
-            const parsedRows = parseKv78Payload(text, envelope);
-            state.snapshot = {
-              ...state.snapshot,
-              kv78PasstimeMessageCount: (Number(state.snapshot.kv78PasstimeMessageCount) || 0) + 1,
-              kv78ParsedRowCount: (Number(state.snapshot.kv78ParsedRowCount) || 0) + parsedRows.length,
-              kv78LastPasstimeMessageAt: passtimeReceivedAt,
-              kv78LastNonemptyPasstimeAt: parsedRows.length
-                ? passtimeReceivedAt
-                : (state.snapshot.kv78LastNonemptyPasstimeAt ?? null),
-              kv78LastPasstimeBatchSize: parsedRows.length,
-              kv78LastPasstimePayloadBytes: payload.length,
-            };
-            for (const row of parsedRows) {
-              // Keep every line during this bounded diagnostic run. Filtering to
-              // U005/U011/U073/24 hid mutations such as CXX L014 and ARR 26010.
+            const previousParsedRowCount =
+              Number(state.snapshot.kv78ParsedRowCount) || 0;
+            let parsedRowCount = 0;
+
+            // Verwerk iedere halte direct. Er wordt geen tweede grote array
+            // met alle geparseerde rijen opgebouwd.
+            for (const row of iterateKv78Payload(text, envelope)) {
+              parsedRowCount += 1;
               row.receivedAt = passtimeReceivedAt;
-              const key = kv78RowCacheKey(row) ?? `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+
+              const key = kv78RowCacheKey(row) ??
+                `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+
+              this.removeKv78RowFromIndexes(state, key);
               state.rows.delete(key);
               state.rows.set(key, row);
+              this.addKv78RowToIndexes(state, key, row);
             }
+
+            state.snapshot = {
+              ...state.snapshot,
+              kv78PasstimeMessageCount:
+                (Number(state.snapshot.kv78PasstimeMessageCount) || 0) + 1,
+              kv78ParsedRowCount:
+                previousParsedRowCount + parsedRowCount,
+              kv78LastPasstimeMessageAt: passtimeReceivedAt,
+              kv78LastNonemptyPasstimeAt: parsedRowCount
+                ? passtimeReceivedAt
+                : (state.snapshot.kv78LastNonemptyPasstimeAt ?? null),
+              kv78LastPasstimeBatchSize: parsedRowCount,
+              kv78LastPasstimePayloadBytes: payload.length,
+            };
             // Prune after processing a complete feed message so expired/past
             // stop rows are removed before capacity eviction can discard fresh rows.
-            if (state.rows.size > KV78_ROW_LIMIT) {
+            if (state.rows.size > KV78_ROW_LIMIT + KV78_ROW_PRUNE_BATCH_HEADROOM) {
               this.pruneRows(stream);
               state.lastRowPruneAt = Date.now();
             }
           } else if (stream === 'bison' && /KV6posinfo/.test(envelope)) {
             const receivedAt = new Date().toISOString();
-            for (const ev of parseBisonPayload(text, envelope)) {
+            for (const ev of iterateBisonPayload(text, envelope)) {
               const key = canonicalBisonTripIdentity(ev);
               if (!key) continue;
               const previous = state.events.get(key) ?? {};
@@ -1995,7 +2263,7 @@ export class NdovFeedHub extends DurableObject {
         finishedAt: new Date().toISOString(),
         error: expectedEnd || wasStopped ? null : (error instanceof Error ? error.message : String(error)),
       };
-      await this.persist(stream, true, true);
+      await this.persist(stream, true, false, true);
     } finally {
       // Start beide opruimacties voordat we op een van beide wachten.
       const cleanup = [];
