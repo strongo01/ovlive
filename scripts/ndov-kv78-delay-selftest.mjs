@@ -15,8 +15,8 @@ assert.match(
 );
 assert.match(
   ndovHubSource,
-  /staleCount:\s*candidateRows\.length\s*-\s*fresh\.length/,
-  'KV78 /rows must calculate stale rows from the declared candidateRows collection',
+  /staleCount:\s*candidateRows\.length\s*-\s*freshByAge\.length/,
+  'KV78 /rows must count age-stale rows separately from schedule-filtered rows',
 );
 assert.doesNotMatch(
   ndovHubSource,
