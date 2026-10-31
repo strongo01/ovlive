@@ -51,6 +51,76 @@ export function parseMutationTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+const KV6_EVENT_ACTIVE_TYPES = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIVAL']);
+
+export function isKv6EventRetainable(
+  event,
+  nowMs = Date.now(),
+  statusFreshMs = 180_000,
+  retentionMs = 600_000,
+) {
+  const received = Date.parse(event?.receivedAt ?? '');
+  const punctualityReceived = Date.parse(event?.punctualityReceivedAt ?? '');
+  const eventType = String(event?.eventType ?? '').toUpperCase();
+  const activeEventType = KV6_EVENT_ACTIVE_TYPES.has(eventType);
+  const freshActivity = Number.isFinite(received) &&
+    received <= nowMs + 30_000 &&
+    nowMs - received <= statusFreshMs &&
+    activeEventType;
+  const freshPunctuality = Number.isFinite(punctualityReceived) &&
+    punctualityReceived <= nowMs + 30_000 &&
+    nowMs - punctualityReceived <= statusFreshMs &&
+    event?.punctualitySeconds !== null &&
+    event?.punctualitySeconds !== undefined;
+
+  return Number.isFinite(received) &&
+    received >= nowMs - retentionMs &&
+    (freshActivity || freshPunctuality);
+}
+
+/**
+ * Map order tracks last receipt time because updates delete+set the trip identity,
+ * and durable snapshots preserve Map iteration order. After the first retainable
+ * event, later entries are at least as recent.
+ *
+ * Cold loading uses fullScan=true to clean legacy state. Normal pruning checks
+ * only a bounded stale prefix. /events independently checks freshness on reads.
+ */
+export function pruneKv6EventCache(
+  events,
+  nowMs = Date.now(),
+  limit = 30_000,
+  maxScan = 1_000,
+  fullScan = false,
+  statusFreshMs = 180_000,
+  retentionMs = 600_000,
+) {
+  let inspected = 0;
+  let removed = 0;
+
+  for (const [key, event] of events.entries()) {
+    if (!fullScan && inspected >= maxScan) break;
+    inspected += 1;
+
+    if (!isKv6EventRetainable(event, nowMs, statusFreshMs, retentionMs)) {
+      events.delete(key);
+      removed += 1;
+    } else if (!fullScan) {
+      break;
+    }
+  }
+
+  // Apply the former oldest-entry cap after removing stale prefix entries.
+  while (events.size > limit) {
+    const oldestKey = events.keys().next().value;
+    if (oldestKey === undefined) break;
+    events.delete(oldestKey);
+    removed += 1;
+  }
+
+  return { inspected, removed };
+}
+
 export function normalizedMutationIdentity(mutation) {
   if (!mutation || mutation.allLines === true || mutation.allJourneysOfLine === true) return null;
   const owner = String(mutation.dataOwnerCode ?? mutation.DataOwnerCode ?? '').trim();
@@ -198,36 +268,63 @@ export function kv78RowScheduleInfo(
   if (!Number.isFinite(nowSeconds)) {
     return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
   }
-  // Target times preserve timetable alignment, while expected times preserve
-  // a delayed stop that is now expected near the current clock. Keeping only the
-  // target time wrongly pruned fresh records once a delay exceeded this past window.
-  const eventTimes = [
-    kv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime),
-    kv78ClockSeconds(row?.targetArrivalTime ?? row?.TargetArrivalTime),
-    kv78ClockSeconds(row?.expectedDepartureTime ?? row?.ExpectedDepartureTime),
-    kv78ClockSeconds(row?.expectedArrivalTime ?? row?.ExpectedArrivalTime),
-  ].filter((value) => value !== null);
-  if (!eventTimes.length) {
-    // Unknown times are kept until capacity pressure; they cannot be ranked
-    // confidently, so the cache-eviction helper will discard them first.
-    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
-  }
-  const deltas = eventTimes.map((targetSeconds) => {
-    let delta = targetSeconds - nowSeconds;
-    // Only wrap close to midnight; otherwise an old morning stop could appear future.
+
+  // Evaluate four timetable/prediction clocks without allocating intermediate arrays.
+  const minPast = Math.max(0, maxPastSeconds);
+  const maxFuture = Math.max(0, maxFutureSeconds);
+  let hasScheduleTime = false;
+  let relevant = false;
+  let distanceSeconds = Number.POSITIVE_INFINITY;
+
+  let value = kv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime);
+  if (value !== null) {
+    hasScheduleTime = true;
+    let delta = value - nowSeconds;
     if (delta > 64800) delta -= 86400;
     else if (delta < -64800) delta += 86400;
-    return delta;
-  });
-  const distanceSeconds = Math.min(...deltas.map((delta) => Math.abs(delta)));
-  return {
-    relevant: deltas.some((delta) =>
-      delta >= -Math.max(0, maxPastSeconds) &&
-      delta <= Math.max(0, maxFutureSeconds)
-    ),
-    hasScheduleTime: true,
-    distanceSeconds,
-  };
+    const distance = Math.abs(delta);
+    if (distance < distanceSeconds) distanceSeconds = distance;
+    if (delta >= -minPast && delta <= maxFuture) relevant = true;
+  }
+
+  value = kv78ClockSeconds(row?.targetArrivalTime ?? row?.TargetArrivalTime);
+  if (value !== null) {
+    hasScheduleTime = true;
+    let delta = value - nowSeconds;
+    if (delta > 64800) delta -= 86400;
+    else if (delta < -64800) delta += 86400;
+    const distance = Math.abs(delta);
+    if (distance < distanceSeconds) distanceSeconds = distance;
+    if (delta >= -minPast && delta <= maxFuture) relevant = true;
+  }
+
+  value = kv78ClockSeconds(row?.expectedDepartureTime ?? row?.ExpectedDepartureTime);
+  if (value !== null) {
+    hasScheduleTime = true;
+    let delta = value - nowSeconds;
+    if (delta > 64800) delta -= 86400;
+    else if (delta < -64800) delta += 86400;
+    const distance = Math.abs(delta);
+    if (distance < distanceSeconds) distanceSeconds = distance;
+    if (delta >= -minPast && delta <= maxFuture) relevant = true;
+  }
+
+  value = kv78ClockSeconds(row?.expectedArrivalTime ?? row?.ExpectedArrivalTime);
+  if (value !== null) {
+    hasScheduleTime = true;
+    let delta = value - nowSeconds;
+    if (delta > 64800) delta -= 86400;
+    else if (delta < -64800) delta += 86400;
+    const distance = Math.abs(delta);
+    if (distance < distanceSeconds) distanceSeconds = distance;
+    if (delta >= -minPast && delta <= maxFuture) relevant = true;
+  }
+
+  if (!hasScheduleTime) {
+    // Unknown times are kept until capacity pressure.
+    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
+  }
+  return { relevant, hasScheduleTime: true, distanceSeconds };
 }
 
 export function isKv78RowScheduleRelevant(
