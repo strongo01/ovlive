@@ -546,8 +546,8 @@ assert.doesNotMatch(
   'BISON vehicle lookup must filter without copying the full event cache',
 );
 assert.match(hubSource, /Date\.now\(\) - state\.lastPersistAt < minInterval/);
-assert.match(hubSource, /if \(stream === 'kv78' && !state\.continuousEnabled\) \{\s*state\.rows\.clear\(\);\s*state\.rowsByIdentity\.clear\(\);\s*state\.rowsByOwnerDate\.clear\(\);\s*\}/,
-  'KV78 cache reset must clear the row map and both remaining indexes');
+assert.match(hubSource, /if \(stream === 'kv78' && !state\.continuousEnabled\) \{\s*state\.rows\.clear\(\);\s*state\.rowPruneIterator = null;\s*state\.rowsByIdentity\.clear\(\);\s*state\.rowsByOwnerDate\.clear\(\);\s*\}/,
+  'KV78 cache reset must clear the row map, pruning cursor, and both indexes');
 assert.doesNotMatch(hubSource, /rowsByOwnerDateLine/,
   'KV78 must not retain a third owner/date/line index');
 assert.match(hubSource, /pruneKv6EventCache\(/, 'BISON pruning must use bounded cache cleanup');
