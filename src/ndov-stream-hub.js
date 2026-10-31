@@ -13,7 +13,7 @@ import {
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, iterateBisonPayload, parseKv17Payload, iterateKv78Payload } from './ndov-feed-parser.mjs';
 import { handleNdovStopNameCacheRequest } from './ndov-stop-name-cache.mjs';
-import { amsterdamClockSeconds, continuousCollectorHealth, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState, isKv6EventRetainable, pruneKv6EventCache } from './ndov-live-state.mjs';
+import { amsterdamClockSeconds, continuousCollectorHealth, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState, isKv6EventRetainable, pruneKv6EventCache, inspectKv78RowPruneBatch } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
 const OWNER_PREFIXES = ['/ARR/', '/RIG/', '/GVB/', '/CXX/', '/EBS/', '/QBUZZ/', '/KEOLIS/', '/IVU/', '/OPENOV/'];
@@ -27,7 +27,8 @@ const KV6_EVENT_STATUS_FRESH_MS = 180 * 1000;
 const KV6_EVENT_PRUNE_BATCH_SIZE = 1000;
 const KV6_ACTIVE_EVENT_TYPES = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIVAL']);
 const KV78_ROW_LIMIT = 30000; // rolling, durable row cache
-const KV78_ROW_PRUNE_BATCH_HEADROOM = 1000; // opruimen in grotere batches
+const KV78_ROW_PRUNE_BATCH_HEADROOM = 1000; // trigger capaciteitsscan vóór grote overloop
+const KV78_ROW_PRUNE_BATCH_SIZE = 1000;
 const KV78_STATUS_SAMPLE_LIMIT = 5000;
 const KV17_STATE_LIMIT = 5000;
 // KV78 rows older than this are rejected by /rows and cannot enrich a live plan.
@@ -363,6 +364,7 @@ export class NdovFeedHub extends DurableObject {
       rowsByOwnerDate: new Map(),
       running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
+      rowPruneIterator: null,
       rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
     }]));
     this.loadedStreams = new Set();
@@ -411,6 +413,7 @@ export class NdovFeedHub extends DurableObject {
     const compressedEventCount = Number(await ctx.storage.get(key('eventsGzipChunkCount'))) || 0;
 
     state.rows = new Map();
+    state.rowPruneIterator = null;
 
     if (stream === 'kv78') {
       state.rowsByIdentity.clear();
@@ -1518,10 +1521,18 @@ export class NdovFeedHub extends DurableObject {
             (!vehicleLine || String(row?.linePlanningNumber ?? '').trim().toUpperCase() === vehicleLine)
           );
       }
-      const fresh = candidateRows.filter((row) => {
+      const freshByAge = candidateRows.filter((row) => {
         const at = Date.parse(row.receivedAt ?? '');
         return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS;
       });
+      const nowSeconds = amsterdamClockSeconds(now);
+      const fresh = freshByAge.filter((row) =>
+        kv78RowScheduleInfo(
+          row, nowSeconds,
+          KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+          KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
+        ).relevant
+      );
       fresh.sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? ''));
 
       // Exact identities retain their historical per-trip cap. The metro fallback
@@ -1567,7 +1578,7 @@ export class NdovFeedHub extends DurableObject {
           : { mode: 'vehicle', vehicleNumber, owner: vehicleOwner, date: vehicleDate, line: vehicleLine || null },
         returnedCount: returnedRows.length,
         truncated,
-        staleCount: candidateRows.length - fresh.length,
+        staleCount: candidateRows.length - freshByAge.length,
         rows: returnedRows,
       }, { headers: { 'cache-control': 'no-store' } });
     }
@@ -1583,6 +1594,7 @@ export class NdovFeedHub extends DurableObject {
     // Old operating dates are discarded so yesterday's mutations cannot fill the cache.
     if (stream === 'kv78' && !state.continuousEnabled) {
       state.rows.clear();
+      state.rowPruneIterator = null;
       state.rowsByIdentity.clear();
       state.rowsByOwnerDate.clear();
     }
@@ -1765,31 +1777,41 @@ export class NdovFeedHub extends DurableObject {
     const state = this.stateFor(stream);
     const now = Date.now();
     const nowSeconds = amsterdamClockSeconds(now);
-    const cutoff = now - ROW_RETENTION_MS;
-    for (const [key, row] of state.rows.entries()) {
-      const captured = Date.parse(row?.receivedAt ?? '');
-      if (!Number.isFinite(captured) || captured < cutoff) {
-        this.removeKv78RowFromIndexes(state, key);
-        state.rows.delete(key);
-        if (stream === 'kv78') state.rowCacheStats.stalePrunedRows += 1;
-        continue;
-      }
-      if (stream === 'kv78') {
-        const scheduleInfo = kv78RowScheduleInfo(
-          row, nowSeconds,
-          KV78_STOP_TIME_PAST_RETENTION_SECONDS,
-          KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
-        );
-        if (!scheduleInfo.relevant) {
-          this.removeKv78RowFromIndexes(state, key);
-          state.rows.delete(key);
-          state.rowCacheStats.schedulePrunedRows += 1;
-        }
+
+    // A cache above its hard cap must be ranked across the full set so the same
+    // farthest/untimed stops are evicted as before. Otherwise inspect only one
+    // bounded slice and resume from the saved Map iterator on the next pass.
+    const enforceLimit = stream === 'kv78' && state.rows.size > KV78_ROW_LIMIT;
+    const iterator = enforceLimit ? null : state.rowPruneIterator;
+    const batch = inspectKv78RowPruneBatch(
+      state.rows,
+      iterator,
+      enforceLimit ? Number.POSITIVE_INFINITY : KV78_ROW_PRUNE_BATCH_SIZE,
+      now,
+      nowSeconds,
+      ROW_RETENTION_MS,
+      KV78_STOP_TIME_PAST_RETENTION_SECONDS,
+      KV78_STOP_TIME_FUTURE_RETENTION_SECONDS,
+      stream === 'kv78',
+    );
+    state.rowPruneIterator = batch.iterator;
+
+    for (const key of batch.staleKeys) {
+      this.removeKv78RowFromIndexes(state, key);
+      if (state.rows.delete(key) && stream === 'kv78') {
+        state.rowCacheStats.stalePrunedRows += 1;
       }
     }
-    if (state.rows.size > KV78_ROW_LIMIT && stream === 'kv78') {
-      // Drop farthest/untimed stops first so recent and soon-departing journeys
-      // survive cache pressure, rather than relying on stream-message order.
+    for (const key of batch.scheduleKeys) {
+      this.removeKv78RowFromIndexes(state, key);
+      if (state.rows.delete(key) && stream === 'kv78') {
+        state.rowCacheStats.schedulePrunedRows += 1;
+      }
+    }
+
+    if (enforceLimit && batch.completed) {
+      // Drop farthest/untimed stops first. This capacity-pressure path intentionally
+      // keeps the existing complete ranking so realtime coverage is not sacrificed.
       const evictions = selectKv78RowEvictionKeys(
         state.rows, KV78_ROW_LIMIT, nowSeconds,
         KV78_STOP_TIME_PAST_RETENTION_SECONDS,
@@ -1800,11 +1822,14 @@ export class NdovFeedHub extends DurableObject {
         if (state.rows.delete(key)) state.rowCacheStats.limitEvictedRows += 1;
       }
     }
+
     while (state.rows.size > KV78_ROW_LIMIT) {
       const oldestKey = state.rows.keys().next().value;
+      if (oldestKey === undefined) break;
       this.removeKv78RowFromIndexes(state, oldestKey);
-      state.rows.delete(oldestKey);
-      if (stream === 'kv78') state.rowCacheStats.limitEvictedRows += 1;
+      if (state.rows.delete(oldestKey) && stream === 'kv78') {
+        state.rowCacheStats.limitEvictedRows += 1;
+      }
     }
   }
 
