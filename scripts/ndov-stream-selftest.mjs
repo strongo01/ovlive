@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, iterateBisonPayload, parseKv17Payload, parseKv78Payload, iterateKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
-import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys, isKv6EventRetainable, pruneKv6EventCache } from '../src/ndov-live-state.mjs';
+import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys, isKv6EventRetainable, pruneKv6EventCache, inspectKv78RowPruneBatch } from '../src/ndov-live-state.mjs';
 import { handleNdovStopNameCacheRequest } from '../src/ndov-stop-name-cache.mjs';
 
 
@@ -110,6 +110,92 @@ assert.deepEqual([...incrementalKv6Events.keys()], [
   'fresh-0', 'fresh-1', 'fresh-2', 'fresh-3', 'fresh-4',
 ]);
 console.log('PASS: BISON pruning preserves freshness rules and scans a bounded stale prefix');
+
+const kv78PruneNow = Date.parse('2026-10-31T12:00:00.000Z');
+const kv78PruneNowSeconds = 13 * 3600; // Europe/Amsterdam winter time
+const kv78FreshAt = new Date(kv78PruneNow).toISOString();
+const kv78StaleAt = new Date(kv78PruneNow - 5 * 60_000).toISOString();
+function makePruneRow(receivedAt, departure) {
+  return { receivedAt, targetDepartureTime: departure };
+}
+
+// Full-batch output must match the previous full-map stale/schedule filtering.
+const pruneReferenceRows = new Map([
+  ['stale', makePruneRow(kv78StaleAt, '13:00:00')],
+  ['schedule-old', makePruneRow(kv78FreshAt, '08:00:00')],
+  ['schedule-far', makePruneRow(kv78FreshAt, '18:00:01')],
+  ['fresh-near', makePruneRow(kv78FreshAt, '14:00:00')],
+  ['fresh-unknown', { receivedAt: kv78FreshAt }],
+]);
+const oldPruneReference = new Map(pruneReferenceRows);
+const oldPruneStale = [];
+const oldPruneSchedule = [];
+for (const [key, row] of oldPruneReference) {
+  const captured = Date.parse(row?.receivedAt ?? '');
+  if (!Number.isFinite(captured) || captured < kv78PruneNow - 180_000) {
+    oldPruneStale.push(key);
+    oldPruneReference.delete(key);
+  } else if (!kv78RowScheduleInfo(row, kv78PruneNowSeconds, 180, 4 * 3600).relevant) {
+    oldPruneSchedule.push(key);
+    oldPruneReference.delete(key);
+  }
+}
+const fullKv78Batch = inspectKv78RowPruneBatch(
+  pruneReferenceRows, null, Number.POSITIVE_INFINITY,
+  kv78PruneNow, kv78PruneNowSeconds, 180_000, 180, 4 * 3600, true,
+);
+assert.equal(fullKv78Batch.completed, true);
+assert.deepEqual(fullKv78Batch.staleKeys, oldPruneStale);
+assert.deepEqual(fullKv78Batch.scheduleKeys, oldPruneSchedule);
+
+// Multiple batches must eventually inspect every current row. A row updated or
+// reinserted behind the saved Map cursor is moved to the tail and seen as fresh.
+const incrementalKv78Rows = new Map();
+for (let i = 0; i < 2000; i += 1) {
+  incrementalKv78Rows.set('old-' + i, makePruneRow(kv78StaleAt, '13:00:00'));
+}
+for (let i = 0; i < 400; i += 1) {
+  incrementalKv78Rows.set('far-' + i, makePruneRow(kv78FreshAt, '18:00:01'));
+}
+for (let i = 0; i < 100; i += 1) {
+  incrementalKv78Rows.set('near-' + i, makePruneRow(kv78FreshAt, '14:00:00'));
+}
+let rowPruneIterator = null;
+let rowPruneScanned = 0;
+let rowPruneBatches = 0;
+while (true) {
+  const batch = inspectKv78RowPruneBatch(
+    incrementalKv78Rows, rowPruneIterator, 1000,
+    kv78PruneNow, kv78PruneNowSeconds, 180_000, 180, 4 * 3600, true,
+  );
+  assert.ok(batch.scanned <= 1000);
+  rowPruneScanned += batch.scanned;
+  rowPruneBatches += 1;
+  for (const key of batch.staleKeys) incrementalKv78Rows.delete(key);
+  for (const key of batch.scheduleKeys) incrementalKv78Rows.delete(key);
+  rowPruneIterator = batch.iterator;
+
+  if (rowPruneBatches === 1) {
+    const refreshedRow = makePruneRow(kv78FreshAt, '14:00:00');
+    incrementalKv78Rows.delete('old-1500');
+    incrementalKv78Rows.set('old-1500', refreshedRow);
+    // Reinsert a row that the first batch just removed; the active iterator
+    // must still visit its new position and keep this fresh replacement.
+    incrementalKv78Rows.set('old-100', refreshedRow);
+    incrementalKv78Rows.set('new-after-start', refreshedRow);
+  }
+  if (batch.completed) break;
+  assert.ok(rowPruneBatches < 10, 'bounded KV78 pruning must complete in a finite number of batches');
+}
+assert.equal(rowPruneBatches >= 3, true);
+assert.equal(rowPruneScanned >= 2500, true);
+assert.equal(incrementalKv78Rows.size, 103);
+assert.equal(incrementalKv78Rows.has('old-1500'), true);
+assert.equal(incrementalKv78Rows.has('old-100'), true);
+assert.equal(incrementalKv78Rows.has('new-after-start'), true);
+assert.equal([...incrementalKv78Rows.keys()].filter(key => key.startsWith('near-')).length, 100);
+console.log('PASS: KV78 pruning scans at most 1,000 rows per batch and handles updates during the sweep');
+
 
 
 const header = String.raw`\GKV8turbo_passtimes|KV8turbo_passtimes|OpenOV|||UTF-8|0.1|2026-10-11T09:53:01+02:00|
@@ -377,6 +463,11 @@ assert.match(parserSource, /const TAG_REGEX_CACHE = new Map\(\)/);
 assert.match(parserSource, /const BLOCK_REGEX_CACHE = new Map\(\)/);
 assert.match(parserSource, /re\.lastIndex = 0/);
 console.log('PASS: XML regex caches are bounded and global regex state is reset');
+assert.match(hubSource, /KV78_ROW_PRUNE_BATCH_SIZE = 1000/);
+assert.match(hubSource, /inspectKv78RowPruneBatch\(/);
+assert.match(hubSource, /const freshByAge = candidateRows\.filter/);
+assert.match(hubSource, /kv78RowScheduleInfo\(/);
+console.log('PASS: KV78 cleanup is sliced and /rows filters by the same schedule window');
 assert.match(hubSource, /function ndovCollectionWindow/);
 assert.match(hubSource, /AUTO_ACTIVE_START_UTC_HOUR = 4/);
 assert.match(hubSource, /setAlarm\(window\.nextAlarmAt\)/);
