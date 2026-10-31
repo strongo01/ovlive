@@ -327,6 +327,60 @@ export function kv78RowScheduleInfo(
   return { relevant, hasScheduleTime: true, distanceSeconds };
 }
 
+/**
+ * Inspect a bounded slice of the KV78 cache. The returned Map iterator can be
+ * retained between calls; updates use delete+set and are therefore visited at
+ * their new insertion position instead of silently disappearing behind a cursor.
+ */
+export function inspectKv78RowPruneBatch(
+  rows,
+  iterator,
+  maxScan,
+  nowMs,
+  nowSeconds,
+  rowRetentionMs,
+  maxPastSeconds = 180,
+  maxFutureSeconds = 4 * 60 * 60,
+  checkSchedule = true,
+) {
+  const activeIterator = iterator ?? rows.entries();
+  const cutoff = nowMs - rowRetentionMs;
+  const staleKeys = [];
+  const scheduleKeys = [];
+  let scanned = 0;
+  let completed = false;
+
+  while (scanned < maxScan) {
+    const next = activeIterator.next();
+    if (next.done) {
+      completed = true;
+      break;
+    }
+
+    const [key, row] = next.value;
+    scanned += 1;
+    const captured = Date.parse(row?.receivedAt ?? '');
+    if (!Number.isFinite(captured) || captured < cutoff) {
+      staleKeys.push(key);
+      continue;
+    }
+
+    if (checkSchedule && !kv78RowScheduleInfo(
+      row, nowSeconds, maxPastSeconds, maxFutureSeconds,
+    ).relevant) {
+      scheduleKeys.push(key);
+    }
+  }
+
+  return {
+    iterator: completed ? null : activeIterator,
+    scanned,
+    completed,
+    staleKeys,
+    scheduleKeys,
+  };
+}
+
 export function isKv78RowScheduleRelevant(
   row, nowMs = Date.now(), maxPastSeconds = 180,
   nowSeconds = amsterdamClockSeconds(nowMs), maxFutureSeconds = 4 * 60 * 60,
