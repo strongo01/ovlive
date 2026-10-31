@@ -1,0 +1,13 @@
+name = "ovlive-ndov-kv78-parser-soak-test"
+main = "src/ndov-parser-soak-worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+# Bewust een eigen Durable Object-namespace: geen productiegegevens of -isolate delen.
+[[durable_objects.bindings]]
+name = "NDOV_FEEDS"
+class_name = "NdovFeedHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NdovFeedHub"]
