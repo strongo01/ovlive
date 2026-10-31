@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, parseBisonPayload, iterateBisonPayload, parseKv17Payload, parseKv78Payload, iterateKv78Payload } from '../src/ndov-feed-parser.mjs';
 import { makeGreeting, parseGreeting, makeReadyFrame, makeSubscribeFrame } from '../src/ndov-zmtp-protocol.mjs';
-import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys } from '../src/ndov-live-state.mjs';
+import { isKv78RowScheduleRelevant, kv78RowCacheKey, kv78RowScheduleInfo, selectKv78RowEvictionKeys, isKv6EventRetainable, pruneKv6EventCache } from '../src/ndov-live-state.mjs';
 import { handleNdovStopNameCacheRequest } from '../src/ndov-stop-name-cache.mjs';
 
 
@@ -29,6 +29,88 @@ const invalidRdUpdate = mergeKv6PositionMetadata(freshPositionMetadata, {
 assert.equal(invalidRdUpdate.positionTimestamp, positionAt,
   'invalid RD coordinates must not replace the last valid coordinate timestamp');
 console.log('PASS: KV6 coordinate timestamps only advance when a valid new RD coordinate pair arrives');
+
+const kv6TestNow = Date.parse('2026-10-31T12:00:00.000Z');
+const freshKv6Active = {
+  receivedAt: new Date(kv6TestNow - 60_000).toISOString(),
+  eventType: 'ONROUTE',
+  punctualitySeconds: 45,
+  punctualityReceivedAt: new Date(kv6TestNow - 60_000).toISOString(),
+};
+const freshKv6InactiveWithPunctuality = {
+  receivedAt: new Date(kv6TestNow - 60_000).toISOString(),
+  eventType: 'OFFROUTE',
+  punctualitySeconds: 45,
+  punctualityReceivedAt: new Date(kv6TestNow - 60_000).toISOString(),
+};
+const freshKv6InactiveWithoutPunctuality = {
+  receivedAt: new Date(kv6TestNow - 60_000).toISOString(),
+  eventType: 'OFFROUTE',
+  punctualitySeconds: null,
+  punctualityReceivedAt: null,
+};
+const staleKv6Active = {
+  receivedAt: new Date(kv6TestNow - 4 * 60_000).toISOString(),
+  eventType: 'ONROUTE',
+  punctualitySeconds: null,
+  punctualityReceivedAt: null,
+};
+assert.equal(isKv6EventRetainable(freshKv6Active, kv6TestNow), true);
+assert.equal(isKv6EventRetainable(freshKv6InactiveWithPunctuality, kv6TestNow), true);
+assert.equal(isKv6EventRetainable(freshKv6InactiveWithoutPunctuality, kv6TestNow), false);
+assert.equal(isKv6EventRetainable(staleKv6Active, kv6TestNow), false);
+
+// Compare the cold-load full scan with the former complete-map pruning policy.
+function referenceKv6Prune(map, nowMs, limit = 30000) {
+  const cutoff = nowMs - 10 * 60 * 1000;
+  for (const [key, event] of map.entries()) {
+    const received = Date.parse(event?.receivedAt ?? '');
+    const punctualityReceived = Date.parse(event?.punctualityReceivedAt ?? '');
+    const eventType = String(event?.eventType ?? '').toUpperCase();
+    const active = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIVAL']).has(eventType);
+    const freshActivity = Number.isFinite(received) &&
+      received <= nowMs + 30000 && nowMs - received <= 180000 && active;
+    const freshPunctuality = Number.isFinite(punctualityReceived) &&
+      punctualityReceived <= nowMs + 30000 && nowMs - punctualityReceived <= 180000 &&
+      event?.punctualitySeconds !== null && event?.punctualitySeconds !== undefined;
+    if (!Number.isFinite(received) || received < cutoff || (!freshActivity && !freshPunctuality)) {
+      map.delete(key);
+    }
+  }
+  while (map.size > limit) map.delete(map.keys().next().value);
+}
+const referenceEvents = new Map([
+  ['stale', staleKv6Active],
+  ['fresh-active', freshKv6Active],
+  ['fresh-punctuality', freshKv6InactiveWithPunctuality],
+  ['fresh-inactive', freshKv6InactiveWithoutPunctuality],
+]);
+const optimizedEvents = new Map(referenceEvents);
+referenceKv6Prune(referenceEvents, kv6TestNow);
+pruneKv6EventCache(optimizedEvents, kv6TestNow, 30000, Number.POSITIVE_INFINITY, true);
+assert.deepEqual([...optimizedEvents], [...referenceEvents]);
+
+// A normal pass inspects at most 1,000 stale prefix records.
+const incrementalKv6Events = new Map();
+for (let i = 0; i < 1200; i += 1) {
+  incrementalKv6Events.set('old-' + i, {
+    receivedAt: new Date(kv6TestNow - 4 * 60_000).toISOString(),
+    eventType: 'ONROUTE',
+    punctualitySeconds: null,
+    punctualityReceivedAt: null,
+  });
+}
+for (let i = 0; i < 5; i += 1) incrementalKv6Events.set('fresh-' + i, freshKv6Active);
+const firstKv6Batch = pruneKv6EventCache(incrementalKv6Events, kv6TestNow, 30000, 1000, false);
+assert.equal(firstKv6Batch.inspected, 1000);
+assert.equal(incrementalKv6Events.size, 205);
+const secondKv6Batch = pruneKv6EventCache(incrementalKv6Events, kv6TestNow, 30000, 1000, false);
+assert.equal(secondKv6Batch.removed, 200);
+assert.deepEqual([...incrementalKv6Events.keys()], [
+  'fresh-0', 'fresh-1', 'fresh-2', 'fresh-3', 'fresh-4',
+]);
+console.log('PASS: BISON pruning preserves freshness rules and scans a bounded stale prefix');
+
 
 const header = String.raw`\GKV8turbo_passtimes|KV8turbo_passtimes|OpenOV|||UTF-8|0.1|2026-10-11T09:53:01+02:00|
 \TDATEDPASSTIME|DATEDPASSTIME|start object
@@ -100,6 +182,60 @@ assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '14:05:00' }, cach
 assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: '18:01:00' }, cacheNow), false);
 assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: null, targetArrivalTime: null }, cacheNow), true);
 assert.equal(kv78RowScheduleInfo({ targetDepartureTime: '15:00:00' }, 14 * 3600).distanceSeconds, 3600);
+
+function referenceKv78ClockSeconds(value) {
+  const match = String(value ?? '').trim().match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  const hour = Number(match[1]), minute = Number(match[2]), second = Number(match[3] ?? 0);
+  if (minute < 0 || minute > 59 || second < 0 || second > 59) return null;
+  return hour * 3600 + minute * 60 + second;
+}
+function referenceKv78ScheduleInfo(row, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 3600) {
+  if (!Number.isFinite(nowSeconds)) return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
+  const eventTimes = [
+    referenceKv78ClockSeconds(row?.targetDepartureTime ?? row?.TargetDepartureTime),
+    referenceKv78ClockSeconds(row?.targetArrivalTime ?? row?.TargetArrivalTime),
+    referenceKv78ClockSeconds(row?.expectedDepartureTime ?? row?.ExpectedDepartureTime),
+    referenceKv78ClockSeconds(row?.expectedArrivalTime ?? row?.ExpectedArrivalTime),
+  ].filter(value => value !== null);
+  if (!eventTimes.length) return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
+  const deltas = eventTimes.map(seconds => {
+    let delta = seconds - nowSeconds;
+    if (delta > 64800) delta -= 86400;
+    else if (delta < -64800) delta += 86400;
+    return delta;
+  });
+  return {
+    relevant: deltas.some(delta =>
+      delta >= -Math.max(0, maxPastSeconds) && delta <= Math.max(0, maxFutureSeconds)
+    ),
+    hasScheduleTime: true,
+    distanceSeconds: Math.min(...deltas.map(delta => Math.abs(delta))),
+  };
+}
+const scheduleSamples = [
+  null, '', 'bad', '00:00:00', '00:03:00', '13:56:59', '13:57:00',
+  '14:00:00', '14:03:00', '14:03:01', '18:00:00', '18:00:01',
+  '23:59:59', '24:05:00', '25:30:00', '99:99:99',
+];
+for (let i = 0; i < 256; i += 1) {
+  const row = {
+    targetDepartureTime: scheduleSamples[i % scheduleSamples.length],
+    targetArrivalTime: scheduleSamples[(i * 3 + 1) % scheduleSamples.length],
+    expectedDepartureTime: scheduleSamples[(i * 5 + 2) % scheduleSamples.length],
+    expectedArrivalTime: scheduleSamples[(i * 7 + 3) % scheduleSamples.length],
+  };
+  for (const nowSeconds of [0, 14 * 3600, 23 * 3600 + 55 * 60]) {
+    for (const [past, future] of [[180, 4 * 3600], [0, 0], [600, 2 * 3600]]) {
+      assert.deepEqual(
+        kv78RowScheduleInfo(row, nowSeconds, past, future),
+        referenceKv78ScheduleInfo(row, nowSeconds, past, future),
+      );
+    }
+  }
+}
+console.log('PASS: allocation-light KV78 time evaluator matches the old algorithm for 2,304 cases');
+
 assert.deepEqual(
   selectKv78RowEvictionKeys(new Map([
     ['near', { targetDepartureTime: '14:01:00' }],
@@ -230,12 +366,17 @@ const gvbTramCorrelation = correlateKv17MutationsToKv78Rows(gvbTramRows, [{
 assert.equal(gvbTramCorrelation.length, 1);
 assert.equal(gvbTramCorrelation[0].matchedKv78StopCount, 1);
 
+const parserSource = readFileSync(new URL('../src/ndov-feed-parser.mjs', import.meta.url), 'utf8');
 const hubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
 const planSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
 assert.ok(
   hubSource.includes('!/^\\d{8}$/.test(date)'),
   'targeted realtime identity diagnostics must normalize YYYYMMDD dates correctly',
 );
+assert.match(parserSource, /const TAG_REGEX_CACHE = new Map\(\)/);
+assert.match(parserSource, /const BLOCK_REGEX_CACHE = new Map\(\)/);
+assert.match(parserSource, /re\.lastIndex = 0/);
+console.log('PASS: XML regex caches are bounded and global regex state is reset');
 assert.match(hubSource, /function ndovCollectionWindow/);
 assert.match(hubSource, /AUTO_ACTIVE_START_UTC_HOUR = 4/);
 assert.match(hubSource, /setAlarm\(window\.nextAlarmAt\)/);
@@ -318,6 +459,8 @@ assert.match(hubSource, /if \(stream === 'kv78' && !state\.continuousEnabled\) \
   'KV78 cache reset must clear the row map and both remaining indexes');
 assert.doesNotMatch(hubSource, /rowsByOwnerDateLine/,
   'KV78 must not retain a third owner/date/line index');
+assert.match(hubSource, /pruneKv6EventCache\(/, 'BISON pruning must use bounded cache cleanup');
+assert.match(hubSource, /isKv6EventRetainable\(\s*next/, 'BISON ingest must reject events the freshness rules cannot expose');
 assert.match(hubSource, /state\.rowsByOwnerDate\.get\(lookupKey\)/,
   'line and vehicle lookups must reuse the owner/date index');
 assert.doesNotMatch(hubSource, /if \(!TARGET_LINES\.has\(row\.linePlanningNumber\)\) continue;/);
