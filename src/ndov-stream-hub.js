@@ -13,7 +13,7 @@ import {
 } from './ndov-zmtp-protocol.mjs';
 import { correlateKv17MutationsToKv78Rows, mergeKv6PositionMetadata, iterateBisonPayload, parseKv17Payload, iterateKv78Payload } from './ndov-feed-parser.mjs';
 import { handleNdovStopNameCacheRequest } from './ndov-stop-name-cache.mjs';
-import { amsterdamClockSeconds, continuousCollectorHealth, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState } from './ndov-live-state.mjs';
+import { amsterdamClockSeconds, continuousCollectorHealth, eventsForIdentities, flattenCurrentMutations, kv78RowCacheKey, kv78RowScheduleInfo, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, selectKv78RowEvictionKeys, upsertCurrentMutationState, isKv6EventRetainable, pruneKv6EventCache } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
 const OWNER_PREFIXES = ['/ARR/', '/RIG/', '/GVB/', '/CXX/', '/EBS/', '/QBUZZ/', '/KEOLIS/', '/IVU/', '/OPENOV/'];
@@ -24,6 +24,7 @@ const CONFIG = {
 const KV6_EVENT_LIMIT = 30000;
 const KV6_EVENT_RETENTION_MS = 10 * 60 * 1000;
 const KV6_EVENT_STATUS_FRESH_MS = 180 * 1000;
+const KV6_EVENT_PRUNE_BATCH_SIZE = 1000;
 const KV6_ACTIVE_EVENT_TYPES = new Set(['ONROUTE', 'ONSTOP', 'DEPARTURE', 'ARRIVAL']);
 const KV78_ROW_LIMIT = 30000; // rolling, durable row cache
 const KV78_ROW_PRUNE_BATCH_HEADROOM = 1000; // opruimen in grotere batches
@@ -459,7 +460,9 @@ export class NdovFeedHub extends DurableObject {
         const entries = await gunzipJson(chunk);
         for (const [savedKey, event] of entries) {
           const identity = canonicalBisonTripIdentity(event) ?? savedKey;
-          state.events.set(identity, { ...event, identity });
+          state.events.delete(identity);
+          state.events.delete(identity);
+        state.events.set(identity, { ...event, identity });
         }
       }
     } else {
@@ -520,7 +523,7 @@ export class NdovFeedHub extends DurableObject {
     }
 
     this.pruneRows(stream);
-    this.pruneEvents(stream);
+    this.pruneEvents(stream, true);
     await this.pruneMutationDates(stream);
     state.lastFullPersistAt = Date.now();
   }
@@ -1745,30 +1748,17 @@ export class NdovFeedHub extends DurableObject {
     if (legacyCount) await this.ctx.storage.delete(stream + ':mutationsChunkCount');
   }
 
-  pruneEvents(stream) {
+  pruneEvents(stream, fullScan = false) {
     const state = this.stateFor(stream);
-    const now = Date.now(), cutoff = now - KV6_EVENT_RETENTION_MS;
-    for (const [key, event] of state.events.entries()) {
-      const received = Date.parse(event?.receivedAt ?? '');
-      const punctualityReceived = Date.parse(event?.punctualityReceivedAt ?? '');
-      const eventType = String(event?.eventType ?? '').toUpperCase();
-      const activeEventType = KV6_ACTIVE_EVENT_TYPES.has(eventType);
-      const freshActivity = Number.isFinite(received) &&
-        received <= now + 30000 &&
-        now - received <= KV6_EVENT_STATUS_FRESH_MS &&
-        activeEventType;
-      const freshPunctuality = Number.isFinite(punctualityReceived) &&
-        punctualityReceived <= now + 30000 &&
-        now - punctualityReceived <= KV6_EVENT_STATUS_FRESH_MS &&
-        event?.punctualitySeconds !== null &&
-        event?.punctualitySeconds !== undefined;
-      if (
-        !Number.isFinite(received) ||
-        received < cutoff ||
-        (!freshActivity && !freshPunctuality)
-      ) state.events.delete(key);
-    }
-    while (state.events.size > KV6_EVENT_LIMIT) state.events.delete(state.events.keys().next().value);
+    pruneKv6EventCache(
+      state.events,
+      Date.now(),
+      KV6_EVENT_LIMIT,
+      fullScan ? Number.POSITIVE_INFINITY : KV6_EVENT_PRUNE_BATCH_SIZE,
+      fullScan,
+      KV6_EVENT_STATUS_FRESH_MS,
+      KV6_EVENT_RETENTION_MS,
+    );
   }
 
   pruneRows(stream) {
@@ -2223,8 +2213,14 @@ export class NdovFeedHub extends DurableObject {
                 punctualityTimestamp: terminalEvent ? null : hasPunctuality ? (ev.timestamp ?? receivedAt) : (previous.punctualityTimestamp ?? null),
                 punctualityReceivedAt: terminalEvent ? null : hasPunctuality ? receivedAt : (previous.punctualityReceivedAt ?? null),
               };
+              // Discard a BISON state that the existing freshness rules cannot expose.
+              // This keeps Map insertion order usable for bounded stale-prefix pruning.
               state.events.delete(key);
-              state.events.set(key, next);
+              if (isKv6EventRetainable(
+                next, Date.now(), KV6_EVENT_STATUS_FRESH_MS, KV6_EVENT_RETENTION_MS,
+              )) {
+                state.events.set(key, next);
+              }
             }
             if (Date.now() - (state.lastEventPruneAt ?? 0) > 10000) {
               this.pruneEvents(stream);
