@@ -293,7 +293,7 @@ function cachedXmlRegex(cache, name, flags, sourceForName) {
   let regex = cache.get(name);
   if (regex) return regex;
 
-  const escaped = String(name).replace(/[.*+?^$()|[\]\\]/g, '\\$&');
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   regex = new RegExp(sourceForName(escaped), flags);
   if (cache.size >= XML_REGEX_CACHE_LIMIT) {
     cache.delete(cache.keys().next().value);
