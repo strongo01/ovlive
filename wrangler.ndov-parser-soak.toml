@@ -1,6 +1,7 @@
 name = "ovlive-ndov-kv78-parser-soak-test"
 main = "src/ndov-parser-soak-worker.js"
 compatibility_date = "2026-10-01"
+upload_source_maps = true
 workers_dev = true
 
 # Bewust een eigen Durable Object-namespace: geen productiegegevens of -isolate delen.
