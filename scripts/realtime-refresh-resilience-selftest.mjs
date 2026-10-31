@@ -174,8 +174,8 @@ assert.match(
 );
 assert.match(
   ndovHub,
-  /state\.rowsByOwnerDateLine\.get\(lookupKey\)/,
-  "KV78-lijn-/tijdzoekingen moeten eerst de exacte eigenaar, datum en lijn indexeren"
+  /state\.rowsByOwnerDate\.get\(lookupKey\)/,
+  "KV78-lijn-/tijdzoekingen moeten eerst op eigenaar en datum indexeren en daarna de lijn filteren"
 );
 assert.match(
   worker,
