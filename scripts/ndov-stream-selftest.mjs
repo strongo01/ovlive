@@ -495,6 +495,11 @@ const kv17Xml = `<tmi8:VV_TM_PUSH xmlns:tmi8="urn:test"><tmi8:KV17cvlinfo>
 <tmi8:KV17MUTATEJOURNEY><tmi8:timestamp>2026-10-11T11:05:15+02:00</tmi8:timestamp><tmi8:RECOVER/></tmi8:KV17MUTATEJOURNEY>
 </tmi8:KV17cvlinfo></tmi8:VV_TM_PUSH>`;
 const kv17 = parseKv17Payload(kv17Xml, '/CXX/KV17cvlinfo');
+assert.deepEqual(
+  parseKv17Payload(kv17Xml, '/CXX/KV17cvlinfo'),
+  kv17,
+  'hergebruikte KV17 global regexes moeten bij ieder document opnieuw vanaf het begin zoeken',
+);
 assert.equal(kv17.length, 2);
 assert.equal(kv17[0].protocol, 'KV17');
 assert.equal(kv17[0].eventType, 'CANCEL');
