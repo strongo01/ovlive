@@ -460,6 +460,16 @@ assert.match(hubSource, /if \(stream === 'kv78' && !state\.continuousEnabled\) \
 assert.doesNotMatch(hubSource, /rowsByOwnerDateLine/,
   'KV78 must not retain a third owner/date/line index');
 assert.match(hubSource, /pruneKv6EventCache\(/, 'BISON pruning must use bounded cache cleanup');
+assert.match(
+  hubSource,
+  /state\.events\.delete\(identity\);\s*state\.events\.set\(identity, \{ \.\.\.event, identity \}\);/,
+  'compressed and legacy BISON restores must refresh Map order for duplicate exact identities',
+);
+assert.match(
+  hubSource,
+  /this\.pruneEvents\(stream, true\)/,
+  'BISON cache receives a full cleanup after cold hydration',
+);
 assert.match(hubSource, /isKv6EventRetainable\(\s*next/, 'BISON ingest must reject events the freshness rules cannot expose');
 assert.match(hubSource, /state\.rowsByOwnerDate\.get\(lookupKey\)/,
   'line and vehicle lookups must reuse the owner/date index');
