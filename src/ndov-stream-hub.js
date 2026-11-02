@@ -352,6 +352,7 @@ export class NdovFeedHub extends DurableObject {
     super(ctx, env);
     this.ctx = ctx;
     this.env = env;
+    this.cpuDiagnosticsEnabled = String(env.NDOV_CPU_DIAGNOSTICS ?? '') === 'true';
     // Grote KV78- en BISON-snapshots mogen niet tegelijk worden gecomprimeerd:
     // beide streamcollectors delen dezelfde Durable Object-geheugenlimiet.
     this.fullPersistQueue = Promise.resolve();
@@ -365,6 +366,7 @@ export class NdovFeedHub extends DurableObject {
       running: false, continuousMode: false, continuousEnabled: false, stopRequested: false,
       socket: null, lastPersistAt: 0, lastFullPersistAt: Date.now(), lastEventPruneAt: 0, lastRowPruneAt: 0,
       rowPruneIterator: null,
+      cpuDiagnostics: null,
       rowCacheStats: { stalePrunedRows: 0, schedulePrunedRows: 0, limitEvictedRows: 0, duplicateRowsCollapsed: 0 },
     }]));
     this.loadedStreams = new Set();
@@ -1642,6 +1644,7 @@ export class NdovFeedHub extends DurableObject {
 
   async persistFullKv78Rows(stream, force = false) {
     const state = this.stateFor(stream);
+    const diagnostics = state.cpuDiagnostics;
     if (!force || state.snapshot.stream !== 'kv78') return;
     this.pruneRows(stream);
 
@@ -1664,16 +1667,30 @@ export class NdovFeedHub extends DurableObject {
 
       if (!entries.length) continue;
 
+      const gzipStartedAt = diagnostics ? performance.now() : 0;
       const bytes = await gzipJson(entries);
+      if (diagnostics) {
+        diagnostics.checkpointGzipMs += performance.now() - gzipStartedAt;
+        diagnostics.checkpointRows += entries.length;
+      }
       if (bytes.length > 1_500_000) {
         throw new Error(`Compressed KV78 chunk ${writtenChunkCount} exceeds safe storage value size`);
       }
 
+      const storageStartedAt = diagnostics ? performance.now() : 0;
       await this.ctx.storage.put(stream + ':rows:gzip:' + writtenChunkCount, bytes);
+      if (diagnostics) {
+        diagnostics.checkpointStorageMs += performance.now() - storageStartedAt;
+        diagnostics.checkpointChunks += 1;
+      }
       writtenChunkCount += 1;
     }
 
+    const countStorageStartedAt = diagnostics ? performance.now() : 0;
     await this.ctx.storage.put(stream + ':rowsGzipChunkCount', writtenChunkCount);
+    if (diagnostics) {
+      diagnostics.checkpointStorageMs += performance.now() - countStorageStartedAt;
+    }
 
     const obsolete = [];
     for (let i = writtenChunkCount; i < previousCount; i += 1) {
@@ -1682,8 +1699,16 @@ export class NdovFeedHub extends DurableObject {
     for (let i = 0; i < legacyCount; i += 1) {
       obsolete.push(stream + ':rows:' + i);
     }
-    if (obsolete.length) await this.ctx.storage.delete(obsolete);
-    if (legacyCount) await this.ctx.storage.delete(stream + ':rowsChunkCount');
+    if (obsolete.length) {
+      const deleteStartedAt = diagnostics ? performance.now() : 0;
+      await this.ctx.storage.delete(obsolete);
+      if (diagnostics) diagnostics.checkpointStorageMs += performance.now() - deleteStartedAt;
+    }
+    if (legacyCount) {
+      const legacyDeleteStartedAt = diagnostics ? performance.now() : 0;
+      await this.ctx.storage.delete(stream + ':rowsChunkCount');
+      if (diagnostics) diagnostics.checkpointStorageMs += performance.now() - legacyDeleteStartedAt;
+    }
   }
 
   async persistFullBisonEvents(stream, force = false) {
@@ -1775,8 +1800,11 @@ export class NdovFeedHub extends DurableObject {
 
   pruneRows(stream) {
     const state = this.stateFor(stream);
+    const diagnostics = stream === 'kv78' ? state.cpuDiagnostics : null;
+    const pruneStartedAt = diagnostics ? performance.now() : 0;
     const now = Date.now();
     const nowSeconds = amsterdamClockSeconds(now);
+    let capacityEvictedRows = 0;
 
     // A cache above its hard cap must be ranked across the full set so the same
     // farthest/untimed stops are evicted as before. Otherwise inspect only one
@@ -1819,7 +1847,10 @@ export class NdovFeedHub extends DurableObject {
       );
       for (const key of evictions) {
         this.removeKv78RowFromIndexes(state, key);
-        if (state.rows.delete(key)) state.rowCacheStats.limitEvictedRows += 1;
+        if (state.rows.delete(key)) {
+          state.rowCacheStats.limitEvictedRows += 1;
+          capacityEvictedRows += 1;
+        }
       }
     }
 
@@ -1829,12 +1860,24 @@ export class NdovFeedHub extends DurableObject {
       this.removeKv78RowFromIndexes(state, oldestKey);
       if (state.rows.delete(oldestKey) && stream === 'kv78') {
         state.rowCacheStats.limitEvictedRows += 1;
+        capacityEvictedRows += 1;
       }
+    }
+
+    if (diagnostics) {
+      diagnostics.pruneMs += performance.now() - pruneStartedAt;
+      diagnostics.pruneCalls += 1;
+      diagnostics.pruneScannedRows += batch.scanned;
+      diagnostics.pruneStaleRows += batch.staleKeys.length;
+      diagnostics.pruneScheduleRows += batch.scheduleKeys.length;
+      diagnostics.pruneCapacityEvictedRows += capacityEvictedRows;
     }
   }
 
   async persist(stream, force = false, bulk = false, skipFullCheckpoint = false) {
     const state = this.stateFor(stream);
+    const diagnostics = stream === 'kv78' ? state.cpuDiagnostics : null;
+    const phasePersistStartedAt = diagnostics ? performance.now() : 0;
     const minInterval = state.continuousMode ? CONTINUOUS_PERSIST_INTERVAL_MS : 5000;
     if (!force && Date.now() - state.lastPersistAt < minInterval) return;
     const persistStartedAt = Date.now(), persistDiagnostic = state.continuousMode;
@@ -1885,14 +1928,25 @@ export class NdovFeedHub extends DurableObject {
       // Keep the queue usable after a failure; the current caller still receives
       // the original rejection and can log/retry the failed snapshot.
       this.fullPersistQueue = queuedPersist.catch(() => {});
+      const checkpointStartedAt = diagnostics ? performance.now() : 0;
       await queuedPersist;
+      if (diagnostics) {
+        diagnostics.fullCheckpointMs += performance.now() - checkpointStartedAt;
+        diagnostics.fullCheckpointCount += 1;
+      }
     }
+    const snapshotPutStartedAt = diagnostics ? performance.now() : 0;
     await this.ctx.storage.put({
       [stream + ':snapshot']: state.snapshot,
       [stream + ':rows']: tailMapEntries(state.rows, 100),
       [stream + ':events']: tailMapEntries(state.events, 100),
       [stream + ':mutations']: tailMapEntries(state.mutations, 50),
     });
+    if (diagnostics) {
+      diagnostics.snapshotPutMs += performance.now() - snapshotPutStartedAt;
+      diagnostics.persistMs += performance.now() - phasePersistStartedAt;
+      diagnostics.persistCalls += 1;
+    }
     if (persistDiagnostic) console.log("[OVLIVE_NDOV_PERSIST_DONE]", JSON.stringify({
       stream: state.snapshot.stream, elapsedMs: Date.now() - persistStartedAt, messageCount: state.snapshot.messageCount,
     }));
@@ -2045,6 +2099,31 @@ export class NdovFeedHub extends DurableObject {
   async collect(stream, seconds) {
     const config = CONFIG[stream];
     const state = this.stateFor(stream);
+    const diagnostics = this.cpuDiagnosticsEnabled && stream === 'kv78'
+      ? {
+          startedAt: new Date().toISOString(),
+          startedPerf: performance.now(),
+          parserMs: 0,
+          indexMs: 0,
+          parsedRows: 0,
+          pruneMs: 0,
+          pruneCalls: 0,
+          pruneScannedRows: 0,
+          pruneStaleRows: 0,
+          pruneScheduleRows: 0,
+          pruneCapacityEvictedRows: 0,
+          persistMs: 0,
+          persistCalls: 0,
+          snapshotPutMs: 0,
+          fullCheckpointMs: 0,
+          fullCheckpointCount: 0,
+          checkpointGzipMs: 0,
+          checkpointStorageMs: 0,
+          checkpointRows: 0,
+          checkpointChunks: 0,
+        }
+      : null;
+    state.cpuDiagnostics = diagnostics;
     const deadline = Date.now() + seconds * 1000;
     let socket, writer, buffered, reader;
     let multipart = [];
@@ -2182,17 +2261,42 @@ export class NdovFeedHub extends DurableObject {
 
             // Verwerk iedere halte direct. Er wordt geen tweede grote array
             // met alle geparseerde rijen opgebouwd.
-            for (const row of iterateKv78Payload(text, envelope)) {
-              parsedRowCount += 1;
-              row.receivedAt = passtimeReceivedAt;
+            if (diagnostics) {
+              const iterator = iterateKv78Payload(text, envelope);
+              while (true) {
+                const parseStartedAt = performance.now();
+                const next = iterator.next();
+                diagnostics.parserMs += performance.now() - parseStartedAt;
+                if (next.done) break;
 
-              const key = kv78RowCacheKey(row) ??
-                `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+                const row = next.value;
+                parsedRowCount += 1;
+                row.receivedAt = passtimeReceivedAt;
 
-              this.removeKv78RowFromIndexes(state, key);
-              state.rows.delete(key);
-              state.rows.set(key, row);
-              this.addKv78RowToIndexes(state, key, row);
+                const indexStartedAt = performance.now();
+                const key = kv78RowCacheKey(row) ??
+                  `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+
+                this.removeKv78RowFromIndexes(state, key);
+                state.rows.delete(key);
+                state.rows.set(key, row);
+                this.addKv78RowToIndexes(state, key, row);
+                diagnostics.indexMs += performance.now() - indexStartedAt;
+              }
+              diagnostics.parsedRows += parsedRowCount;
+            } else {
+              for (const row of iterateKv78Payload(text, envelope)) {
+                parsedRowCount += 1;
+                row.receivedAt = passtimeReceivedAt;
+
+                const key = kv78RowCacheKey(row) ??
+                  `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
+
+                this.removeKv78RowFromIndexes(state, key);
+                state.rows.delete(key);
+                state.rows.set(key, row);
+                this.addKv78RowToIndexes(state, key, row);
+              }
             }
 
             state.snapshot = {
@@ -2310,6 +2414,38 @@ export class NdovFeedHub extends DurableObject {
       if (cleanupTimer) clearTimeout(cleanupTimer);
 
       if (writer) { try { writer.releaseLock(); } catch {} }
+
+      if (diagnostics) {
+        const roundMs = (value) => Number(value.toFixed(2));
+        console.log("[OVLIVE_NDOV_PHASE_TIMINGS]", JSON.stringify({
+          stream,
+          state: state.snapshot.state,
+          startedAt: diagnostics.startedAt,
+          elapsedMs: roundMs(performance.now() - diagnostics.startedPerf),
+          messageCount: state.snapshot.messageCount,
+          rawBytes: state.snapshot.rawBytes,
+          parsedRows: diagnostics.parsedRows,
+          cachedRows: state.rows.size,
+          parserMs: roundMs(diagnostics.parserMs),
+          indexMs: roundMs(diagnostics.indexMs),
+          pruneMs: roundMs(diagnostics.pruneMs),
+          pruneCalls: diagnostics.pruneCalls,
+          pruneScannedRows: diagnostics.pruneScannedRows,
+          pruneStaleRows: diagnostics.pruneStaleRows,
+          pruneScheduleRows: diagnostics.pruneScheduleRows,
+          pruneCapacityEvictedRows: diagnostics.pruneCapacityEvictedRows,
+          persistMs: roundMs(diagnostics.persistMs),
+          persistCalls: diagnostics.persistCalls,
+          snapshotPutMs: roundMs(diagnostics.snapshotPutMs),
+          fullCheckpointMs: roundMs(diagnostics.fullCheckpointMs),
+          fullCheckpointCount: diagnostics.fullCheckpointCount,
+          checkpointGzipMs: roundMs(diagnostics.checkpointGzipMs),
+          checkpointStorageMs: roundMs(diagnostics.checkpointStorageMs),
+          checkpointRows: diagnostics.checkpointRows,
+          checkpointChunks: diagnostics.checkpointChunks,
+        }));
+        state.cpuDiagnostics = null;
+      }
     }
   }
 
