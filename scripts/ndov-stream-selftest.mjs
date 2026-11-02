@@ -270,7 +270,7 @@ assert.equal(isKv78RowScheduleRelevant({ targetDepartureTime: null, targetArriva
 assert.equal(kv78RowScheduleInfo({ targetDepartureTime: '15:00:00' }, 14 * 3600).distanceSeconds, 3600);
 
 function referenceKv78ClockSeconds(value) {
-  const match = String(value ?? '').trim().match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?$/);
+  const match = String(value ?? '').trim().match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
   if (!match) return null;
   const hour = Number(match[1]), minute = Number(match[2]), second = Number(match[3] ?? 0);
   if (minute < 0 || minute > 59 || second < 0 || second > 59) return null;
@@ -303,6 +303,7 @@ const scheduleSamples = [
   null, '', 'bad', '00:00:00', '00:03:00', '13:56:59', '13:57:00',
   '14:00:00', '14:03:00', '14:03:01', '18:00:00', '18:00:01',
   '23:59:59', '24:05:00', '25:30:00', '99:99:99',
+  'planned 14:05:00 predicted', '123:45', '99:99 followed by 14:00:00',
 ];
 for (let i = 0; i < 256; i += 1) {
   const row = {
