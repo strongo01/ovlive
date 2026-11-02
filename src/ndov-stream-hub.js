@@ -2105,8 +2105,6 @@ export class NdovFeedHub extends DurableObject {
       ? {
           startedAt: new Date().toISOString(),
           startedPerf: performance.now(),
-          parserMs: 0,
-          indexMs: 0,
           parsedRows: 0,
           pruneMs: 0,
           pruneCalls: 0,
@@ -2266,16 +2264,13 @@ export class NdovFeedHub extends DurableObject {
             if (diagnostics) {
               const iterator = iterateKv78Payload(text, envelope);
               while (true) {
-                const parseStartedAt = performance.now();
                 const next = iterator.next();
-                diagnostics.parserMs += performance.now() - parseStartedAt;
                 if (next.done) break;
 
                 const row = next.value;
                 parsedRowCount += 1;
                 row.receivedAt = passtimeReceivedAt;
 
-                const indexStartedAt = performance.now();
                 const key = kv78RowCacheKey(row) ??
                   `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
 
@@ -2283,7 +2278,6 @@ export class NdovFeedHub extends DurableObject {
                 state.rows.delete(key);
                 state.rows.set(key, row);
                 this.addKv78RowToIndexes(state, key, row);
-                diagnostics.indexMs += performance.now() - indexStartedAt;
               }
               diagnostics.parsedRows += parsedRowCount;
             } else {
@@ -2428,8 +2422,6 @@ export class NdovFeedHub extends DurableObject {
           rawBytes: state.snapshot.rawBytes,
           parsedRows: diagnostics.parsedRows,
           cachedRows: state.rows.size,
-          parserMs: roundMs(diagnostics.parserMs),
-          indexMs: roundMs(diagnostics.indexMs),
           pruneMs: roundMs(diagnostics.pruneMs),
           pruneCalls: diagnostics.pruneCalls,
           pruneScannedRows: diagnostics.pruneScannedRows,
