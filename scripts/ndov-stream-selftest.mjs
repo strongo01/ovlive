@@ -223,7 +223,7 @@ const kv78TimeCases = [
   { expected: '1000:00:00', target: '09:00:00', delay: null },
 ];
 for (const sample of kv78TimeCases) {
-  const payload = String.raw`\\LDataOwnerCode|OperationDate|LinePlanningNumber|JourneyNumber|ExpectedDepartureTime|TargetDepartureTime
+  const payload = String.raw`\LDataOwnerCode|OperationDate|LinePlanningNumber|JourneyNumber|ExpectedDepartureTime|TargetDepartureTime
 CXX|2026-10-11|U011|7004|${sample.expected}|${sample.target}`;
   const parsed = [...iterateKv78Payload(payload, '/GOVI/KV8passtimes/CXX')];
   assert.equal(parsed.length, 1);
