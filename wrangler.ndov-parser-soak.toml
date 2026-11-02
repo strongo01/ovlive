@@ -4,6 +4,9 @@ compatibility_date = "2026-10-01"
 upload_source_maps = true
 workers_dev = true
 
+[vars]
+NDOV_CPU_DIAGNOSTICS = "true"
+
 # Bewust een eigen Durable Object-namespace: geen productiegegevens of -isolate delen.
 [[durable_objects.bindings]]
 name = "NDOV_FEEDS"
