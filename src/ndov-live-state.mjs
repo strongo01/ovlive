@@ -211,15 +211,52 @@ export function rowMatchesIdentity(row, lookup) {
 }
 
 function kv78ClockSeconds(value) {
-  const match = String(value ?? '').trim().match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (!match) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  const second = Number(match[3] ?? 0);
-  // KV78 operation-day times may legitimately be expressed as 24:xx or 25:xx
-  // for after-midnight service, so do not clamp the hour to a civil clock day.
-  if (minute < 0 || minute > 59 || second < 0 || second > 59) return null;
-  return hour * 3600 + minute * 60 + second;
+  // Match the former unanchored /H{1,2}:MM(:SS)?/ expression without
+  // allocating a RegExp match array for every timetable field.
+  const text = String(value ?? '');
+  for (let start = 0; start < text.length; start += 1) {
+    const firstHourDigit = text.charCodeAt(start);
+    if (firstHourDigit < 48 || firstHourDigit > 57) continue;
+
+    let hour = firstHourDigit - 48;
+    let colon = start + 1;
+    const secondHourDigit = text.charCodeAt(start + 1);
+    if (secondHourDigit >= 48 && secondHourDigit <= 57) {
+      hour = hour * 10 + secondHourDigit - 48;
+      colon = start + 2;
+    }
+    if (text.charCodeAt(colon) !== 58) continue;
+
+    const minuteStart = colon + 1;
+    const minuteTens = text.charCodeAt(minuteStart);
+    const minuteOnes = text.charCodeAt(minuteStart + 1);
+    if (
+      minuteTens < 48 || minuteTens > 57 ||
+      minuteOnes < 48 || minuteOnes > 57
+    ) continue;
+
+    const minute = (minuteTens - 48) * 10 + minuteOnes - 48;
+    let second = 0;
+
+    // The old optional seconds group is ignored when it is incomplete.
+    if (text.charCodeAt(minuteStart + 2) === 58) {
+      const secondTens = text.charCodeAt(minuteStart + 3);
+      const secondOnes = text.charCodeAt(minuteStart + 4);
+      if (
+        secondTens >= 48 && secondTens <= 57 &&
+        secondOnes >= 48 && secondOnes <= 57
+      ) {
+        second = (secondTens - 48) * 10 + secondOnes - 48;
+      }
+    }
+
+    // Stop at the first syntactic match, even when its minute/second fields
+    // are invalid. This deliberately preserves the previous regex semantics.
+    if (minute > 59 || second > 59) return null;
+    // KV78 may express after-midnight service as 24:xx or 25:xx.
+    return hour * 3600 + minute * 60 + second;
+  }
+  return null;
 }
 
 export function amsterdamClockSeconds(nowMs) {
@@ -262,14 +299,14 @@ export function kv78RowCacheKey(row) {
  * Both target (timetable) and expected (predicted) times are local clock values.
  * This keeps a heavily delayed but still-current prediction in the bounded cache.
  */
-export function kv78RowScheduleInfo(
+// Encode schedule status in one number for the hot pruning/eviction loops:
+// +Infinity = no usable schedule time; negative (including -0) = relevant;
+// positive = not relevant. The absolute value is the nearest schedule distance.
+function kv78RowScheduleMetric(
   row, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
 ) {
-  if (!Number.isFinite(nowSeconds)) {
-    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
-  }
+  if (!Number.isFinite(nowSeconds)) return Number.POSITIVE_INFINITY;
 
-  // Evaluate four timetable/prediction clocks without allocating intermediate arrays.
   const minPast = Math.max(0, maxPastSeconds);
   const maxFuture = Math.max(0, maxFutureSeconds);
   let hasScheduleTime = false;
@@ -320,11 +357,20 @@ export function kv78RowScheduleInfo(
     if (delta >= -minPast && delta <= maxFuture) relevant = true;
   }
 
-  if (!hasScheduleTime) {
-    // Unknown times are kept until capacity pressure.
-    return { relevant: true, hasScheduleTime: false, distanceSeconds: null };
-  }
-  return { relevant, hasScheduleTime: true, distanceSeconds };
+  if (!hasScheduleTime) return Number.POSITIVE_INFINITY;
+  return relevant ? -distanceSeconds : distanceSeconds;
+}
+
+export function kv78RowScheduleInfo(
+  row, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
+) {
+  const metric = kv78RowScheduleMetric(row, nowSeconds, maxPastSeconds, maxFutureSeconds);
+  const hasScheduleTime = metric !== Number.POSITIVE_INFINITY;
+  return {
+    relevant: !hasScheduleTime || metric <= 0,
+    hasScheduleTime,
+    distanceSeconds: hasScheduleTime ? Math.abs(metric) : null,
+  };
 }
 
 /**
@@ -365,10 +411,13 @@ export function inspectKv78RowPruneBatch(
       continue;
     }
 
-    if (checkSchedule && !kv78RowScheduleInfo(
-      row, nowSeconds, maxPastSeconds, maxFutureSeconds,
-    ).relevant) {
-      scheduleKeys.push(key);
+    if (checkSchedule) {
+      const scheduleMetric = kv78RowScheduleMetric(
+        row, nowSeconds, maxPastSeconds, maxFutureSeconds,
+      );
+      if (scheduleMetric > 0 && scheduleMetric !== Number.POSITIVE_INFINITY) {
+        scheduleKeys.push(key);
+      }
     }
   }
 
@@ -474,24 +523,27 @@ export function selectKv78RowEvictionKeys(
   let index = 0;
 
   for (const [key, row] of sourceEntries) {
-    const info = kv78RowScheduleInfo(
+    const scheduleMetric = kv78RowScheduleMetric(
       row, nowSeconds, maxPastSeconds, maxFutureSeconds,
     );
-
-    const candidate = {
-      key,
-      index,
-      distanceSeconds: info.hasScheduleTime
-        ? info.distanceSeconds
-        : Number.POSITIVE_INFINITY,
-    };
+    const distanceSeconds = scheduleMetric === Number.POSITIVE_INFINITY
+      ? Number.POSITIVE_INFINITY
+      : Math.abs(scheduleMetric);
 
     if (heap.length < excess) {
-      heap.push(candidate);
+      heap.push({ key, index, distanceSeconds });
       siftUp(heap.length - 1);
-    } else if (comparePriority(candidate, heap[0]) < 0) {
-      heap[0] = candidate;
-      siftDown(0);
+    } else {
+      const worst = heap[0];
+      // Compare scalar fields first. Allocate a heap item only when this row
+      // actually enters the retained eviction set.
+      if (
+        distanceSeconds > worst.distanceSeconds ||
+        (distanceSeconds === worst.distanceSeconds && index < worst.index)
+      ) {
+        heap[0] = { key, index, distanceSeconds };
+        siftDown(0);
+      }
     }
 
     index += 1;
