@@ -37,12 +37,45 @@ export function mergeKv6PositionMetadata(previous, event, receivedAt) {
   };
 }
 
-function secondsOfDay(v) {
-  const s = clean(v);
-  if (!s || !/^\d{1,3}:\d{2}:\d{2}$/.test(s)) return null;
-  const [h, m, sec] = s.split(':').map(Number);
-  if (m > 59 || sec > 59) return null;
-  return h * 3600 + m * 60 + sec;
+function secondsOfDay(value) {
+  // KV78 row fields have already passed through clean() in the table parser.
+  // Parse the fixed H:MM:SS shape directly, avoiding RegExp, split(), and
+  // map() allocations for each expected/target time on every stop row.
+  if (typeof value !== 'string') return null;
+  const length = value.length;
+  if (length < 7 || length > 9) return null;
+
+  const hourDigits = length - 6;
+  const firstColon = hourDigits;
+  if (
+    value.charCodeAt(firstColon) !== 58 ||
+    value.charCodeAt(firstColon + 3) !== 58
+  ) return null;
+
+  let hour = 0;
+  for (let i = 0; i < hourDigits; i += 1) {
+    const digit = value.charCodeAt(i);
+    if (digit < 48 || digit > 57) return null;
+    hour = hour * 10 + digit - 48;
+  }
+
+  const minuteTens = value.charCodeAt(firstColon + 1);
+  const minuteOnes = value.charCodeAt(firstColon + 2);
+  const secondTens = value.charCodeAt(firstColon + 4);
+  const secondOnes = value.charCodeAt(firstColon + 5);
+  if (
+    minuteTens < 48 || minuteTens > 57 ||
+    minuteOnes < 48 || minuteOnes > 57 ||
+    secondTens < 48 || secondTens > 57 ||
+    secondOnes < 48 || secondOnes > 57
+  ) return null;
+
+  const minute = (minuteTens - 48) * 10 + minuteOnes - 48;
+  const second = (secondTens - 48) * 10 + secondOnes - 48;
+  if (minute > 59 || second > 59) return null;
+
+  // Three-digit operation-day hours are valid (for example 123:45:00).
+  return hour * 3600 + minute * 60 + second;
 }
 
 function timeDifference(expected, target) {
