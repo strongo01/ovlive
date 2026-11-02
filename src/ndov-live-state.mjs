@@ -300,8 +300,8 @@ export function kv78RowCacheKey(row) {
  * This keeps a heavily delayed but still-current prediction in the bounded cache.
  */
 // Encode schedule status in one number for the hot pruning/eviction loops:
-// +Infinity = no usable schedule time; negative (including -0) = relevant;
-// positive = not relevant. The absolute value is the nearest schedule distance.
+// +Infinity = no usable schedule time; negative = relevant; non-negative =
+// not relevant. A +1 offset preserves the distinction when distance is zero.
 function kv78RowScheduleMetric(
   row, nowSeconds, maxPastSeconds = 180, maxFutureSeconds = 4 * 60 * 60,
 ) {
@@ -358,7 +358,7 @@ function kv78RowScheduleMetric(
   }
 
   if (!hasScheduleTime) return Number.POSITIVE_INFINITY;
-  return relevant ? -distanceSeconds : distanceSeconds;
+  return relevant ? -(distanceSeconds + 1) : distanceSeconds;
 }
 
 export function kv78RowScheduleInfo(
@@ -367,9 +367,11 @@ export function kv78RowScheduleInfo(
   const metric = kv78RowScheduleMetric(row, nowSeconds, maxPastSeconds, maxFutureSeconds);
   const hasScheduleTime = metric !== Number.POSITIVE_INFINITY;
   return {
-    relevant: !hasScheduleTime || metric <= 0,
+    relevant: !hasScheduleTime || metric < 0,
     hasScheduleTime,
-    distanceSeconds: hasScheduleTime ? Math.abs(metric) : null,
+    distanceSeconds: hasScheduleTime
+      ? (metric < 0 ? -metric - 1 : metric)
+      : null,
   };
 }
 
@@ -415,7 +417,7 @@ export function inspectKv78RowPruneBatch(
       const scheduleMetric = kv78RowScheduleMetric(
         row, nowSeconds, maxPastSeconds, maxFutureSeconds,
       );
-      if (scheduleMetric > 0 && scheduleMetric !== Number.POSITIVE_INFINITY) {
+      if (scheduleMetric >= 0 && scheduleMetric !== Number.POSITIVE_INFINITY) {
         scheduleKeys.push(key);
       }
     }
@@ -528,7 +530,7 @@ export function selectKv78RowEvictionKeys(
     );
     const distanceSeconds = scheduleMetric === Number.POSITIVE_INFINITY
       ? Number.POSITIVE_INFINITY
-      : Math.abs(scheduleMetric);
+      : (scheduleMetric < 0 ? -scheduleMetric - 1 : scheduleMetric);
 
     if (heap.length < excess) {
       heap.push({ key, index, distanceSeconds });
