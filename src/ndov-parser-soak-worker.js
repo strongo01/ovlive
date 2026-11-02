@@ -50,7 +50,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname !== "/start" && url.pathname !== "/status") {
+    if (url.pathname !== "/start" && url.pathname !== "/status" && url.pathname !== "/stop") {
       return json({ ok: false, error: "Not found", worker: WORKER_NAME }, 404);
     }
 
@@ -67,6 +67,15 @@ export default {
         return json({ ok: false, error: "Use GET /status" }, 405);
       }
       return callKv78Hub(env, "/status");
+    }
+
+    if (url.pathname === "/stop") {
+      if (request.method !== "POST") {
+        return json({ ok: false, error: "Use POST /stop" }, 405);
+      }
+      // Alleen deze geïsoleerde soak-DO wordt gestopt. De interne disable-route
+      // sluit de feedsocket en zet stopRequested, ook voor een handmatige sessie.
+      return callKv78Hub(env, "/continuous/disable");
     }
 
     if (request.method !== "POST") {
