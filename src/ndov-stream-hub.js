@@ -352,7 +352,7 @@ export class NdovFeedHub extends DurableObject {
     super(ctx, env);
     this.ctx = ctx;
     this.env = env;
-    this.cpuDiagnosticsEnabled = String(env.NDOV_CPU_DIAGNOSTICS ?? '') === 'true';
+    this.cpuDiagnosticsEnabled = String(env?.NDOV_CPU_DIAGNOSTICS ?? '') === 'true';
     // Grote KV78- en BISON-snapshots mogen niet tegelijk worden gecomprimeerd:
     // beide streamcollectors delen dezelfde Durable Object-geheugenlimiet.
     this.fullPersistQueue = Promise.resolve();
@@ -1901,6 +1901,7 @@ export class NdovFeedHub extends DurableObject {
     const finalCheckpointDue = bulk && hasCollectedData &&
       (!state.continuousMode || now - state.lastFullPersistAt >= 5000);
     if (!skipFullCheckpoint && (checkpointDue || finalCheckpointDue)) {
+      let checkpointExecuted = false;
       const persistFullSnapshot = async () => {
         // Een eerdere stream kan tijdens het wachten al een checkpoint hebben
         // geschreven. Controleer opnieuw, zodat we geen dubbele grote snapshot
@@ -1915,6 +1916,7 @@ export class NdovFeedHub extends DurableObject {
           (!state.continuousMode || checkpointNow - state.lastFullPersistAt >= 5000);
         if (!checkpointStillDue && !finalCheckpointStillDue) return;
 
+        checkpointExecuted = true;
         await this.persistFullKv78Rows(stream, true);
         await this.persistFullBisonEvents(stream, true);
         await this.persistFullMutations(stream, true);
@@ -1930,7 +1932,7 @@ export class NdovFeedHub extends DurableObject {
       this.fullPersistQueue = queuedPersist.catch(() => {});
       const checkpointStartedAt = diagnostics ? performance.now() : 0;
       await queuedPersist;
-      if (diagnostics) {
+      if (diagnostics && checkpointExecuted) {
         diagnostics.fullCheckpointMs += performance.now() - checkpointStartedAt;
         diagnostics.fullCheckpointCount += 1;
       }
