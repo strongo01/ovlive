@@ -209,6 +209,28 @@ assert.equal(kv[0].linePlanningNumber, 'U011');
 assert.equal(kv[0].departureDelaySeconds, -8);
 assert.equal(kv[0].identity, 'CXX|2026-10-11|2947354|U011|7004|0');
 
+// KV78 time differences must keep exact H:MM:SS parsing, 24+/three-digit
+// operation-day hours, midnight wraparound, trimming, and invalid-time behavior.
+const kv78TimeCases = [
+  { expected: '00:00:01', target: '00:00:00', delay: 1 },
+  { expected: '24:05:00', target: '24:00:00', delay: 300 },
+  { expected: '123:01:00', target: '122:59:00', delay: 120 },
+  { expected: '00:00:05', target: '23:59:55', delay: 10 },
+  { expected: ' 09:01:00 ', target: ' 09:00:00 ', delay: 60 },
+  { expected: '12:60:00', target: '12:00:00', delay: null },
+  { expected: '12:00:60', target: '12:00:00', delay: null },
+  { expected: '9:1:00', target: '09:00:00', delay: null },
+  { expected: '1000:00:00', target: '09:00:00', delay: null },
+];
+for (const sample of kv78TimeCases) {
+  const payload = String.raw`\\LDataOwnerCode|OperationDate|LinePlanningNumber|JourneyNumber|ExpectedDepartureTime|TargetDepartureTime
+CXX|2026-10-11|U011|7004|${sample.expected}|${sample.target}`;
+  const parsed = [...iterateKv78Payload(payload, '/GOVI/KV8passtimes/CXX')];
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].departureDelaySeconds, sample.delay);
+}
+console.log('PASS: KV78 time-difference parser preserves valid/invalid and overnight clock semantics');
+
 // De streaming-parser moet dezelfde resultaten opleveren voor LF, CRLF en BOM.
 assert.deepEqual(
   [...iterateKv78Payload(header, '/GOVI/KV8passtimes/CXX')],
