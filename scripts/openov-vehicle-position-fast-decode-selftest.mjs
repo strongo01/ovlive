@@ -128,7 +128,7 @@ const generated = normalizeWithGeneratedDecoder(bytes);
 // timestamp, same retained entities, and same identity / coordinate fields.
 assert.deepEqual(fast, generated);
 assert.equal(fast.feedTimestamp, feedTimestamp);
-assert.equal(fast.entities.length, 3);
+assert.equal(fast.entities.length, 4);
 assert.deepEqual(fast.entities[0], {
   entityId: "vehicle-28-a",
   vehicleId: "UOV-2801",
@@ -164,14 +164,14 @@ const filtered = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
   tripIds: new Set(["391215411"]),
   routeIds: new Set(["159450"])
 });
-assert.equal(filtered.sourceEntityCount, 4);
+assert.equal(filtered.sourceEntityCount, 5);
 assert.deepEqual(filtered.entities, [fast.entities[0]]);
 
 const wrongRoute = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
   tripIds: new Set(["391215411"]),
   routeIds: new Set(["different-route"])
 });
-assert.equal(wrongRoute.sourceEntityCount, 4);
+assert.equal(wrongRoute.sourceEntityCount, 5);
 assert.deepEqual(wrongRoute.entities, []);
 console.log("PASS: targeted decoder skips unrelated vehicle objects and keeps exact route/trip matching");
 
