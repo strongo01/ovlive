@@ -37,6 +37,14 @@ function normalizeWithGeneratedDecoder(bytes) {
     startTime: entity.vehicle?.trip?.startTime,
     directionId: entity.vehicle?.trip?.directionId,
     stopId: entity.vehicle?.stopId,
+    currentStopSequence: numeric(entity.vehicle?.currentStopSequence),
+    currentStatus: numeric(entity.vehicle?.currentStopSequence) == null
+      ? undefined
+      : ({
+          0: "INCOMING_AT",
+          1: "STOPPED_AT",
+          2: "IN_TRANSIT_TO"
+        }[numeric(entity.vehicle?.currentStatus) ?? 2] ?? "IN_TRANSIT_TO"),
     latitude: entity.vehicle?.position?.latitude,
     longitude: entity.vehicle?.position?.longitude,
     timestamp: numeric(entity.vehicle?.timestamp)
@@ -68,6 +76,7 @@ const feedObject = {
         position: { latitude: 52.09303283691406, longitude: 5.100654602050781, bearing: 180 },
         timestamp: positionTimestamp,
         stopId: "3923827",
+        currentStopSequence: 25,
         currentStatus: 2,
         occupancyStatus: 1
       }
@@ -77,12 +86,18 @@ const feedObject = {
       vehicle: {
         position: { latitude: 52.1, longitude: 5.1 },
         timestamp: positionTimestamp - 1,
-        stopId: "3920000"
+        stopId: "3920000",
+        currentStopSequence: 6,
+        currentStatus: 1
       }
     },
     {
       id: "entity-with-trip-only",
-      vehicle: { trip: { tripId: "trip-only" } }
+      vehicle: {
+        trip: { tripId: "trip-only" },
+        currentStopSequence: 3,
+        currentStatus: 0
+      }
     },
     {
       id: "empty-vehicle-position",
@@ -121,6 +136,14 @@ assert.deepEqual(fast.entities[0], {
   timestamp: positionTimestamp
 });
 console.log("PASS: selective decoder matches GTFS-Realtime decoder for exact vehicle identity and coordinates");
+assert.equal(fast.entities[0].currentStopSequence, 25);
+assert.equal(fast.entities[0].currentStatus, "IN_TRANSIT_TO");
+assert.equal(fast.entities[1].currentStopSequence, 6);
+assert.equal(fast.entities[1].currentStatus, "STOPPED_AT");
+assert.equal(fast.entities[2].currentStopSequence, 3);
+assert.equal(fast.entities[2].currentStatus, "INCOMING_AT");
+console.log("PASS: all current_status values and current_stop_sequence are decoded; omitted status defaults to IN_TRANSIT_TO");
+
 console.log("PASS: non-vehicle entities and empty VehiclePosition messages are skipped");
 console.log("PASS: feed timestamp and per-vehicle timestamp are preserved independently");
 
