@@ -17,6 +17,8 @@ export interface DecodedOpenovVehiclePosition {
   startTime?: string;
   directionId?: number;
   stopId?: string;
+  currentStopSequence?: number;
+  currentStatus?: string;
   latitude?: number;
   longitude?: number;
   timestamp?: number;
@@ -313,6 +315,8 @@ function decodeVehiclePosition(
   let position: { latitude?: number; longitude?: number } | undefined;
   let stopIdField: Field | undefined;
   let vehicleField: Field | undefined;
+  let currentStopSequence: number | undefined;
+  let currentStatusValue: number | undefined;
   // VehiclePosition scalar/string defaults are 0 and "" in protobufjs.
   let timestamp = 0;
   let offset = start;
@@ -351,6 +355,12 @@ function decodeVehiclePosition(
         }
       } else if (field.number === 7) stopIdField = field;
       else if (field.number === 8) vehicleField = field;
+    } else if (field.wireType === 0 && field.number === 3) {
+      // VehiclePosition.current_stop_sequence = field 3.
+      currentStopSequence = field.value;
+    } else if (field.wireType === 0 && field.number === 4) {
+      // VehiclePosition.current_status = field 4: 0 incoming, 1 stopped, 2 in transit.
+      currentStatusValue = field.value;
     } else if (field.number === 5 && field.wireType === 0) {
       // VehiclePosition.timestamp = field 5, uint64 epoch seconds.
       timestamp = field.value ?? 0;
@@ -371,6 +381,17 @@ function decodeVehiclePosition(
     ? decodeVehicleDescriptor(bytes, vehicleField.contentStart, vehicleField.contentEnd)
     : undefined;
   const stopId = stopIdField ? readString(bytes, stopIdField) : "";
+  // GTFS-RT says current_status is ignored without current_stop_sequence.
+  // When the sequence exists but the status is omitted, IN_TRANSIT_TO is the default.
+  const currentStatus = currentStopSequence == null
+    ? undefined
+    : currentStatusValue === 0
+      ? "INCOMING_AT"
+      : currentStatusValue === 1
+        ? "STOPPED_AT"
+        : currentStatusValue === 2 || currentStatusValue == null
+          ? "IN_TRANSIT_TO"
+          : undefined;
 
   return {
     vehicleId: vehicle?.vehicleId,
@@ -380,6 +401,8 @@ function decodeVehiclePosition(
     startTime: trip?.startTime,
     directionId: trip?.directionId,
     stopId,
+    currentStopSequence,
+    currentStatus,
     latitude: position?.latitude,
     longitude: position?.longitude,
     timestamp
