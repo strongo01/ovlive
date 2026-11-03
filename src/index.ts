@@ -1088,6 +1088,13 @@ function normalizeVehiclePositions(feed: any): any[] {
     startTime: entity.vehicle?.trip?.startTime,
     directionId: entity.vehicle?.trip?.directionId,
     stopId: entity.vehicle?.stopId,
+    currentStopSequence: toNumber(entity.vehicle?.currentStopSequence),
+    currentStatus: toNumber(entity.vehicle?.currentStopSequence) == null
+      ? undefined
+      : enumName(
+          (GtfsRealtimeBindings as any).transit_realtime.VehiclePosition?.VehicleStopStatus,
+          entity.vehicle?.currentStatus
+        ) ?? "IN_TRANSIT_TO",
     latitude: entity.vehicle?.position?.latitude,
     longitude: entity.vehicle?.position?.longitude,
     timestamp: toNumber(entity.vehicle?.timestamp)
