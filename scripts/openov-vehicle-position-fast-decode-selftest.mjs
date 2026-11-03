@@ -100,6 +100,13 @@ const feedObject = {
       }
     },
     {
+      id: "vehicle-default-status",
+      vehicle: {
+        trip: { tripId: "default-status" },
+        currentStopSequence: 4
+      }
+    },
+    {
       id: "empty-vehicle-position",
       vehicle: { timestamp: positionTimestamp }
     },
@@ -131,6 +138,8 @@ assert.deepEqual(fast.entities[0], {
   startTime: "19:03:00",
   directionId: 1,
   stopId: "3923827",
+  currentStopSequence: 25,
+  currentStatus: "IN_TRANSIT_TO",
   latitude: 52.09303283691406,
   longitude: 5.100654602050781,
   timestamp: positionTimestamp
@@ -142,6 +151,8 @@ assert.equal(fast.entities[1].currentStopSequence, 6);
 assert.equal(fast.entities[1].currentStatus, "STOPPED_AT");
 assert.equal(fast.entities[2].currentStopSequence, 3);
 assert.equal(fast.entities[2].currentStatus, "INCOMING_AT");
+assert.equal(fast.entities[3].currentStopSequence, 4);
+assert.equal(fast.entities[3].currentStatus, "IN_TRANSIT_TO");
 console.log("PASS: all current_status values and current_stop_sequence are decoded; omitted status defaults to IN_TRANSIT_TO");
 
 console.log("PASS: non-vehicle entities and empty VehiclePosition messages are skipped");
