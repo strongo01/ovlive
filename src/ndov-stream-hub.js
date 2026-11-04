@@ -273,6 +273,14 @@ async function gzip(bytes) {
   return concatBytes(...chunks);
 }
 
+// V8 maakt van substrings (>= 13 tekens) 'sliced strings' die het hele bronbericht in leven houden.
+// Records in de langlevende Maps zouden daardoor (delen van) hun oorspronkelijke bericht vasthouden,
+// ook nadat de rij zelf allang is overschreven. Een JSON-roundtrip geeft elke waarde een eigen compacte
+// string. Records bevatten uitsluitend JSON-waarden (ze worden ook als JSON opgeslagen).
+function compactRecord(record) {
+  return JSON.parse(JSON.stringify(record));
+}
+
 async function gzipJson(value) { return gzip(new TextEncoder().encode(JSON.stringify(value))); }
 async function gunzipJson(value, limit = 8_000_000) {
   if (!(value instanceof Uint8Array)) value = new Uint8Array(value);
@@ -2274,10 +2282,11 @@ export class NdovFeedHub extends DurableObject {
                 const key = kv78RowCacheKey(row) ??
                   `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
 
+                const storedRow = compactRecord(row);
                 this.removeKv78RowFromIndexes(state, key);
                 state.rows.delete(key);
-                state.rows.set(key, row);
-                this.addKv78RowToIndexes(state, key, row);
+                state.rows.set(key, storedRow);
+                this.addKv78RowToIndexes(state, key, storedRow);
               }
               diagnostics.parsedRows += parsedRowCount;
             } else {
@@ -2288,10 +2297,11 @@ export class NdovFeedHub extends DurableObject {
                 const key = kv78RowCacheKey(row) ??
                   `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
 
+                const storedRow = compactRecord(row);
                 this.removeKv78RowFromIndexes(state, key);
                 state.rows.delete(key);
-                state.rows.set(key, row);
-                this.addKv78RowToIndexes(state, key, row);
+                state.rows.set(key, storedRow);
+                this.addKv78RowToIndexes(state, key, storedRow);
               }
             }
 
@@ -2344,7 +2354,7 @@ export class NdovFeedHub extends DurableObject {
               if (isKv6EventRetainable(
                 next, Date.now(), KV6_EVENT_STATUS_FRESH_MS, KV6_EVENT_RETENTION_MS,
               )) {
-                state.events.set(key, next);
+                state.events.set(key, compactRecord(next));
               }
             }
             if (Date.now() - (state.lastEventPruneAt ?? 0) > 10000) {
@@ -2356,7 +2366,7 @@ export class NdovFeedHub extends DurableObject {
               // Coalesce mutaties in de begrensde geheugenstaat.
               // Geen individuele Durable Object-write per KV17-update:
               // de volledige staat wordt periodiek gecomprimeerd opgeslagen.
-              upsertCurrentMutationState(state.mutations, mutation, KV17_STATE_LIMIT);
+              upsertCurrentMutationState(state.mutations, compactRecord(mutation), KV17_STATE_LIMIT);
             }
           }
           await this.persist(stream, false, false);
