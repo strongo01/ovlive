@@ -1,0 +1,23 @@
+name = "ovlive-ndov-memory-soak-base"
+main = "src/ndov-memory-soak-worker.js"
+compatibility_date = "2026-10-01"
+upload_source_maps = true
+workers_dev = true
+
+[vars]
+NDOV_CPU_DIAGNOSTICS = "true"
+# A/B: dezelfde code; alleen de compactie van opgeslagen records verschilt.
+NDOV_COMPACT_RECORDS = "false"
+
+# Bewust een eigen Durable Object-namespace: geen productiegegevens of -isolate delen.
+[[durable_objects.bindings]]
+name = "NDOV_FEEDS"
+class_name = "NdovFeedHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NdovFeedHub"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1

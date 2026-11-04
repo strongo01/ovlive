@@ -33,7 +33,7 @@ function kv17(muts, seed) {
   return x + '</KV17cvlinfo></VV_TM_PUSH>';
 }
 const { NdovFeedHub } = await import(pathToFileURL(bundle));
-const ctx = makeCtx(); const hub = new NdovFeedHub(ctx, {}); await hub.ready;
+const ctx = makeCtx(); const hub = new NdovFeedHub(ctx, process.env.NDOV_COMPACT_RECORDS ? { NDOV_COMPACT_RECORDS: process.env.NDOV_COMPACT_RECORDS } : {}); await hub.ready;
 const gc = () => { global.gc(); global.gc(); };
 const live = () => { gc(); const m = process.memoryUsage(); return +((m.heapUsed + m.arrayBuffers) / 1048576).toFixed(1); };
 const base = live();

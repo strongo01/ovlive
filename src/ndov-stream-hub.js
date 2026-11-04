@@ -361,6 +361,9 @@ export class NdovFeedHub extends DurableObject {
     this.ctx = ctx;
     this.env = env;
     this.cpuDiagnosticsEnabled = String(env?.NDOV_CPU_DIAGNOSTICS ?? '') === 'true';
+    // Standaard AAN. Alleen NDOV_COMPACT_RECORDS="false" schakelt de compactie uit; bedoeld voor
+    // een A/B-soak-test van dezelfde code met en zonder compactie.
+    this.compactRecords = String(env?.NDOV_COMPACT_RECORDS ?? 'true').toLowerCase() !== 'false';
     // Grote KV78- en BISON-snapshots mogen niet tegelijk worden gecomprimeerd:
     // beide streamcollectors delen dezelfde Durable Object-geheugenlimiet.
     this.fullPersistQueue = Promise.resolve();
@@ -391,6 +394,10 @@ export class NdovFeedHub extends DurableObject {
       // here can exceed blockConcurrencyWhile's initialization timeout and reset
       // the collector object before any request can be served.
     });
+  }
+
+  storeRecord(record) {
+    return this.compactRecords ? compactRecord(record) : record;
   }
 
   async ensureStreamLoaded(stream) {
@@ -2282,7 +2289,7 @@ export class NdovFeedHub extends DurableObject {
                 const key = kv78RowCacheKey(row) ??
                   `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
 
-                const storedRow = compactRecord(row);
+                const storedRow = this.storeRecord(row);
                 this.removeKv78RowFromIndexes(state, key);
                 state.rows.delete(key);
                 state.rows.set(key, storedRow);
@@ -2297,7 +2304,7 @@ export class NdovFeedHub extends DurableObject {
                 const key = kv78RowCacheKey(row) ??
                   `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
 
-                const storedRow = compactRecord(row);
+                const storedRow = this.storeRecord(row);
                 this.removeKv78RowFromIndexes(state, key);
                 state.rows.delete(key);
                 state.rows.set(key, storedRow);
@@ -2354,7 +2361,7 @@ export class NdovFeedHub extends DurableObject {
               if (isKv6EventRetainable(
                 next, Date.now(), KV6_EVENT_STATUS_FRESH_MS, KV6_EVENT_RETENTION_MS,
               )) {
-                state.events.set(key, compactRecord(next));
+                state.events.set(key, this.storeRecord(next));
               }
             }
             if (Date.now() - (state.lastEventPruneAt ?? 0) > 10000) {
@@ -2366,7 +2373,7 @@ export class NdovFeedHub extends DurableObject {
               // Coalesce mutaties in de begrensde geheugenstaat.
               // Geen individuele Durable Object-write per KV17-update:
               // de volledige staat wordt periodiek gecomprimeerd opgeslagen.
-              upsertCurrentMutationState(state.mutations, compactRecord(mutation), KV17_STATE_LIMIT);
+              upsertCurrentMutationState(state.mutations, this.storeRecord(mutation), KV17_STATE_LIMIT);
             }
           }
           await this.persist(stream, false, false);
