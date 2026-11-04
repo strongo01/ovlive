@@ -1,4 +1,4 @@
-import GtfsRealtimeBindings from "gtfs-realtime-bindings";
+import { decodeOpenovFeed, toNumber } from "./gtfs-rt-stream";
 import { handleOvapiTestApi } from "./ovapi-test";
 import { NdovFeedHub } from "./ndov-stream-hub.js";
 import { handleTransitousOvapiMatch } from "./ovapi-transitous-match";
@@ -56,132 +56,6 @@ function corsHeaders(origin: string | null) {
   }
   return headers;
 }
-
-function toNumber(value: any): number | undefined {
-  if (value == null) return undefined;
-  if (typeof value === "number") return value;
-  if (typeof value.toNumber === "function") return value.toNumber();
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function translatedText(value: any): string | undefined {
-  const translations = value?.translation;
-  if (!Array.isArray(translations) || translations.length === 0) return undefined;
-  const dutch = translations.find((t: any) => t.language === "nl");
-  return (dutch ?? translations[0])?.text;
-}
-
-function enumName(enumObject: any, value: any): string | undefined {
-  if (value == null) return undefined;
-  return typeof value === "string" ? value : enumObject?.[value];
-}
-
-function normalizeTripUpdates(feed: any) {
-  const rt = (GtfsRealtimeBindings as any).transit_realtime;
-  const rows: any[] = [];
-  for (const entity of feed.entity ?? []) {
-    const tu = entity.tripUpdate;
-    if (!tu) continue;
-    const trip = tu.trip ?? {};
-    const rawStopUpdates = (tu.stopTimeUpdate ?? []).map((s: any) => ({
-    stopId: s.stopId,
-    stopSequence: s.stopSequence,
-    arrivalTime: toNumber(s.arrival?.time),
-    arrivalDelaySeconds: s.arrival?.delay,
-    departureTime: toNumber(s.departure?.time),
-    departureDelaySeconds: s.departure?.delay,
-    scheduleRelationship: enumName(rt.StopTimeUpdate?.ScheduleRelationship, s.scheduleRelationship)
-  }));
-
-  // GTFS-RT: een trip-level delay geldt ook voor volgende stops,
-  // totdat een stop-update een eigen vertraging opgeeft.
-  let propagatedDelaySeconds =
-    typeof tu.delay === "number" && Number.isFinite(tu.delay)
-      ? tu.delay
-      : undefined;
-
-  const stopUpdates = rawStopUpdates.map((stop: any) => {
-    const ownArrivalDelay =
-      typeof stop.arrivalDelaySeconds === "number" && Number.isFinite(stop.arrivalDelaySeconds)
-        ? stop.arrivalDelaySeconds
-        : undefined;
-    const ownDepartureDelay =
-      typeof stop.departureDelaySeconds === "number" && Number.isFinite(stop.departureDelaySeconds)
-        ? stop.departureDelaySeconds
-        : undefined;
-
-    // Als één event op deze halte een expliciete delay heeft, wordt die
-    // de geërfde delay voor volgende halte-updates.
-    const explicitDelay = ownDepartureDelay ?? ownArrivalDelay;
-    if (explicitDelay !== undefined) propagatedDelaySeconds = explicitDelay;
-
-    const noData = String(stop.scheduleRelationship ?? "").toUpperCase() === "NO_DATA";
-    const inheritedDelay = noData ? undefined : propagatedDelaySeconds;
-
-    return {
-      ...stop,
-      effectiveArrivalDelaySeconds: ownArrivalDelay ?? inheritedDelay,
-      effectiveDepartureDelaySeconds: ownDepartureDelay ?? inheritedDelay
-    };
-  });
-    rows.push({
-      entityId: entity.id,
-      tripId: trip.tripId,
-      routeId: trip.routeId,
-      startDate: trip.startDate,
-      startTime: trip.startTime,
-      directionId: trip.directionId,
-      scheduleRelationship: enumName(rt.TripDescriptor?.ScheduleRelationship, trip.scheduleRelationship),
-      delaySeconds: tu.delay,
-      vehicleId: tu.vehicle?.id,
-      // Een ontbrekende protobuf-timestamp mag niet als tijdstip 0 gelden.
-      timestamp: (() => {
-        const value = toNumber(tu.timestamp);
-        return value != null && value > 0 ? value : undefined;
-      })(),
-      stopUpdates
-    });
-  }
-  return rows;
-}
-
-function normalizeAlerts(feed: any) {
-  const rt = (GtfsRealtimeBindings as any).transit_realtime;
-  const rows: any[] = [];
-  for (const entity of feed.entity ?? []) {
-    const alert = entity.alert;
-    if (!alert) continue;
-    rows.push({
-      entityId: entity.id,
-      header: translatedText(alert.headerText),
-      description: translatedText(alert.descriptionText),
-      url: translatedText(alert.url),
-      cause: enumName(rt.Alert?.Cause, alert.cause),
-      effect: enumName(rt.Alert?.Effect, alert.effect),
-      activePeriods: (alert.activePeriod ?? []).map((p: any) => ({
-        start: toNumber(p.start),
-        end: toNumber(p.end)
-      })),
-      communicationPeriods: (alert.communicationPeriod ?? []).map((p: any) => ({
-        start: toNumber(p.start),
-        end: toNumber(p.end)
-      })),
-      impactPeriods: (alert.impactPeriod ?? []).map((p: any) => ({
-        start: toNumber(p.start),
-        end: toNumber(p.end)
-      })),
-      informedEntities: (alert.informedEntity ?? []).map((e: any) => ({
-        agencyId: e.agencyId,
-        routeId: e.routeId,
-        stopId: e.stopId,
-        tripId: e.trip?.tripId
-      }))
-    });
-  }
-  return rows;
-}
-
 
 type OpenovFeedKind =
   | "tripUpdates"
@@ -432,24 +306,13 @@ async function fetchOpenovFeedUncached(url: string, kind: "tripUpdates" | "alert
     return { ok: false, status: 502, sourceUrl: url, checkedAt: new Date().toISOString(), error: "Feed groter dan ingestelde veiligheidslimiet." };
   }
 
-  const feed = (GtfsRealtimeBindings as any).transit_realtime.FeedMessage.decode(bytes);
-  const feedTimestamp = toNumber(feed.header?.timestamp);
+  // Incrementeel decoderen: één FeedEntity tegelijk, direct genormaliseerd. De volledige
+  // gedecodeerde feed bestaat daardoor nooit tegelijk met de genormaliseerde uitvoer
+  // (zie src/gtfs-rt-stream.ts). De uitvoer is identiek aan de eerdere implementatie.
+  const { header, entities } = decodeOpenovFeed(bytes, kind);
+  const feedTimestamp = toNumber(header?.timestamp);
   const ageSeconds = feedTimestamp == null ? undefined : Math.max(0, Math.round(Date.now() / 1000 - feedTimestamp));
   const isStale = ageSeconds == null || ageSeconds > 180;
-  const entities = kind === "tripUpdates" || kind === "trainUpdates"
-    ? normalizeTripUpdates(feed)
-    : kind === "alerts"
-      ? normalizeAlerts(feed)
-      : (feed.entity ?? []).map((e: any) => ({
-          entityId: e.id,
-          vehicleId: e.vehicle?.vehicle?.id,
-          tripId: e.vehicle?.trip?.tripId,
-          routeId: e.vehicle?.trip?.routeId,
-          stopId: e.vehicle?.stopId,
-          latitude: e.vehicle?.position?.latitude,
-          longitude: e.vehicle?.position?.longitude,
-          timestamp: toNumber(e.vehicle?.timestamp)
-        })).filter((e: any) => e.vehicleId || e.tripId || e.latitude != null);
 
   return {
     ok: true,

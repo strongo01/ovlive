@@ -11,7 +11,7 @@ import {
   parseCommandBody,
   parseGreeting,
 } from './ndov-zmtp-protocol.mjs';
-import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Payload } from './ndov-feed-parser.mjs';
+import { correlateKv17MutationsToKv78Rows, parseBisonPayload, parseKv17Payload, parseKv78Chunks } from './ndov-feed-parser.mjs';
 import { eventsForIdentities, flattenCurrentMutations, normalizeOperatingDate, normalizeTripLookupIdentity, operatingDateRetentionCutoff, rowMatchesIdentity, upsertCurrentMutationState } from './ndov-live-state.mjs';
 
 const HOST = 'pubsub.besteffort.ndovloket.nl';
@@ -66,6 +66,43 @@ async function gunzip(bytes, maxExpandedBytes = 5_000_000) {
     }
   } finally { try { await reader.cancel(); } catch {} }
   return concatBytes(...chunks);
+}
+
+// Zelfde veiligheidslimiet en foutmelding als gunzip(), maar levert de uitgepakte
+// chunks één voor één, zodat de volledige uitgepakte payload nooit als één buffer bestaat.
+async function* gunzipChunks(bytes, maxExpandedBytes = 5_000_000) {
+  if (bytes.length < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) { yield bytes; return; }
+  const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxExpandedBytes) throw new Error(`Expanded NDOV data exceeds ${maxExpandedBytes} byte safety limit`);
+      yield value;
+    }
+  } finally { try { await reader.cancel(); } catch {} }
+}
+
+// V8 maakt van substrings (>= 13 tekens) 'sliced strings' die de hele bronstring in leven houden.
+// Records in de langlevende Maps zouden daardoor (delen van) hun oorspronkelijke bericht vasthouden.
+// Een JSON-roundtrip geeft elke waarde een eigen compacte string; records bevatten alleen
+// JSON-waarden (ze worden ook als JSON in Durable Object storage bewaard), dus de inhoud blijft gelijk.
+function compactRecord(record) {
+  return JSON.parse(JSON.stringify(record));
+}
+
+// Laatste n waarden/entries van een Map zonder eerst een array van de héle Map te maken.
+function tailValues(map, n) {
+  const skip = Math.max(0, map.size - n); const out = []; let i = 0;
+  for (const v of map.values()) { if (i++ >= skip) out.push(v); }
+  return out;
+}
+function tailEntries(map, n) {
+  const skip = Math.max(0, map.size - n); const out = []; let i = 0;
+  for (const e of map.entries()) { if (i++ >= skip) out.push(e); }
+  return out;
 }
 
 async function gzip(bytes) {
@@ -135,10 +172,12 @@ export class NdovFeedHub extends DurableObject {
       const compressedEventCount = Number(await ctx.storage.get('eventsGzipChunkCount')) || 0;
       const savedMutations = await ctx.storage.get('mutations');
       if (compressedRowCount > 0) {
-        const rowChunks = await Promise.all(Array.from({ length: compressedRowCount }, (_, i) => ctx.storage.get(`rows:gzip:${i}`)));
-        const entries = [];
-        for (const chunk of rowChunks) if (chunk) entries.push(...await gunzipJson(chunk));
-        this.rows = new Map(entries);
+        // Eén chunk tegelijk lezen en direct in de Map zetten (geen tussenarray van alle rijen).
+        this.rows = new Map();
+        for (let i = 0; i < compressedRowCount; i += 1) {
+          const chunk = await ctx.storage.get(`rows:gzip:${i}`);
+          if (chunk) for (const [k, v] of await gunzipJson(chunk)) this.rows.set(k, v);
+        }
       } else if (savedRowChunkCount > 0) {
         const rowChunks = await Promise.all(Array.from({ length: savedRowChunkCount }, (_, i) => ctx.storage.get(`rows:${i}`)));
         this.rows = new Map(rowChunks.flatMap((chunk) => Array.isArray(chunk) ? chunk : []));
@@ -147,8 +186,9 @@ export class NdovFeedHub extends DurableObject {
       }
       this.events = new Map();
       if (compressedEventCount > 0) {
-        const eventChunks = await Promise.all(Array.from({ length: compressedEventCount }, (_, i) => ctx.storage.get(`events:gzip:${i}`)));
-        for (const chunk of eventChunks) if (chunk) {
+        for (let i = 0; i < compressedEventCount; i += 1) {
+          const chunk = await ctx.storage.get(`events:gzip:${i}`);
+          if (!chunk) continue;
           for (const [savedKey, event] of await gunzipJson(chunk)) {
             const key = canonicalBisonTripIdentity(event) ?? savedKey;
             this.events.set(key, { ...event, identity: key });
@@ -163,13 +203,13 @@ export class NdovFeedHub extends DurableObject {
       const compressedMutationCount = Number(await ctx.storage.get('mutationsGzipChunkCount')) || 0;
       const legacyMutationChunkCount = Number(await ctx.storage.get('mutationsChunkCount')) || 0;
       if (compressedMutationCount > 0) {
-        const mutationChunks = await Promise.all(Array.from({ length: compressedMutationCount }, (_, i) => ctx.storage.get(`mutations:gzip:${i}`)));
-        for (const chunk of mutationChunks) if (chunk) {
-          for (const [identity, state] of await gunzipJson(chunk)) this.mutations.set(identity, state);
+        for (let i = 0; i < compressedMutationCount; i += 1) {
+          const chunk = await ctx.storage.get(`mutations:gzip:${i}`);
+          if (chunk) for (const [identity, state] of await gunzipJson(chunk)) this.mutations.set(identity, state);
         }
       } else if (legacyMutationChunkCount > 0) {
         const mutationChunks = await Promise.all(Array.from({ length: legacyMutationChunkCount }, (_, i) => ctx.storage.get(`mutations:${i}`)));
-        for (const chunk of mutationChunks) for (const [key, mutation] of (Array.isArray(chunk) ? chunk : [])) upsertCurrentMutationState(this.mutations, mutation, KV17_STATE_LIMIT);
+        for (const chunk of mutationChunks) for (const [key, mutation] of (Array.isArray(chunk) ? chunk : [])) upsertCurrentMutationState(this.mutations, compactRecord(mutation), KV17_STATE_LIMIT);
       } else {
         // Migrate the bounded event map saved by older bridge versions.
         for (const item of new Map(savedMutations ?? []).values()) {
@@ -203,15 +243,22 @@ export class NdovFeedHub extends DurableObject {
     if (url.pathname === '/status') {
       if (stream === 'bison') this.pruneEvents();
       const base = this.snapshot.state === 'idle' ? initialSnapshot(stream) : this.snapshot;
-      const currentMutations = flattenCurrentMutations(this.mutations, 300);
-      return Response.json({
-        ...base,
+      // ?lite=1: alleen status/metadata, zonder de rij-, event- en mutatievoorbeelden.
+      // Het planpad leest hieruit uitsluitend state en latestMessageAt; een volledige
+      // respons is per aanroep enkele MB en liep onder gelijktijdige requests op in het geheugen.
+      const lite = url.searchParams.get('lite') === '1';
+      const sampleFields = lite ? {} : {
         latestRows: url.searchParams.get('includeAllRows') === '1'
           ? [...this.rows.values()]
-          : [...this.rows.values()].slice(-KV78_STATUS_SAMPLE_LIMIT),
-        latestEvents: [...this.events.values()].slice(-100),
+          : tailValues(this.rows, KV78_STATUS_SAMPLE_LIMIT),
+        latestEvents: tailValues(this.events, 100),
+        latestMutations: flattenCurrentMutations(this.mutations, 300),
+      };
+      const { latestRows: _lr, latestEvents: _le, latestMutations: _lm, ...baseMeta } = base;
+      return Response.json({
+        ...(lite ? baseMeta : base),
+        ...sampleFields,
         storedKv6TripCount: this.events.size,
-        latestMutations: currentMutations,
         storedKv78RowCount: this.rows.size,
         storedMutationIdentityCount: this.mutations.size,
         continuousEnabled: this.continuousEnabled,
@@ -261,7 +308,7 @@ export class NdovFeedHub extends DurableObject {
       const identity = normalizeTripLookupIdentity(url.searchParams.get('identity'));
       if (!identity) return Response.json({ ok: false, error: 'Geef identity=owner|YYYY-MM-DD|line|journey|reinforcement op.' }, { status: 400 });
       const now = Date.now();
-      const rows = [...this.rows.values()].filter((row) => rowMatchesIdentity(row, identity));
+      const rows = []; for (const row of this.rows.values()) if (rowMatchesIdentity(row, identity)) rows.push(row);
       const fresh = rows.filter((row) => { const at = Date.parse(row.receivedAt ?? ''); return Number.isFinite(at) && at <= now + 30000 && now - at <= FRESH_ROW_MS; });
       return Response.json({ ok: true, identity: [identity.owner, identity.date, identity.line, identity.journey, identity.reinforcement].join('|'), returnedCount: Math.min(fresh.length, 200), staleCount: rows.length - fresh.length, rows: fresh.slice(0, 200) }, { headers: { 'cache-control': 'no-store' } });
     }
@@ -402,8 +449,8 @@ export class NdovFeedHub extends DurableObject {
     const minInterval = this.continuousMode ? CONTINUOUS_PERSIST_INTERVAL_MS : 5000;
     if (!force && Date.now() - this.lastPersistAt < minInterval) return;
     this.lastPersistAt = Date.now();
-    this.snapshot.latestRows = [...this.rows.values()].slice(-30);
-    this.snapshot.latestEvents = [...this.events.values()].slice(-20);
+    this.snapshot.latestRows = tailValues(this.rows, 30);
+    this.snapshot.latestEvents = tailValues(this.events, 20);
     this.snapshot.latestMutations = flattenCurrentMutations(this.mutations, 30);
     this.snapshot.storedKv78RowCount = this.rows.size;
     this.snapshot.storedMutationIdentityCount = this.mutations.size;
@@ -415,7 +462,7 @@ export class NdovFeedHub extends DurableObject {
     }
     // Small legacy-compatible sample for quick cold-start diagnostics; full
     // rows/mutation state are stored in compressed chunks only at session end.
-    await this.ctx.storage.put({ snapshot: this.snapshot, rows: [...this.rows.entries()].slice(-100), events: [...this.events.entries()].slice(-100), mutations: [...this.mutations.entries()].slice(-50) });
+    await this.ctx.storage.put({ snapshot: this.snapshot, rows: tailEntries(this.rows, 100), events: tailEntries(this.events, 100), mutations: tailEntries(this.mutations, 50) });
   }
 
   async alarm() {
@@ -507,21 +554,31 @@ export class NdovFeedHub extends DurableObject {
         if (frame.more) continue;
         if (multipart.length >= 2) {
           const envelope = decodeUtf8(multipart[0]).replace(/\0/g, '').trim();
-          const payload = concatBytes(...multipart.slice(1));
-          const expanded = await gunzip(payload);
-          const text = decodeUtf8(expanded);
+          const payload = multipart.length === 2 ? multipart[1] : concatBytes(...multipart.slice(1));
+          multipart = [];
+          const isKv78 = stream === 'kv78' && /\/KV8passtimes\//.test(envelope);
+          let kv78Rows = null;
+          let text = null;
+          if (isKv78) {
+            // Regel voor regel uit de uitgepakte chunks; geen volledige uitgepakte buffer, geen
+            // volledige tekst en geen array van alle regels. Rijen worden pas na het volledig
+            // uitpakken toegepast, zodat een corrupt bericht nog steeds niets half toepast.
+            kv78Rows = await parseKv78Chunks(gunzipChunks(payload), envelope);
+          } else {
+            text = decodeUtf8(await gunzip(payload));
+          }
           this.snapshot.messageCount += 1;
           this.snapshot.rawBytes += payload.length;
           this.snapshot.latestMessageAt = new Date().toISOString();
           this.snapshot.envelopeCounts[envelope] = (this.snapshot.envelopeCounts[envelope] || 0) + 1;
-          if (stream === 'kv78' && /\/KV8passtimes\//.test(envelope)) {
-            for (const row of parseKv78Payload(text, envelope)) {
+          if (isKv78) {
+            for (const row of kv78Rows) {
               // Keep every line during this bounded diagnostic run. Filtering to
               // U005/U011/U073/24 hid mutations such as CXX L014 and ARR 26010.
               row.receivedAt = new Date().toISOString();
               const key = `${row.identity}|${row.userStopOrderNumber}|${row.userStopCode}`;
               this.rows.delete(key);
-              this.rows.set(key, row);
+              this.rows.set(key, compactRecord(row));
               if (this.rows.size > KV78_ROW_LIMIT) this.rows.delete(this.rows.keys().next().value);
             }
           } else if (stream === 'bison' && /KV6posinfo/.test(envelope)) {
@@ -546,7 +603,7 @@ export class NdovFeedHub extends DurableObject {
                 punctualityReceivedAt: terminalEvent ? null : hasPunctuality ? receivedAt : (previous.punctualityReceivedAt ?? null),
               };
               this.events.delete(key);
-              this.events.set(key, next);
+              this.events.set(key, compactRecord(next));
             }
             if (Date.now() - (this.lastEventPruneAt ?? 0) > 10000) {
               this.pruneEvents();

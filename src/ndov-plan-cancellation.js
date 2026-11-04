@@ -353,7 +353,7 @@ async function getBisonSnapshot(env) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName("bison");
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison`);
+  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=bison&lite=1`);
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `BISON-status gaf HTTP ${response.status}.`);
   return snapshot;
@@ -383,7 +383,7 @@ async function getKv78Snapshot(env) {
   if (!env?.NDOV_FEEDS) throw new Error("De NDOV_FEEDS-binding ontbreekt.");
   const id = env.NDOV_FEEDS.idFromName("kv78");
   const stub = env.NDOV_FEEDS.get(id);
-  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=kv78`);
+  const response = await stub.fetch(`${ASSET_ORIGIN}/status?stream=kv78&lite=1`);
   const snapshot = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(snapshot?.error ?? `KV78-status gaf HTTP ${response.status}.`);
   return snapshot;

@@ -120,20 +120,36 @@ async function readZmtpFrameWithBuffer(buffered) {
 }
 
 export class BufferedSocketReader {
+  // Chunk-lijst met offset: elke netwerkchunk wordt één keer bewaard en één keer
+  // gekopieerd naar het resultaat. De vorige implementatie voegde bij elke chunk de
+  // hele buffer opnieuw samen en sneed er daarna de rest af (kwadratisch kopiëren).
   constructor(reader) {
     this.reader = reader;
-    this.buffer = new Uint8Array(0);
+    this.chunks = [];
+    this.offset = 0;      // aantal reeds gelezen bytes van chunks[0]
+    this.available = 0;   // totaal ongelezen bytes
   }
   async readExact(length) {
     if (!Number.isInteger(length) || length < 0) throw new Error('Invalid read length');
-    while (this.buffer.length < length) {
+    while (this.available < length) {
       const { value, done } = await this.reader.read();
       if (done) throw new Error('NDOV TCP connection closed while reading a ZMTP frame');
       if (!(value instanceof Uint8Array)) continue;
-      this.buffer = concatBytes(this.buffer, value);
+      if (value.length === 0) continue;
+      this.chunks.push(value);
+      this.available += value.length;
     }
-    const result = this.buffer.slice(0, length);
-    this.buffer = this.buffer.slice(length);
+    const result = new Uint8Array(length);
+    let written = 0;
+    while (written < length) {
+      const head = this.chunks[0];
+      const take = Math.min(head.length - this.offset, length - written);
+      result.set(head.subarray(this.offset, this.offset + take), written);
+      written += take;
+      this.offset += take;
+      if (this.offset === head.length) { this.chunks.shift(); this.offset = 0; }
+    }
+    this.available -= length;
     return result;
   }
   async readFrame() { return readZmtpFrameWithBuffer(this); }

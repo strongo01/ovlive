@@ -29,69 +29,145 @@ function timeDifference(expected, target) {
   return delta;
 }
 
-export function parseKv78Payload(text, envelope = '') {
-  const lines = String(text).replace(/^\uFEFF/, '').split(/\r?\n/);
-  const headerLine = lines.find((line) => /^\\LDataOwnerCode\|/.test(line) || /^\\L\|DataOwnerCode\|/.test(line));
-  if (!headerLine) return [];
-  const header = headerLine.replace(/^\\L/, '').split('|');
-  const rows = [];
-  for (const line of lines) {
-    if (!line || line.startsWith('\\') || line.startsWith('\uFEFF')) continue;
+const KV78_HEADER_RE_A = /^\\LDataOwnerCode\|/;
+const KV78_HEADER_RE_B = /^\\L\|DataOwnerCode\|/;
+
+function kv78Row(header, values, envelope) {
+  const record = {};
+  for (let i = 0; i < header.length; i++) record[header[i]] = clean(values[i]);
+  // JourneyNumber is the KV17 correlation key.
+  // VejoJourneyNumber remains separate vehicle-side metadata.
+  const journeyNumber = record.JourneyNumber;
+  if (!record.DataOwnerCode || !record.OperationDate || !record.LinePlanningNumber || !journeyNumber) return null;
+  const identity = [
+    record.DataOwnerCode,
+    record.OperationDate,
+    record.LocalServiceLevelCode,
+    record.LinePlanningNumber,
+    journeyNumber,
+    record.FortifyOrderNumber ?? '0',
+  ].join('|');
+  const targetDeparture = record.TargetDepartureTime;
+  const expectedDeparture = record.ExpectedDepartureTime;
+  const targetArrival = record.TargetArrivalTime;
+  const expectedArrival = record.ExpectedArrivalTime;
+  return {
+    source: 'KV78Turbo',
+    envelope,
+    identity,
+    dataOwnerCode: record.DataOwnerCode,
+    operationDate: record.OperationDate,
+    localServiceLevelCode: record.LocalServiceLevelCode,
+    linePlanningNumber: record.LinePlanningNumber,
+    journeyNumber,
+    fortifyOrderNumber: record.FortifyOrderNumber ?? '0',
+    userStopOrderNumber: record.UserStopOrderNumber,
+    userStopCode: record.UserStopCode,
+    tripStopStatus: record.TripStopStatus,
+    // Bewaar expliciete rit- en halteannuleringen uit KV78Turbo.
+    vehicleJourneyNumber: record.VejoJourneyNumber ?? null,
+    vehicleJourneyType: record.VehicleJourneyType ?? null,
+    vejoTripStatusType: record.VejoTripStatusType ?? null,
+    cancelledJourney: record.CancelledJourney ?? null,
+    showCancelledJourney: record.ShowCancelledJourney ?? null,
+    showCancelledTrip: record.ShowCancelledTrip ?? null,
+    cancelledCall: record.CancelledCall ?? null,
+    monitored: record.Monitored ?? null,
+    targetDepartureTime: targetDeparture,
+    expectedDepartureTime: expectedDeparture,
+    targetArrivalTime: targetArrival,
+    expectedArrivalTime: expectedArrival,
+    departureDelaySeconds: timeDifference(expectedDeparture, targetDeparture),
+    arrivalDelaySeconds: timeDifference(expectedArrival, targetArrival),
+    lastUpdateTimeStamp: record.LastUpdateTimeStamp,
+    vehicleNumber: record.VehicleNumber,
+    showCancelledStop: record.ShowCancelledStop ?? null,
+    messageType: record.MessageType,
+    messageContent: record.MessageContent,
+  };
+}
+
+/**
+ * Regel-voor-regel KV78-parser met exact de semantiek van de oorspronkelijke
+ * parseKv78Payload: de EERSTE kopregel (\L...) bepaalt de kolommen voor alle
+ * gegevensregels, ook voor gegevensregels die er vóór staan; zonder kopregel is
+ * het resultaat leeg. Regels die met een backslash of BOM beginnen of leeg zijn,
+ * worden overgeslagen.
+ */
+export function createKv78LineParser(envelope, onRow) {
+  let header = null;
+  let pending = [];   // gegevensregels vóór de kopregel (komt in echte data niet voor)
+  const parseLine = (line) => {
     const values = line.split('|');
-    if (values.length < header.length) continue;
-    const record = {};
-    for (let i = 0; i < header.length; i++) record[header[i]] = clean(values[i]);
-    // JourneyNumber is the KV17 correlation key.
-    // VejoJourneyNumber remains separate vehicle-side metadata.
-    const journeyNumber = record.JourneyNumber;
-    if (!record.DataOwnerCode || !record.OperationDate || !record.LinePlanningNumber || !journeyNumber) continue;
-    const identity = [
-      record.DataOwnerCode,
-      record.OperationDate,
-      record.LocalServiceLevelCode,
-      record.LinePlanningNumber,
-      journeyNumber,
-      record.FortifyOrderNumber ?? '0',
-    ].join('|');
-    const targetDeparture = record.TargetDepartureTime;
-    const expectedDeparture = record.ExpectedDepartureTime;
-    const targetArrival = record.TargetArrivalTime;
-    const expectedArrival = record.ExpectedArrivalTime;
-    rows.push({
-      source: 'KV78Turbo',
-      envelope,
-      identity,
-      dataOwnerCode: record.DataOwnerCode,
-      operationDate: record.OperationDate,
-      localServiceLevelCode: record.LocalServiceLevelCode,
-      linePlanningNumber: record.LinePlanningNumber,
-      journeyNumber,
-      fortifyOrderNumber: record.FortifyOrderNumber ?? '0',
-      userStopOrderNumber: record.UserStopOrderNumber,
-      userStopCode: record.UserStopCode,
-      tripStopStatus: record.TripStopStatus,
-      // Bewaar expliciete rit- en halteannuleringen uit KV78Turbo.
-      vehicleJourneyNumber: record.VejoJourneyNumber ?? null,
-      vehicleJourneyType: record.VehicleJourneyType ?? null,
-      vejoTripStatusType: record.VejoTripStatusType ?? null,
-      cancelledJourney: record.CancelledJourney ?? null,
-      showCancelledJourney: record.ShowCancelledJourney ?? null,
-      showCancelledTrip: record.ShowCancelledTrip ?? null,
-      cancelledCall: record.CancelledCall ?? null,
-      monitored: record.Monitored ?? null,
-      targetDepartureTime: targetDeparture,
-      expectedDepartureTime: expectedDeparture,
-      targetArrivalTime: targetArrival,
-      expectedArrivalTime: expectedArrival,
-      departureDelaySeconds: timeDifference(expectedDeparture, targetDeparture),
-      arrivalDelaySeconds: timeDifference(expectedArrival, targetArrival),
-      lastUpdateTimeStamp: record.LastUpdateTimeStamp,
-      vehicleNumber: record.VehicleNumber,
-      showCancelledStop: record.ShowCancelledStop ?? null,
-      messageType: record.MessageType,
-      messageContent: record.MessageContent,
-    });
+    if (values.length < header.length) return;
+    const row = kv78Row(header, values, envelope);
+    if (row) onRow(row);
+  };
+  return {
+    push(line) {
+      if (header === null && (KV78_HEADER_RE_A.test(line) || KV78_HEADER_RE_B.test(line))) {
+        header = line.replace(/^\\L/, '').split('|');
+        const early = pending; pending = [];
+        for (const l of early) parseLine(l);
+        return;
+      }
+      if (!line || line.startsWith('\\') || line.startsWith('\uFEFF')) return;
+      if (header === null) pending.push(line); else parseLine(line);
+    },
+    finish() { pending = []; return header !== null; },
+  };
+}
+
+export function parseKv78Payload(text, envelope = '') {
+  const rows = [];
+  const parser = createKv78LineParser(envelope, (row) => rows.push(row));
+  for (const line of String(text).replace(/^\uFEFF/, '').split(/\r?\n/)) parser.push(line);
+  parser.finish();
+  return rows;
+}
+
+function joinBytes(parts) {
+  let n = 0; for (const p of parts) n += p.length;
+  const out = new Uint8Array(n); let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+/**
+ * Parseer KV78 uit een (async) iterable van bytechunks, zonder de volledige tekst
+ * of een array van alle regels op te bouwen. Elke regel wordt afzonderlijk gedecodeerd,
+ * zodat velden die in een rij worden bewaard alleen hun eigen (korte) regel vasthouden
+ * en niet het hele bericht. Resultaat is gelijk aan parseKv78Payload(decodeUtf8(alle bytes)).
+ */
+export async function parseKv78Chunks(chunks, envelope = '') {
+  const rows = [];
+  const parser = createKv78LineParser(envelope, (row) => rows.push(row));
+  const lineDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
+  let carry = [];
+  let first = true;
+  const emit = (bytes) => {
+    let end = bytes.length;
+    if (end > 0 && bytes[end - 1] === 13) end -= 1;   // \r\n
+    let line = lineDecoder.decode(bytes.subarray(0, end));
+    if (first) {
+      first = false;
+      // oorspronkelijk: TextDecoder strip één BOM, daarna replace(/^\uFEFF/) nog één
+      for (let i = 0; i < 2 && line.charCodeAt(0) === 0xfeff; i += 1) line = line.slice(1);
+    }
+    parser.push(line);
+  };
+  for await (const chunk of chunks) {
+    let pos = 0;
+    while (true) {
+      const nl = chunk.indexOf(10, pos);
+      if (nl < 0) { if (pos < chunk.length) carry.push(chunk.subarray(pos)); break; }
+      const piece = chunk.subarray(pos, nl);
+      if (carry.length) { carry.push(piece); emit(joinBytes(carry)); carry = []; } else emit(piece);
+      pos = nl + 1;
+    }
   }
+  if (carry.length) emit(joinBytes(carry));
+  parser.finish();
   return rows;
 }
 
