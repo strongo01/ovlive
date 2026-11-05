@@ -38,7 +38,7 @@ const gc = () => { global.gc(); global.gc(); };
 const live = () => { gc(); const m = process.memoryUsage(); return +((m.heapUsed + m.arrayBuffers) / 1048576).toFixed(1); };
 const base = live();
 const run = async (stream, gen) => { globalThis.__socketFactory = () => makeSocket(gen()); await hub.collect(stream, 600); };
-const t0 = process.hrtime.bigint();
+const cpu0 = process.cpuUsage(); const t0 = process.hrtime.bigint();
 await run('kv78', function* () { for (let m = 0; m < P.kv78Messages; m++) yield message('/GOVI/KV8passtimes/ARR', kv78(P.kv78Rows, m + 1)); });
 const afterKv78 = live();
 await run('bison', function* () { for (let m = 0; m < P.bisonMessages; m++) yield message(m % 10 === 0 ? '/ARR/KV17cvlinfo' : '/ARR/KV6posinfo', m % 10 === 0 ? kv17(40, m + 1) : kv6(P.bisonEvents, m + 1)); });
@@ -47,4 +47,4 @@ const afterBoth = live();
 const digest = (map) => { const h = crypto.createHash('sha256'); for (const [k, v] of [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) h.update(k + '=' + JSON.stringify(v, Object.keys(v).sort()) + '\n'); return h.digest('hex').slice(0, 16); };
 const k = hub.stateFor('kv78'), b = hub.stateFor('bison');
 console.log(JSON.stringify({ rows: k.rows.size, events: b.events.size, mutations: b.mutations.size, digestRows: digest(k.rows), digestEvents: digest(b.events), digestMutations: digest(b.mutations),
-  kv78LiveMB: +(afterKv78 - base).toFixed(1), bothLiveMB: +(afterBoth - base).toFixed(1), collectMs: Math.round(ms), kv78State: k.snapshot.state, bisonState: b.snapshot.state, kv78Err: k.snapshot.error }));
+  kv78LiveMB: +(afterKv78 - base).toFixed(1), bothLiveMB: +(afterBoth - base).toFixed(1), collectMs: Math.round(ms), cpuMs: Math.round((process.cpuUsage(cpu0).user + process.cpuUsage(cpu0).system) / 1000), kv78State: k.snapshot.state, bisonState: b.snapshot.state, kv78Err: k.snapshot.error }));

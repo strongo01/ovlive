@@ -1,0 +1,28 @@
+name = "ovlive-ndov-memory-soak-patched-cpu"
+main = "src/ndov-memory-soak-worker.js"
+compatibility_date = "2026-10-01"
+upload_source_maps = true
+workers_dev = true
+
+[vars]
+NDOV_CPU_DIAGNOSTICS = "true"
+NDOV_COMPACT_RECORDS = "true"
+
+# OPTIONEEL: verhoogt de CPU-limiet per aanroep van 30 s naar 5 min. Dit kan alleen op een
+# betaald Workers-abonnement; op het gratis abonnement weigert 'wrangler deploy' dit.
+# Doel: nagaan of de 'exceeded its CPU time limit'-resets hierdoor verdwijnen.
+[limits]
+cpu_ms = 300000
+
+# Bewust een eigen Durable Object-namespace: geen productiegegevens of -isolate delen.
+[[durable_objects.bindings]]
+name = "NDOV_FEEDS"
+class_name = "NdovFeedHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NdovFeedHub"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
