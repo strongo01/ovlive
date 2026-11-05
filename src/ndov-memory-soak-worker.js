@@ -68,4 +68,14 @@ export default {
     const results = await Promise.all(STREAMS.map((s) => callHub(env, action, s)));
     return json({ ok: results.every((r) => r.status < 400), variant, action, streams: results.map((r, i) => ({ stream: STREAMS[i], httpStatus: r.status, body: r.body })) });
   },
+
+  // Productie krijgt regelmatig verzoeken (cron + gebruikersverkeer). Hypothese: de CPU-teller van een
+  // Durable Object wordt bij elk nieuw binnenkomend verzoek opnieuw gestart. Zonder verkeer loopt een
+  // lange verzamelsessie in de soak tegen de CPU-grens aan. Deze lichte, alleen-lezen statusaanroep
+  // elke minuut maakt de soak daarin gelijk aan productie. Hij start of stopt de collector niet.
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(Promise.all(STREAMS.map((s) => callHub(env, "/status", s))).catch((error) => {
+      console.error("[NDOV_SOAK_PING] Statusaanroep mislukt.", error instanceof Error ? error.message : String(error));
+    }));
+  },
 };

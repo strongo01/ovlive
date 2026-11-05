@@ -18,6 +18,10 @@ class_name = "NdovFeedHub"
 tag = "v1"
 new_sqlite_classes = ["NdovFeedHub"]
 
+# Elke minuut een lichte, alleen-lezen statusaanroep (zie scheduled() in de Worker).
+[triggers]
+crons = ["* * * * *"]
+
 [observability]
 enabled = true
 head_sampling_rate = 1
