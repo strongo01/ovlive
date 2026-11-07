@@ -37,6 +37,14 @@ function normalizeWithGeneratedDecoder(bytes) {
     startTime: entity.vehicle?.trip?.startTime,
     directionId: entity.vehicle?.trip?.directionId,
     stopId: entity.vehicle?.stopId,
+    currentStopSequence: numeric(entity.vehicle?.currentStopSequence),
+    currentStatus: numeric(entity.vehicle?.currentStopSequence) == null
+      ? undefined
+      : ({
+          0: "INCOMING_AT",
+          1: "STOPPED_AT",
+          2: "IN_TRANSIT_TO"
+        }[numeric(entity.vehicle?.currentStatus) ?? 2] ?? "IN_TRANSIT_TO"),
     latitude: entity.vehicle?.position?.latitude,
     longitude: entity.vehicle?.position?.longitude,
     timestamp: numeric(entity.vehicle?.timestamp)
@@ -68,6 +76,7 @@ const feedObject = {
         position: { latitude: 52.09303283691406, longitude: 5.100654602050781, bearing: 180 },
         timestamp: positionTimestamp,
         stopId: "3923827",
+        currentStopSequence: 25,
         currentStatus: 2,
         occupancyStatus: 1
       }
@@ -77,12 +86,25 @@ const feedObject = {
       vehicle: {
         position: { latitude: 52.1, longitude: 5.1 },
         timestamp: positionTimestamp - 1,
-        stopId: "3920000"
+        stopId: "3920000",
+        currentStopSequence: 6,
+        currentStatus: 1
       }
     },
     {
       id: "entity-with-trip-only",
-      vehicle: { trip: { tripId: "trip-only" } }
+      vehicle: {
+        trip: { tripId: "trip-only" },
+        currentStopSequence: 3,
+        currentStatus: 0
+      }
+    },
+    {
+      id: "vehicle-default-status",
+      vehicle: {
+        trip: { tripId: "default-status" },
+        currentStopSequence: 4
+      }
     },
     {
       id: "empty-vehicle-position",
@@ -99,14 +121,14 @@ const feedObject = {
   ]
 };
 const bytes = rt.FeedMessage.encode(feedObject).finish();
-const fast = decodeOpenovVehiclePositions(new Uint8Array(bytes));
+const fast = decodeOpenovVehiclePositions(new Uint8Array(bytes), { includeStopStatus: true });
 const generated = normalizeWithGeneratedDecoder(bytes);
 
 // Exact parity against the generated GTFS-Realtime decoder: same header
 // timestamp, same retained entities, and same identity / coordinate fields.
 assert.deepEqual(fast, generated);
 assert.equal(fast.feedTimestamp, feedTimestamp);
-assert.equal(fast.entities.length, 3);
+assert.equal(fast.entities.length, 4);
 assert.deepEqual(fast.entities[0], {
   entityId: "vehicle-28-a",
   vehicleId: "UOV-2801",
@@ -116,11 +138,37 @@ assert.deepEqual(fast.entities[0], {
   startTime: "19:03:00",
   directionId: 1,
   stopId: "3923827",
+  currentStopSequence: 25,
+  currentStatus: "IN_TRANSIT_TO",
   latitude: 52.09303283691406,
   longitude: 5.100654602050781,
   timestamp: positionTimestamp
 });
 console.log("PASS: selective decoder matches GTFS-Realtime decoder for exact vehicle identity and coordinates");
+assert.equal(fast.entities[0].currentStopSequence, 25);
+assert.equal(fast.entities[0].currentStatus, "IN_TRANSIT_TO");
+assert.equal(fast.entities[1].currentStopSequence, 6);
+assert.equal(fast.entities[1].currentStatus, "STOPPED_AT");
+assert.equal(fast.entities[2].currentStopSequence, 3);
+assert.equal(fast.entities[2].currentStatus, "INCOMING_AT");
+assert.equal(fast.entities[3].currentStopSequence, 4);
+assert.equal(fast.entities[3].currentStatus, "IN_TRANSIT_TO");
+console.log("PASS: all current_status values and current_stop_sequence are decoded; omitted status defaults to IN_TRANSIT_TO");
+
+// Zonder includeStopStatus (de kaart en ongefilterde lijsten) blijft de uitvoer exact de lichte oorspronkelijke vorm:
+// de velden ontbreken en alle andere velden zijn gelijk aan de volledige decodering.
+const light = decodeOpenovVehiclePositions(new Uint8Array(bytes));
+assert.equal(light.entities.length, fast.entities.length);
+for (let i = 0; i < light.entities.length; i += 1) {
+  assert.equal("currentStopSequence" in light.entities[i], false);
+  assert.equal("currentStatus" in light.entities[i], false);
+  const { currentStopSequence, currentStatus, ...rest } = fast.entities[i];
+  assert.deepEqual(light.entities[i], rest);
+}
+const lightFiltered = decodeOpenovVehiclePositions(new Uint8Array(bytes), { tripIds: new Set(["391215411"]) });
+assert.equal("currentStopSequence" in lightFiltered.entities[0], false);
+console.log("PASS: without includeStopStatus the stop fields are absent and every other field is unchanged (map / unfiltered lists)");
+
 console.log("PASS: non-vehicle entities and empty VehiclePosition messages are skipped");
 console.log("PASS: feed timestamp and per-vehicle timestamp are preserved independently");
 
@@ -128,16 +176,17 @@ console.log("PASS: feed timestamp and per-vehicle timestamp are preserved indepe
 // route/trip positions, which avoids allocating thousands of unrelated objects.
 const filtered = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
   tripIds: new Set(["391215411"]),
-  routeIds: new Set(["159450"])
+  routeIds: new Set(["159450"]),
+  includeStopStatus: true
 });
-assert.equal(filtered.sourceEntityCount, 4);
+assert.equal(filtered.sourceEntityCount, 5);
 assert.deepEqual(filtered.entities, [fast.entities[0]]);
 
 const wrongRoute = decodeOpenovVehiclePositions(new Uint8Array(bytes), {
   tripIds: new Set(["391215411"]),
   routeIds: new Set(["different-route"])
 });
-assert.equal(wrongRoute.sourceEntityCount, 4);
+assert.equal(wrongRoute.sourceEntityCount, 5);
 assert.deepEqual(wrongRoute.entities, []);
 console.log("PASS: targeted decoder skips unrelated vehicle objects and keeps exact route/trip matching");
 

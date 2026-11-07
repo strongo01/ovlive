@@ -1545,7 +1545,12 @@ async function fetchOpenovFeedUncached(
     try {
       // Selective decoding avoids constructing unrelated vehicle-position objects.
       // Bounded samples also stop scanning the national feed after a hard limit.
-      const decoded = decodeOpenovVehiclePositions(bytes, boundedDecoderOptions);
+      // Stop-voortgang (currentStopSequence/currentStatus) alleen voor aanvragen die op rit/route filteren;
+      // de kaart en ongefilterde lijsten houden hun lichte, oorspronkelijke vorm (CPU-limiet gratis abonnement).
+      const decoderOptions = normalizedVehicleFilters
+        ? { ...(boundedDecoderOptions ?? {}), includeStopStatus: true }
+        : boundedDecoderOptions;
+      const decoded = decodeOpenovVehiclePositions(bytes, decoderOptions);
       feedTimestamp = decoded.feedTimestamp;
       sourceEntityCount = decoded.sourceEntityCount;
       entities = decoded.entities;
