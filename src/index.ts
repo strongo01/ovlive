@@ -1088,15 +1088,6 @@ function normalizeVehiclePositions(feed: any): any[] {
     startTime: entity.vehicle?.trip?.startTime,
     directionId: entity.vehicle?.trip?.directionId,
     stopId: entity.vehicle?.stopId,
-    currentStopSequence: toNumber(entity.vehicle?.currentStopSequence),
-    currentStatus: toNumber(entity.vehicle?.currentStopSequence) == null
-      ? undefined
-      : ({
-          0: "INCOMING_AT",
-          1: "STOPPED_AT",
-          2: "IN_TRANSIT_TO"
-        } as Record<number, string>)[toNumber(entity.vehicle?.currentStatus) ?? 2]
-          ?? "IN_TRANSIT_TO",
     latitude: entity.vehicle?.position?.latitude,
     longitude: entity.vehicle?.position?.longitude,
     timestamp: toNumber(entity.vehicle?.timestamp)
