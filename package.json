@@ -32,7 +32,8 @@
     "ndov:openov-route-metadata-selftest": "python3 scripts/openov-route-metadata-selftest.py",
     "openov:build-trip-shapes": "python3 scripts/build-openov-trip-shapes.py",
     "live-map:selftest": "node scripts/live-fleet-map-selftest.mjs && node scripts/openov-trip-shape-id-selftest.mjs && python3 scripts/openov-trip-shapes-selftest.py",
-    "transfer-assistant:selftest": "node scripts/realtime-transfer-assistant-selftest.mjs"
+    "transfer-assistant:selftest": "node scripts/realtime-transfer-assistant-selftest.mjs",
+    "production:ui-selftest": "node scripts/production-ui-selftest.mjs"
   },
   "dependencies": {
     "gtfs-realtime-bindings": "^1.1.1"
