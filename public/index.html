@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#f97316">
+  <meta name="description" content="Plan je reis met trein, bus, tram en metro. Bekijk actuele vertrektijden, voertuigen en realtime reisinformatie in OVLive.">
+  <meta name="color-scheme" content="dark">
   <title>OVLive — realtime reisplanner</title>
   <script src="/device-rate-limit.js"></script>
   <style>
@@ -301,14 +303,289 @@
     .transfer-assistant-basis{display:inline-block;border:1px solid var(--line);border-radius:7px;padding:2px 6px;font-size:10px;color:var(--muted);font-weight:700}
     @media(max-width:600px){.realtime-transfer-assistant{padding:10px}.transfer-advice-facts{grid-template-columns:1fr 1fr}}
 
+
+
+    /* OVLIVE PRODUCT UX FOUNDATION — November 2026 */
+    :root {
+      color-scheme: dark;
+      --bg: #0b1118;
+      --panel: #121c27;
+      --panel-raised: #172330;
+      --line: #29394a;
+      --muted: #a7b5c5;
+      --text: #f4f7fb;
+      --accent: #fb923c;
+      --accent-strong: #f97316;
+      --green: #86efac;
+      --red: #fca5a5;
+      --surface-shadow: 0 14px 40px rgba(0,0,0,.18);
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 92px; }
+    body {
+      min-height: 100vh;
+      background:
+        radial-gradient(ellipse at 50% -18%, rgba(249,115,22,.13), transparent 42rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    main {
+      width: min(1160px, 100%);
+      max-width: none;
+      margin: 0 auto;
+      padding: 30px 24px 72px;
+    }
+    .skip-link {
+      position: absolute;
+      z-index: 1000;
+      top: 8px;
+      left: 8px;
+      transform: translateY(-160%);
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #241405;
+      font-weight: 800;
+    }
+    .skip-link:focus { transform: translateY(0); }
+    .site-header { padding: 8px 2px 18px; }
+    .brand { gap: 14px; margin: 0 0 9px; }
+    .logo {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      padding: 0;
+      border-radius: 15px;
+      background: linear-gradient(145deg, #fdba74, var(--accent-strong));
+      color: #251507;
+      box-shadow: 0 8px 24px rgba(249,115,22,.2);
+      letter-spacing: -.06em;
+      font-size: 20px;
+    }
+    .brand-copy h1 { font-size: clamp(30px, 4vw, 38px); letter-spacing: -.045em; }
+    .brand-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .055em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+    .page-intro {
+      max-width: 760px;
+      margin: 0;
+      color: #c2ccd8;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+    .primary-nav {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      display: flex;
+      gap: 7px;
+      overflow-x: auto;
+      margin: 0 -4px 22px;
+      padding: 9px 4px;
+      border-top: 1px solid rgba(167,181,197,.1);
+      border-bottom: 1px solid rgba(167,181,197,.13);
+      background: rgba(11,17,24,.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      scrollbar-width: thin;
+    }
+    .primary-nav-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      flex: 0 0 auto;
+      width: auto;
+      min-height: 40px;
+      padding: 8px 13px;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      color: #c2ccd8;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 750;
+      white-space: nowrap;
+      transition: color .16s ease, background .16s ease, border-color .16s ease;
+    }
+    .primary-nav-link:hover,
+    .primary-nav-link:focus-visible {
+      color: var(--text);
+      background: rgba(255,255,255,.055);
+      border-color: var(--line);
+    }
+    .primary-nav-link[aria-current="page"] {
+      color: #fed7aa;
+      background: rgba(251,146,60,.12);
+      border-color: rgba(251,146,60,.3);
+    }
+    .panel {
+      margin: 18px 0;
+      padding: clamp(17px, 2.5vw, 25px);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: linear-gradient(155deg, rgba(23,35,48,.98), rgba(17,27,38,.98));
+      box-shadow: var(--surface-shadow);
+      scroll-margin-top: 88px;
+    }
+    .panel h2 {
+      margin: 0 0 8px;
+      font-size: clamp(19px, 2.2vw, 23px);
+      line-height: 1.25;
+      letter-spacing: -.025em;
+    }
+    .panel > p.muted,
+    .planner-help {
+      max-width: 820px;
+      line-height: 1.55;
+    }
+    #plannerPanel {
+      border-color: rgba(251,146,60,.35);
+      background:
+        radial-gradient(ellipse at 95% 0%, rgba(251,146,60,.075), transparent 28rem),
+        linear-gradient(155deg, #172330, #111b26);
+    }
+    input, select, textarea, button {
+      min-height: 44px;
+      border-radius: 11px;
+      font-size: 14px;
+    }
+    input, select, textarea {
+      border-color: #35485c;
+      background: #0c151f;
+    }
+    input::placeholder { color: #718196; }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(251,146,60,.14);
+    }
+    button {
+      border-radius: 11px;
+      background: linear-gradient(135deg, #fdba74, var(--accent));
+      color: #251507;
+      font-weight: 800;
+      box-shadow: 0 5px 14px rgba(249,115,22,.1);
+      transition: filter .15s ease, transform .15s ease, box-shadow .15s ease;
+    }
+    button:not(:disabled):hover {
+      filter: brightness(1.06);
+      box-shadow: 0 7px 18px rgba(249,115,22,.16);
+    }
+    button:not(:disabled):active { transform: translateY(1px); }
+    button.secondary {
+      border: 1px solid #3a4b5d;
+      background: #202d3a;
+      color: #e5edf6;
+      box-shadow: none;
+    }
+    button.secondary:hover { background: #29394a; }
+    button:focus-visible, a:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    button:disabled { filter: grayscale(.25); }
+    label { color: #c0cbd7; font-weight: 650; }
+    .muted { color: var(--muted); line-height: 1.5; }
+    .mode-chip {
+      border-color: #394b5e;
+      background: rgba(12,21,31,.72);
+    }
+    .mode-chip:has(input:checked) {
+      border-color: rgba(251,146,60,.7);
+      background: rgba(251,146,60,.12);
+    }
+    .search-options {
+      border-color: #35485c;
+      background: rgba(9,16,24,.35);
+    }
+    .search-options > summary { padding: 13px 15px; }
+    .search-options-grid { padding: 15px; gap: 17px; }
+    .journey-card {
+      border-color: #304256;
+      border-radius: 17px;
+      background: linear-gradient(145deg, rgba(30,44,59,.82), rgba(16,26,37,.92));
+    }
+    .journey-card:hover { border-color: #52677e; }
+    .journey-card[open] { border-color: rgba(251,146,60,.55); }
+    .journey-card-summary { padding: 18px; }
+    .journey-big-time { font-size: clamp(25px, 4vw, 32px); }
+    .journey-time-label { font-size: 10px; letter-spacing: .11em; }
+    .journey-line-tag { border-color: #3b4d60; background: #202d3a; }
+    .journey-detail-body { padding: 7px 17px 17px; }
+    .live-map { height: clamp(280px, 42vw, 430px); }
+    .live-fleet-status, .live-follow-status {
+      border: 1px solid var(--line);
+      background: rgba(8,15,22,.55);
+    }
+    .stop-time-card, .line-search-card, .live-follow {
+      border-color: #304256;
+      background: rgba(9,16,24,.35);
+    }
+    .stop-time-card { padding: 14px; }
+    .stop-time-time { color: var(--text); }
+    .results-heading { margin-top: 22px; }
+    .alert-card { border-color: rgba(251,146,60,.32); background: rgba(251,146,60,.07); }
+    .diagnostic-panel { display: none !important; }
+    body.debug-enabled .diagnostic-panel { display: block !important; }
+    .source {
+      display: block;
+      margin: 30px 2px 0;
+      padding-top: 18px;
+      border-top: 1px solid rgba(167,181,197,.16);
+      line-height: 1.7;
+    }
+    .source a { color: #fdba74; }
+    .source a:hover { color: #fff; }
+    @media (max-width: 700px) {
+      main { padding: 17px 12px 45px; }
+      .site-header { padding: 3px 2px 14px; }
+      .brand { margin-bottom: 7px; }
+      .logo { width: 43px; height: 43px; border-radius: 13px; }
+      .page-intro { font-size: 13px; }
+      .primary-nav { margin-bottom: 14px; gap: 5px; }
+      .primary-nav-link { min-height: 38px; padding: 7px 10px; font-size: 12px; }
+      .panel { border-radius: 16px; padding: 15px; margin: 13px 0; }
+      .journey-card-summary { padding: 14px; }
+      .journey-detail-body { padding: 5px 13px 13px; }
+      .live-map { height: 280px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    }
+
   </style>
 </head>
 <body>
 <main>
-  <div class="brand"><div class="logo">OV</div><div><h1>OVLive</h1><div class="muted">Open data · reisadvies · realtime diagnose</div></div></div>
-  <p class="page-intro">Plan je reis in een paar stappen. Bekijk vertrek, aankomst en overstappen in één oogopslag; tik op een reis voor alle haltes en realtime-informatie.</p>
+  <a class="skip-link" href="#plannerPanel">Direct naar de reisplanner</a>
+  <header class="site-header">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">OV</div>
+      <div class="brand-copy">
+        <h1>OVLive</h1>
+        <div class="brand-subtitle">Reisplanner voor Nederland</div>
+      </div>
+    </div>
+    <p class="page-intro">Plan je reis. Volg voertuigen. Bekijk actuele vertrektijden.</p>
+  </header>
+  <nav class="primary-nav" aria-label="Hoofdnavigatie">
+    <a class="primary-nav-link" href="#plannerPanel" aria-current="page"><span aria-hidden="true">↗</span> Reisplanner</a>
+    <a class="primary-nav-link" href="#liveFleetMapPanel"><span aria-hidden="true">⌖</span> Live kaart</a>
+    <a class="primary-nav-link" href="#stopTimesPanel"><span aria-hidden="true">◷</span> Haltevertrektijden</a>
+    <a class="primary-nav-link" href="#lineSearchPanel"><span aria-hidden="true">⌕</span> Lijn zoeken</a>
+  </nav>
 
-  <section class="panel">
+  <section class="panel" id="plannerPanel">
     <h2>Reis plannen</h2>
     <p class="muted planner-help">Vul vertrek en bestemming in. Zoek en selecteer een plek als er meerdere resultaten zijn. Routegegevens komen van Transitous; locatiezoeking gebruikt <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> en zo nodig <a href="https://www.geoapify.com/" target="_blank" rel="noopener noreferrer">Geoapify</a>.</p>
     <div class="grid location-grid">
@@ -463,7 +740,7 @@
     <pre id="ndovLocalDetails"></pre>
   </section>
 
-  <section class="panel">
+  <section class="panel diagnostic-panel">
     <h2>Realtimebron controleren</h2>
     <p class="muted">Controleert of OpenOV GTFS-RT-feeds opgehaald en gedecodeerd kunnen worden en toont de timestamp uit de feed. Dit is geen bewijs van volledige landelijke dekking.</p>
     <button id="healthBtn">Test OpenOV-feeds</button>
@@ -471,14 +748,14 @@
     <div id="healthDetails"></div>
   </section>
 
-  <section class="panel">
+  <section class="panel diagnostic-panel">
     <h2>Actuele meldingen / vertragingen</h2>
     <div class="grid"><div><label for="feedKind">Feed</label><select id="feedKind"><option value="tripUpdates">Ritupdates / vertragingen / annuleringen</option><option value="alerts">Storingsmeldingen</option><option value="trainUpdates">Treinupdates</option><option value="vehiclePositions">Voertuigposities</option></select></div><div><label for="feedLimit">Maximaal aantal items</label><select id="feedLimit"><option>100</option><option selected>300</option><option>500</option><option>1000</option></select></div></div>
     <button id="feedBtn">Laad realtime-data</button>
     <div id="feedStatus" aria-live="polite"></div><div id="feedRows"></div>
   </section>
 
-      <section class="panel" id="ovapiTransitousMatchPanel">
+      <section class="panel diagnostic-panel" id="ovapiTransitousMatchPanel">
     <h2>Transitous ↔ OVAPI koppelingstest (experimenteel)</h2>
     <p class="muted">Deze diagnose vergelijkt de laatste routeplanneruitvoer met OVAPI op basis van de lijn, lokale datum, geplande tijden en een unieke OVAPI-rit op beide haltegebieden. Dit is een kandidaatmatch, geen gedeelde officiële rit-ID. De uitkomst wordt niet teruggeschreven in de reisplanner.</p>
     <div class="grid">
@@ -494,7 +771,7 @@
     <div id="ovapiTransitousMatchResults"></div>
   </section>
 
-<section class="panel" id="ovapiTestPanel">
+<section class="panel diagnostic-panel" id="ovapiTestPanel">
     <h2>OVAPI-realtime vergelijken (parallelle test)</h2>
     <p class="muted">Deze test gebruikt KV78turbo/OVAPI naast de bestaande OpenOV-realtimeverwerking. De testgegevens worden niet toegevoegd aan of gebruikt om de reisresultaten te wijzigen.</p>
     <div class="grid">
@@ -6077,4 +6354,13 @@ function normalizeTransitousStopId(value) {
 </script>
 
 <script src="/live-fleet-map.js" defer></script>
+<script id="OVLIVE_DIAGNOSTICS_ACCESS">
+  (() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("debug") === "1") {
+      document.body.classList.add("debug-enabled");
+      console.info("[OVLive] Technische diagnosepanelen zijn ingeschakeld via ?debug=1.");
+    }
+  })();
+  </script>
 </body></html>
