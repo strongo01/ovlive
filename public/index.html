@@ -422,7 +422,7 @@
       background: rgba(255,255,255,.055);
       border-color: var(--line);
     }
-    .primary-nav-link[aria-current="page"] {
+    .primary-nav-link[aria-current="location"] {
       color: #fed7aa;
       background: rgba(251,146,60,.12);
       border-color: rgba(251,146,60,.3);
@@ -579,7 +579,7 @@
     <p class="page-intro">Plan je reis. Volg voertuigen. Bekijk actuele vertrektijden.</p>
   </header>
   <nav class="primary-nav" aria-label="Hoofdnavigatie">
-    <a class="primary-nav-link" href="#plannerPanel" aria-current="page"><span aria-hidden="true">↗</span> Reisplanner</a>
+    <a class="primary-nav-link" href="#plannerPanel" aria-current="location"><span aria-hidden="true">↗</span> Reisplanner</a>
     <a class="primary-nav-link" href="#liveFleetMapPanel"><span aria-hidden="true">⌖</span> Live kaart</a>
     <a class="primary-nav-link" href="#stopTimesPanel"><span aria-hidden="true">◷</span> Haltevertrektijden</a>
     <a class="primary-nav-link" href="#lineSearchPanel"><span aria-hidden="true">⌕</span> Lijn zoeken</a>
@@ -6360,6 +6360,35 @@ function normalizeTransitousStopId(value) {
     if (params.get("debug") === "1") {
       document.body.classList.add("debug-enabled");
       console.info("[OVLive] Technische diagnosepanelen zijn ingeschakeld via ?debug=1.");
+    }
+
+    const links = Array.from(document.querySelectorAll(".primary-nav-link"));
+    const sections = links
+      .map(link => document.getElementById(link.hash.slice(1)))
+      .filter(Boolean);
+
+    function setCurrentSection(id) {
+      links.forEach(link => {
+        if (link.hash === "#" + id) {
+          link.setAttribute("aria-current", "location");
+        } else {
+          link.removeAttribute("aria-current");
+        }
+      });
+    }
+
+    links.forEach(link => {
+      link.addEventListener("click", () => setCurrentSection(link.hash.slice(1)));
+    });
+
+    if ("IntersectionObserver" in window) {
+      const observer = new IntersectionObserver(entries => {
+        const visible = entries
+          .filter(entry => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (visible) setCurrentSection(visible.target.id);
+      }, { rootMargin: "-18% 0px -68% 0px", threshold: [0, 0.15, 0.4] });
+      sections.forEach(section => observer.observe(section));
     }
   })();
   </script>
