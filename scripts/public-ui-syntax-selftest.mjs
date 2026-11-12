@@ -74,7 +74,7 @@ assert.ok(workerSource.includes("function openovRealtimeLegFeedFamily(") &&
   "OpenOV realtime feed selection must distinguish rail from bus/tram modes");
 assert.ok(workerSource.includes('needsTripUpdates\n      ? safeOpenovFeed(OPENOV.tripUpdates, "tripUpdates", tripUpdateFilters)') &&
   workerSource.includes('needsTrainUpdates\n      ? safeOpenovFeed(OPENOV.trainUpdates, "trainUpdates", trainUpdateFilters)') &&
-  workerSource.includes('needsTripUpdates && includeVehiclePositions\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")'),
+  workerSource.includes('needsTripUpdates && includeVehiclePositions\n      ? safeOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions", vehiclePositionFilters)'),
   "refresh must skip irrelevant feeds and target trip updates to itinerary route/service-date identities");
 assert.ok(workerSource.includes('status: "not_requested"') &&
   workerSource.includes('return "unknown"'),
@@ -918,7 +918,9 @@ assert.ok(workerSource.includes('const booleanParams = ["arriveBy", "fetchStop",
   "the Worker must validate direction as EARLIER/LATER and safely forward time and paging parameters");
 assert.ok(workerSource.includes('url.pathname === "/api/line-search"') &&
   workerSource.includes('http://v0.ovapi.nl/line/') &&
-  workerSource.includes('getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions")') &&
+  workerSource.includes('getOpenovFeed(OPENOV.vehiclePositions, "vehiclePositions", {') &&
+  workerSource.includes("maxResults: 450") &&
+  workerSource.includes("maxScannedEntities: 1000") &&
   workerSource.includes('TRANSITOUS + "/trip"'),
   "the standalone line-search API must combine public line metadata with current vehicle/trip identities");
 assert.ok(workerSource.includes('const routeId = String(entity?.routeId ?? "").trim();') &&
@@ -1259,7 +1261,7 @@ const lineSearchSource = workerSource.slice(lineSearchStart, lineSearchEnd);
 assert.ok(lineSearchStart >= 0 && lineSearchEnd > lineSearchStart,
   "the public line-search API handler must remain inspectable");
 assert.ok(!lineSearchSource.includes(".slice(0, 24)") &&
-  lineSearchSource.includes("const MAX_OVAPI_LINE_SEARCH_ROUTES = 160;"),
+  lineSearchSource.includes("const MAX_OVAPI_LINE_SEARCH_ROUTES = 40;"),
   "exact public-line lookup must not stop after the first 24 route variants");
 assert.ok(lineSearchSource.includes("const OVAPI_LINE_SEARCH_BATCH_SIZE = 20;") &&
   lineSearchSource.includes("const OVAPI_LINE_SEARCH_BATCH_CONCURRENCY = 3;") &&

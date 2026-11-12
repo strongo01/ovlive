@@ -1,0 +1,58 @@
+# Geïsoleerde OVLive CPU-staging Worker.
+# Geen productie-Durable Objects, rate-limiters, services of cronjobs.
+
+name = "ovlive-realtime-cpu-staging"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[vars]
+APP_NAME = "OVLive CPU Staging"
+APP_VERSION = "0.3.0-cpu-array-cache-staging"
+APP_CONTACT = "newstapper@outlook.com"
+NDOV_AUTOCOLLECT = "false"
+
+[[ratelimits]]
+name = "API_RATE_LIMITER"
+namespace_id = "926110920001"
+
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+[[ratelimits]]
+name = "PLAN_RATE_LIMITER"
+namespace_id = "926110920002"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "DEVICE_API_RATE_LIMITER"
+namespace_id = "926110920003"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "DEVICE_PLAN_RATE_LIMITER"
+namespace_id = "926110920004"
+
+  [ratelimits.simple]
+  limit = 15
+  period = 60
+
+[[durable_objects.bindings]]
+name = "NDOV_FEEDS"
+class_name = "NdovFeedHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NdovFeedHub"]

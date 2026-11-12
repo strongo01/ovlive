@@ -42,6 +42,9 @@ const MAX_OPENOV_STOP_PLACE_SHARD_CACHE_ENTRIES = 4;
 const MAX_OPENOV_SERVICE_SIDECAR_CACHE_ENTRIES = 8;
 const openovServiceSidecarCache = new Map();
 
+// Reuse exact NS route resolutions within the same request.
+const preparedNsResolutionsByPlan = new WeakMap();
+
 export function getLruCacheValue(cache, key) {
   if (!cache.has(key)) return undefined;
   const value = cache.get(key);
@@ -2098,11 +2101,17 @@ export async function prepareNsTrainIdentities(plan, env) {
     NS_RAIL_MODES_FOR_IDENTITY.has(String(leg?.mode ?? "").toUpperCase())
   );
   const outcomes = [];
+  const preparedResolutions = new Map();
 
   for (const item of railCandidates) {
     let resolution;
     try {
       resolution = await resolveRealtimeTripForLeg(env, item);
+
+      // Cache successful definitive results; retry failed lookups later.
+      if (!resolution?.error) {
+        preparedResolutions.set(item.leg, resolution);
+      }
     } catch (error) {
       // Identity preparation is best-effort; one unavailable asset must not
       // stop OpenOV feed enrichment or the later full NDOV pass.
@@ -2132,6 +2141,8 @@ export async function prepareNsTrainIdentities(plan, env) {
     candidateLegCount: railCandidates.length,
     identityCount: plan.ndovRealtimeMeta.nsTrainIdentities.length,
   };
+
+  preparedNsResolutionsByPlan.set(plan, preparedResolutions);
   return plan;
 }
 
@@ -2139,6 +2150,9 @@ export async function prepareNsTrainIdentities(plan, env) {
 export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
   const includeIdentityDiagnostics = options?.includeIdentityDiagnostics === true;
   const candidates = legsWithTransitousId(plan);
+  const preparedNsResolutions = preparedNsResolutionsByPlan.get(plan);
+  let preparedNsResolutionReuseCount = 0;
+
   const baseMeta = {
     status: "unknown",
     source: "NDOV BISON KV17",
@@ -2230,6 +2244,7 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     routeCrosswalkMatchedLegCount,
     tripIdCrosswalkFallbackMatchedLegCount,
     routeCrosswalkError,
+    preparedNsResolutionReuseCount,
     // Full compact exact identities for NS; detailed diagnostic candidates
     // remain bounded to protect the public API payload.
     nsTrainIdentities: buildNsTrainIdentities(routeCrosswalkOutcomes),
@@ -2246,7 +2261,13 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
       return keyFor(a).localeCompare(keyFor(b));
     });
     for (const item of routeResolutionOrder) {
-      const resolution = await resolveRealtimeTripForLeg(env, item);
+      const preparedResolution = preparedNsResolutions?.get(item.leg);
+      const resolution = preparedResolution ??
+        await resolveRealtimeTripForLeg(env, item);
+
+      if (preparedResolution) {
+        preparedNsResolutionReuseCount += 1;
+      }
       if (resolution.generatedAt) routeCrosswalkGeneratedAt = resolution.generatedAt;
       if (resolution.error) routeCrosswalkError = resolution.error;
       routeCrosswalkOutcomes.push({
@@ -3049,6 +3070,7 @@ export async function applyNdovCancellationsToPlan(plan, env, options = {}) {
     routeCrosswalkMatchedLegCount,
     tripIdCrosswalkFallbackMatchedLegCount,
     routeCrosswalkError,
+    preparedNsResolutionReuseCount,
     nsTrainIdentities: buildNsTrainIdentities(routeCrosswalkOutcomes),
     routeCrosswalkOutcomes: routeCrosswalkOutcomes.slice(0, 12),
     matchedLegCount: matched,

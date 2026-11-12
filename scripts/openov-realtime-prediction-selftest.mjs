@@ -2,10 +2,69 @@ import assert from "node:assert/strict";
 import {
   summarizeRealtimeEvent,
   findPropagatedRealtimeEvent,
+  createRealtimeStopUpdateIndexCache,
 } from "../src/openov-realtime-prediction.js";
 import { findExactVehiclePositionForLeg, findRealtimeStopByScheduledEvent } from "../src/openov-realtime-prediction.js";
 
 const scheduled = "2026-10-13T19:57:00.000Z";
+
+// De halte-index moet normaliseren, dubbele haltes in oorspronkelijke
+// volgorde behouden en dezelfde index hergebruiken.
+{
+  const first = { stopId: "nl-OpenOV_401", marker: "first" };
+  const duplicate = { stopId: "401", marker: "duplicate" };
+  const other = { stopId: "402", marker: "other" };
+  const record = { stopUpdates: [first, other, duplicate] };
+
+  const stopIndexCache = createRealtimeStopUpdateIndexCache();
+
+  // Een gewone exacte lookup mag niet automatisch de volledige index bouwen.
+  let stopIdReadCount = 0;
+  const lazyRecord = {
+    stopUpdates: [
+      { get stopId() { stopIdReadCount++; return "nl-OpenOV_501"; } },
+      { get stopId() { stopIdReadCount++; return "502"; } },
+    ],
+  };
+
+  const lazyFirst = stopIndexCache.findById(lazyRecord, "501");
+  assert.equal(lazyFirst, lazyRecord.stopUpdates[0]);
+  assert.equal(stopIdReadCount, 1,
+    "an exact lookup must stop at the first matching stop without indexing every stop");
+
+  stopIndexCache.getIndex(lazyRecord);
+  assert.equal(stopIdReadCount, 3,
+    "the complete index is built when the fallback explicitly requests it");
+
+  assert.equal(stopIndexCache.findById(lazyRecord, "502"), lazyRecord.stopUpdates[1]);
+  assert.equal(stopIdReadCount, 3,
+    "exact lookups must reuse an already-built index without rescanning");
+
+  const index = stopIndexCache.getIndex(record);
+
+  assert.deepEqual(index, ["401", "402", "401"]);
+  assert.equal(index.indexOf("401"), 0,
+    "duplicate IDs must preserve the first position");
+  assert.equal(stopIndexCache.findById(record, "401"), first);
+  assert.equal(stopIndexCache.findById(record, "402"), other);
+  assert.equal(stopIndexCache.findById(record, "missing"), undefined);
+  assert.equal(
+    stopIndexCache.getIndex(record),
+    index,
+    "the same record must reuse its cached stop index",
+  );
+
+  const replacement = { stopId: "403", marker: "replacement" };
+  record.stopUpdates = [replacement];
+
+  const rebuiltIndex = stopIndexCache.getIndex(record);
+  assert.notEqual(rebuiltIndex, index,
+    "replacing the source stop array must rebuild the index");
+  assert.equal(stopIndexCache.findById(record, "403"), replacement);
+  assert.equal(stopIndexCache.findById(record, "401"), undefined);
+
+  console.log("PASS: OpenOV stop index preserves first duplicate, original order, missing IDs and cache invalidation");
+}
 
 // Geen halte-update mag niet veranderen in een realtimevoorspelling.
 assert.equal(

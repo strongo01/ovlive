@@ -22,6 +22,14 @@ export declare function summarizeRealtimeEvent(
   options?: OpenovRealtimeEventOptions,
 ): OpenovRealtimeEventSummary | null;
 
+export interface OpenovRealtimeStopUpdateIndexCache {
+  getIndex(record: any): readonly string[];
+  findById(record: any, stopId: string): any | undefined;
+}
+
+export declare function createRealtimeStopUpdateIndexCache():
+  OpenovRealtimeStopUpdateIndexCache;
+
 export declare function findRealtimeStopByScheduledEvent(
   record: any,
   kind: OpenovRealtimeEventKind,

@@ -3,6 +3,66 @@
 // De trip moet al exact gekoppeld zijn; deze helper zoekt uitsluitend
 // een unieke haltegebeurtenis met een expliciete bronvertraging waarvan
 // de gereconstrueerde geplande tijd zeer dicht bij de geplande reistijd ligt.
+// De cache leeft alleen tijdens één realtime-verwerking. Zo blijven
+// halte-indexen niet onnodig behouden doordat de feedcache records vasthoudt.
+export function createRealtimeStopUpdateIndexCache() {
+  const cache = new WeakMap();
+  const emptyStopUpdates = [];
+  const emptyStopIds = [];
+
+  const getIndex = (record) => {
+    if (!record || typeof record !== "object") return emptyStopIds;
+
+    const stopUpdates = Array.isArray(record.stopUpdates)
+      ? record.stopUpdates
+      : emptyStopUpdates;
+
+    const cached = cache.get(record);
+    if (cached?.stopUpdates === stopUpdates) {
+      return cached.normalizedStopIds;
+    }
+
+    // Normaliseer halte-ID's één keer per record en behoud de oorspronkelijke volgorde.
+    const normalizedStopIds = stopUpdates.map((stop) =>
+      String(stop?.stopId ?? "")
+        .replace(/^nl-OpenOV_/i, "")
+        .trim()
+    );
+
+    cache.set(record, { stopUpdates, normalizedStopIds });
+    return normalizedStopIds;
+  };
+
+  return {
+    getIndex,
+
+    findById(record, stopId) {
+      if (!stopId) return undefined;
+
+      const stopUpdates = Array.isArray(record?.stopUpdates)
+        ? record.stopUpdates
+        : emptyStopUpdates;
+
+      const cached = record && typeof record === "object"
+        ? cache.get(record)
+        : undefined;
+
+      // Hergebruik de genormaliseerde array als de bronarray onveranderd is.
+      if (cached?.stopUpdates === stopUpdates) {
+        const index = cached.normalizedStopIds.indexOf(stopId);
+        return index < 0 ? undefined : stopUpdates[index];
+      }
+
+      // Exacte matches zonder eerdere fallback blijven een korte scan gebruiken.
+      return stopUpdates.find((stop) =>
+        String(stop?.stopId ?? "")
+          .replace(/^nl-OpenOV_/i, "")
+          .trim() === stopId
+      );
+    }
+  };
+}
+
 export function findRealtimeStopByScheduledEvent(record, kind, scheduledValue) {
   let plannedMs = Number.NaN;
 

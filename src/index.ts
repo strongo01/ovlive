@@ -1,5 +1,6 @@
 import {
   findExactVehiclePositionForLeg,
+  createRealtimeStopUpdateIndexCache,
   findRealtimeStopByScheduledEvent,
   summarizeRealtimeEvent,
   findPropagatedRealtimeEvent,
@@ -2028,7 +2029,11 @@ function vehiclePositionCandidatesForLeg(
   return key ? (index.get(key) ?? []) : [];
 }
 
-function matchOpenovRealtime(leg: any, indexes: OpenovRealtimeMatcherIndexes) {
+function matchOpenovRealtime(
+  leg: any,
+  indexes: OpenovRealtimeMatcherIndexes,
+  stopIndexCache: ReturnType<typeof createRealtimeStopUpdateIndexCache>
+) {
   const rawRouteId = String(leg?.routeId ?? leg?.route?.id ?? "");
 
   if (!/^nl-OpenOV_/i.test(rawRouteId)) {
@@ -2098,19 +2103,14 @@ function matchOpenovRealtime(leg: any, indexes: OpenovRealtimeMatcherIndexes) {
       return false;
     }
 
-    const stopIds = (record.stopUpdates ?? []).map(
-      (stop: any) => normalizeOpenovId(stop.stopId)
-    );
-
+    const stopIds = stopIndexCache.getIndex(record);
     const fromIndex = stopIds.indexOf(fromId);
     const toIndex = toId ? stopIds.indexOf(toId) : -1;
 
     if (fromIndex < 0) return false;
     if (toIndex >= 0 && toIndex <= fromIndex) return false;
 
-    const boardingUpdate = (record.stopUpdates ?? []).find(
-      (stop: any) => normalizeOpenovId(stop.stopId) === fromId
-    );
+    const boardingUpdate = record.stopUpdates?.[fromIndex];
 
     if (!boardingUpdate) return false;
 
@@ -2165,15 +2165,14 @@ function matchOpenovRealtime(leg: any, indexes: OpenovRealtimeMatcherIndexes) {
           relationship.includes("CANCEL") ||
           relationship.includes("DELETED");
 
-        const stopUpdates = record.stopUpdates ?? [];
+        const stopUpdates = Array.isArray(record.stopUpdates)
+          ? record.stopUpdates
+          : [];
 
         // Zonder halte-updates accepteren we alleen een expliciete annulering.
         if (stopUpdates.length === 0) return cancelled;
 
-        const stopIds = stopUpdates.map(
-          (stop: any) => normalizeOpenovId(stop.stopId)
-        );
-
+        const stopIds = stopIndexCache.getIndex(record);
         const fromIndex = fromId ? stopIds.indexOf(fromId) : -1;
         const toIndex = toId ? stopIds.indexOf(toId) : -1;
 
@@ -2206,12 +2205,12 @@ function matchOpenovRealtime(leg: any, indexes: OpenovRealtimeMatcherIndexes) {
   };
 }
 
-function findRealtimeStop(record: any, stopId: string) {
-  if (!stopId) return undefined;
-
-  return (record.stopUpdates ?? []).find(
-    (stop: any) => normalizeOpenovId(stop.stopId) === stopId
-  );
+function findRealtimeStop(
+  record: any,
+  stopId: string,
+  stopIndexCache: ReturnType<typeof createRealtimeStopUpdateIndexCache>
+) {
+  return stopIndexCache.findById(record, stopId);
 }
 
 function alertIsActive(alert: any, nowSeconds: number): boolean {
@@ -2359,6 +2358,8 @@ async function enrichTransitousPlan(
 
   if (openovLegs.length === 0) return plan;
 
+  const stopUpdateIndexCache = createRealtimeStopUpdateIndexCache();
+
   // Haal alleen de ritfeeds op die passen bij de OpenOV-modi in de
   // gevonden reis. Trein-only routes hoeven geen grote bus/tram-ritfeed en
   // voertuigposities te decoderen; de kaart vraagt posities apart op.
@@ -2443,7 +2444,11 @@ async function enrichTransitousPlan(
     const identity = parseOpenovTripId(leg.tripId);
     if (identity.tripId) relevantTrips.add(identity.tripId);
 
-    const result = matchOpenovRealtime(leg, realtimeMatcherIndexes);
+    const result = matchOpenovRealtime(
+      leg,
+      realtimeMatcherIndexes,
+      stopUpdateIndexCache
+    );
     const vehicleObservation = findExactVehiclePositionForLeg(
       leg,
       vehiclePositionCandidatesForLeg(leg, vehiclePositionsByTripRoute)
@@ -2560,8 +2565,8 @@ async function enrichTransitousPlan(
     const scheduledArrivalValue =
       leg.to?.scheduledArrival ?? leg.scheduledEndTime ?? leg.endTime;
 
-    const exactFromUpdate = findRealtimeStop(record, fromId);
-    const exactToUpdate = findRealtimeStop(record, toId);
+    const exactFromUpdate = findRealtimeStop(record, fromId, stopUpdateIndexCache);
+    const exactToUpdate = findRealtimeStop(record, toId, stopUpdateIndexCache);
 
     const fromStopMatch = exactFromUpdate
       ? { stop: exactFromUpdate, method: "exact_stop_id", deltaSeconds: 0 }

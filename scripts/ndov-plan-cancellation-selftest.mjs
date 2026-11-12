@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { applyNdovCancellationsToPlan, buildNsTrainIdentities, selectCrosswalkShardNumbers } from '../src/ndov-plan-cancellation.js';
+import { applyNdovCancellationsToPlan, buildNsTrainIdentities, prepareNsTrainIdentities, selectCrosswalkShardNumbers  } from '../src/ndov-plan-cancellation.js';
 
 const planCancellationSource = readFileSync(new URL('../src/ndov-plan-cancellation.js', import.meta.url), 'utf8');
 const ndovStreamHubSource = readFileSync(new URL('../src/ndov-stream-hub.js', import.meta.url), 'utf8');
@@ -326,6 +326,58 @@ const cancellation = {
   });
   assert.equal(plan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 1);
   console.log('PASS: NS-ritidentiteit blijft beschikbaar bij verouderde BISON-feed');
+}
+
+// Exact NS route resolutions must be reused by the subsequent NDOV pass.
+{
+  const plan = { itineraries: [{ legs: [{
+    mode: 'RAIL',
+    routeId: 'nl-OpenOV_146888',
+    tripId: '20261014_11:20_nl-OpenOV_123456789',
+    tripFrom: {
+      stopId: 'start-stop',
+      scheduledDeparture: '11:20:00',
+    },
+    tripTo: {
+      stopId: 'end-stop',
+      scheduledArrival: '12:00:00',
+    },
+    from: {
+      stopId: 'mid-from',
+      scheduledDeparture: '11:30:00',
+    },
+    to: {
+      stopId: 'mid-to',
+      scheduledArrival: '11:50:00',
+    },
+  }] }] };
+  const env = createEnv();
+
+  const preparedPlan = await prepareNsTrainIdentities(plan, env);
+
+  assert.equal(preparedPlan, plan,
+    'NS identity preparation must preserve the original plan object');
+  assert.deepEqual(plan.ndovRealtimeMeta.nsTrainIdentities, [{
+    tripId: '20261014_11:20_nl-OpenOV_123456789',
+    trainNumber: '661',
+  }], 'preparation must resolve the exact NS train identity');
+
+  await applyNdovCancellationsToPlan(plan, env);
+
+  assert.equal(plan.ndovRealtimeMeta.preparedNsResolutionReuseCount, 1,
+    'NDOV must reuse the prepared resolution instead of resolving this NS leg again');
+  assert.equal(plan.ndovRealtimeMeta.routeCrosswalkMatchedLegCount, 1);
+  assert.equal(plan.ndovRealtimeMeta.routeCrosswalkOutcomes[0].reason,
+    'exact_openov_trip_id_match');
+  assert.deepEqual(
+    plan.ndovRealtimeMeta.routeCrosswalkOutcomes[0].parsedIdentity,
+    { owner: 'IFF', line: '1000', journey: '661' },
+    'reusing the prepared result must preserve the exact trip identity',
+  );
+  assert.equal(plan.itineraries[0].legs[0].cancelled, undefined,
+    'a route-resolution optimization must not create a cancellation');
+
+  console.log('PASS: NS route resolution is reused by NDOV without changing exact trip identity');
 }
 
 // A missing route shard must be shown on that leg, not erase other successful matches.
